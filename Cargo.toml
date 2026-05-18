@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto",
+    "crates/storage",
+    "crates/raft",
+    "crates/server",
+    "crates/migrate",
+    "crates/ctl",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+authors = ["fastetcd contributors"]
+repository = "https://github.com/glennswest/fastetcd"
+homepage = "https://github.com/glennswest/fastetcd"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# gRPC
+tonic = { version = "0.12", features = ["transport", "tls"] }
+tonic-build = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Storage
+redb = "2.2"
+
+# Consensus
+openraft = { version = "0.9", features = ["serde"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1.3"
+
+# Error / utility
+thiserror = "2"
+anyhow = "1"
+bytes = "1.7"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Hashing / crypto
+sha2 = "0.10"
+
+# Internal crates
+fastetcd-proto = { path = "crates/proto" }
+fastetcd-storage = { path = "crates/storage" }
+fastetcd-raft = { path = "crates/raft" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+debug = "line-tables-only"
+strip = "debuginfo"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

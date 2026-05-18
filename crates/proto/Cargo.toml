@@ -1,0 +1,20 @@
+[package]
+name = "fastetcd-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generated etcd v3 gRPC stubs (tonic + prost) for fastetcd."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

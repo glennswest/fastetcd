@@ -1,0 +1,22 @@
+[package]
+name = "fastetcd-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "MVCC state machine for fastetcd, backed by redb. Applied behind Raft."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+redb.workspace = true
+serde.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+sha2.workspace = true
