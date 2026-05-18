@@ -4,16 +4,16 @@ Project-specific context. Cross-project rules live in `../CLAUDE.md`.
 
 ## Project summary
 
-Rust replacement for etcd v3. Wire-compatible gRPC. Multi-node Raft from day
-one. Importer for existing etcd BoltDB data. Targets realtime / low-overhead
-workloads (motivated by `lean-sno`).
+Rust implementation of the etcd v3 wire protocol. Wire-compatible gRPC.
+Multi-node Raft from day one. Importer for existing etcd BoltDB data.
+Focused on low resource overhead and predictable latency.
 
 ## Version
 
 **`0.0.0`** — pre-alpha, no public surface yet.
 
 Version locations (keep in sync):
-- `Cargo.toml` workspace `[workspace.package] version` (once workspace exists)
+- `Cargo.toml` workspace `[workspace.package] version`
 - This file (the line above)
 - Tags `vX.Y.Z`
 
@@ -26,7 +26,7 @@ Version locations (keep in sync):
 - **Async runtime**: `tokio` (multi-threaded).
 - **Logging/tracing**: `tracing` + `tracing-subscriber`.
 
-## Repo layout (target)
+## Repo layout
 
 ```
 crates/
@@ -45,7 +45,7 @@ benches/
 
 Tracked live in the Claude task system. Snapshot of the order:
 
-1. Project scaffolding (this commit)
+1. Project scaffolding (done)
 2. Cargo workspace + crate skeletons
 3. Vendor etcd protos, wire up tonic codegen
 4. MVCC state machine over redb
@@ -60,18 +60,13 @@ Tracked live in the Claude task system. Snapshot of the order:
 
 ## Constraints & rules
 
-- **Wire compatibility is the bar.** If unmodified `kube-apiserver` and
-  `etcdctl` don't work, the feature isn't done.
+- **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
+  work, the feature isn't done.
 - **No v2 HTTP API.** Deprecated upstream; not in scope.
-- **Linearizable reads by default** (read-index), serializable opt-in. Match
-  etcd's semantics, not "close enough."
+- **Linearizable reads by default** (read-index), serializable opt-in.
+  Match etcd's semantics, not "close enough."
 - **All writes go through Raft.** No direct state-machine writes from gRPC
-  handlers, even for "internal" things like leases — those go through Raft
-  too so they survive failover.
+  handlers, even for "internal" things like lease expiry — those go
+  through Raft too so they survive failover.
 - **Compaction-correctness is non-negotiable.** Revision history truncation
   must coordinate with watchers and raft log compaction.
-
-## Sibling/motivating projects
-
-- `../lean-sno` — the analysis that motivates this rewrite. See
-  `lean-sno/docs/03-control-plane-tax.md` for the per-process cost table.

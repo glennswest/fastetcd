@@ -4,19 +4,19 @@ Initial architectural call for fastetcd. Living document; revise as we learn.
 
 ## Position
 
-fastetcd is a **drop-in etcd v3 replacement** written in Rust. The bar is
-wire-compatibility with unmodified `kube-apiserver` and `etcdctl`. We are
-not building "an etcd-like KV store" — we are building etcd, but in Rust,
-with a smaller resident set and lower tail latency.
+fastetcd is a **Rust implementation of the etcd v3 wire protocol**. The bar
+is wire-compatibility with unmodified etcd v3 clients. We are not building
+"an etcd-like KV store" — we are building etcd, but in Rust, with a smaller
+resident set and lower tail latency.
 
-## Why a rewrite is justified
+## Why this is worth building
 
-`lean-sno/docs/03-control-plane-tax.md` puts etcd at 300–800 MB RSS on a
-control-plane-on-the-same-box SNO deployment, contributing fsync stalls
-and GC-induced jitter that propagate into pod-start tail latency. The
-wire contract is stable and well-specified. The internal architecture
-(BoltDB MVCC + raft + grpc) maps cleanly to modern Rust crates. The cost
-of the rewrite is bounded by the API surface, which is large but finite.
+The etcd v3 wire contract is stable, well-specified, and broadly deployed,
+so there is a clearly defined compatibility target. The internal
+architecture (BoltDB MVCC + Raft + gRPC) maps cleanly onto modern Rust
+crates (`redb`, `openraft`, `tonic`). A Rust reimplementation can deliver
+a smaller RSS floor and tighter tail latency, with no GC-induced jitter
+on the apply path, without requiring any client to change.
 
 ## Non-negotiables
 
@@ -46,7 +46,7 @@ compaction tuning surface), `sled` (mature but pre-1.0 forever, less
 predictable), custom WAL+B-tree (out of scope to build from scratch).
 
 Re-evaluate redb if benchmarks show write amplification or compaction
-pauses that hurt p99 under apiserver-shaped load.
+pauses that hurt p99 under sustained load.
 
 ### Consensus: `openraft`
 
@@ -60,9 +60,8 @@ production system. We integrate by:
   entries.
 - Implementing `RaftNetwork` over our internal gRPC peer transport.
 
-**Alternatives considered:** `raft-rs` (TiKV's port of etcd's raft;
-synchronous, callback-driven, harder to wire to a tokio gRPC server),
-rolling our own (out of scope).
+**Alternatives considered:** `raft-rs` (synchronous, callback-driven,
+harder to wire to a tokio gRPC server), rolling our own (out of scope).
 
 ### gRPC: `tonic` + `prost`
 
@@ -103,9 +102,9 @@ crates/
 | Maintenance   | Alarm, Status, Defragment, Hash, HashKV, Snapshot, MoveLeader  |
 | Auth          | (Phase 2) AuthEnable/Disable, User*, Role*, Authenticate       |
 
-Auth is deferred until KV/Watch/Lease/Cluster/Maintenance are solid;
-kube-apiserver doesn't require etcd auth when TLS-client-cert auth is in
-use, which is the common deployment.
+Auth is deferred until KV/Watch/Lease/Cluster/Maintenance are solid; the
+common deployment pattern uses TLS client-cert authentication outside
+the etcd Auth subsystem.
 
 ## Read path (linearizable)
 
@@ -143,8 +142,8 @@ buckets are `key` (MVCC), `lease`, `auth`, `meta`. We:
   Default to in-process to preserve etcd's `--cert-file/--key-file` flag
   shape.
 - Auth: defer or include in v0.1? Lean defer.
-- Defragment semantics on redb: redb has compact-in-place, but is it
-  online? Verify before claiming Maintenance.Defragment support.
+- Defragment semantics on redb: redb has compact-in-place — verify it is
+  online before claiming `Maintenance.Defragment` support.
 - Watch event ordering across compaction boundaries — etcd has specific
   guarantees for `ErrCompacted`; match exactly.
 
@@ -157,7 +156,8 @@ buckets are `key` (MVCC), `lease`, `auth`, `meta`. We:
 - MemberList + Status (real values).
 - Snapshot RPC (full state dump).
 - Migration tool for etcd snapshots.
-- Smoke-tested against `etcdctl` and against `kube-apiserver` boot.
+- Smoke-tested against `etcdctl` and at least one third-party etcd v3
+  client.
 
 What's deferred to v0.2+: Auth, MoveLeader, Defragment, Downgrade,
 Alarm-on-disk-quota.
