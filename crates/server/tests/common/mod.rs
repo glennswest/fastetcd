@@ -12,12 +12,14 @@ use tokio::time::sleep;
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
+use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_raft::log_store::MemLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::maintenance::MaintenanceService;
+use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
@@ -148,7 +150,8 @@ pub async fn start_test_server_full() -> TestServerHandles {
         vec!["http://test-peer:0".to_string()],
         vec!["http://test-client:0".to_string()],
     );
-    let maintenance = MaintenanceService::new(state);
+    let maintenance = MaintenanceService::new(state.clone());
+    let watch = WatchService::new(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -159,6 +162,7 @@ pub async fn start_test_server_full() -> TestServerHandles {
             .add_service(KvServer::new(kv))
             .add_service(ClusterServer::new(cluster))
             .add_service(MaintenanceServer::new(maintenance))
+            .add_service(WatchServer::new(watch))
             .serve_with_incoming(incoming)
             .await
             .unwrap();

@@ -18,10 +18,12 @@
 //! Compaction and `Txn` semantics are implemented in the next module
 //! commit (tracked as task #17).
 
+pub mod event;
 pub mod record;
 pub mod revision;
 pub mod store;
 
+pub use event::{EventBatch, EventKind, MvccEvent};
 pub use record::{Generation, KeyIndex, KvRecord};
 pub use revision::Revision;
 pub use store::{

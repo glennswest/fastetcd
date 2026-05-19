@@ -15,6 +15,22 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(server):** Implement the Watch gRPC service — Phase 1.
+  Bidirectional stream multiplexing many watchers per connection.
+  `WatchCreate` (with key/range, filters, prev_kv flag,
+  progress_notify), `WatchCancel`, and `WatchProgressRequest`
+  supported. Live event fan-out backed by a new
+  `tokio::sync::broadcast` channel on `MvccStore`: every committed
+  apply/txn emits an `EventBatch` carrying `Put` / `Delete`
+  `MvccEvent`s with optional `prev_kv`. Per-stream tasks: one
+  forwards filtered events; one ticks `ProgressNotify` every 10s
+  for watchers that enabled it. Watchers created at
+  `start_revision < compact_rev` receive a `canceled` response with
+  `compact_revision` set, matching etcd. 5 new gRPC tests pass.
+- **Known gap:** historical replay (watch starting at a past
+  `start_revision <= current`) is not yet implemented; deferred to
+  the next watch commit. Workaround: clients can `Range` at the
+  desired revision then watch from `start_revision = 0`.
 - **feat(server):** Implement the Cluster + Maintenance gRPC services.
   Cluster: `MemberList` returns self (one entry, with `peer_urls` /
   `client_urls` from the CLI flags); `MemberAdd` / `MemberRemove` /

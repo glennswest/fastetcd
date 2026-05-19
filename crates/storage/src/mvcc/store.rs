@@ -33,10 +33,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 
+use super::event::{EventBatch, EventKind, MvccEvent};
 use super::record::{KeyIndex, KvRecord};
 use super::revision::{make_kv_key, Revision};
 
@@ -209,6 +210,11 @@ struct Inner {
     /// contract but exposing a clonable handle still requires interior
     /// mutability. Read methods do not contend on this lock.
     write_state: Mutex<WriteState>,
+    /// Broadcast channel for events emitted by successful commits.
+    /// Watch subscribers receive every committed batch in order. Slow
+    /// subscribers may receive `Lagged`; they should treat that as a
+    /// "force re-establish from a fresh start_revision" signal.
+    event_tx: broadcast::Sender<EventBatch>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -236,6 +242,7 @@ impl MvccStore {
             engine.commit(b, WriteOptions::default()).await?;
         }
 
+        let (event_tx, _) = broadcast::channel(1024);
         Ok(Self {
             inner: Arc::new(Inner {
                 engine,
@@ -243,8 +250,17 @@ impl MvccStore {
                     current_rev: current,
                     compact_rev: compact,
                 }),
+                event_tx,
             }),
         })
+    }
+
+    /// Subscribe to the post-commit event stream. Each `EventBatch`
+    /// corresponds to one successful `apply` / `txn` call that
+    /// produced mutations; reads and no-op applies do not produce
+    /// batches.
+    pub fn subscribe(&self) -> broadcast::Receiver<EventBatch> {
+        self.inner.event_tx.subscribe()
     }
 
     pub fn engine(&self) -> &Arc<dyn KvStore> {
@@ -571,7 +587,13 @@ impl MvccStore {
                     ctx.batch.put(TABLE_IDX, key, &idx_bytes);
 
                     ctx.idx_cache.insert(key.clone(), idx);
-                    ctx.latest_record_cache.insert(key.clone(), record);
+                    ctx.latest_record_cache.insert(key.clone(), record.clone());
+
+                    ctx.pending_events.push(MvccEvent {
+                        kind: EventKind::Put,
+                        kv: record,
+                        prev_kv: prev.clone(),
+                    });
 
                     results.push(MutationResult {
                         n: 1,
@@ -603,7 +625,10 @@ impl MvccStore {
                             live_key.as_slice(),
                         )
                         .await?;
-                        let prev = if *prev_kv && idx.is_live() {
+                        // Always load the prev record (regardless of
+                        // the request's prev_kv flag) so the broadcast
+                        // event carries it for watchers that want it.
+                        let prev = if idx.is_live() {
                             load_latest_record(
                                 snap,
                                 &ctx.latest_record_cache,
@@ -636,10 +661,19 @@ impl MvccStore {
                         ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
                         ctx.idx_cache.insert(live_key.clone(), idx);
                         ctx.latest_record_cache
-                            .insert(live_key.clone(), tombstone);
+                            .insert(live_key.clone(), tombstone.clone());
+
+                        ctx.pending_events.push(MvccEvent {
+                            kind: EventKind::Delete,
+                            kv: tombstone,
+                            prev_kv: prev.clone(),
+                        });
+
                         result.n += 1;
-                        if let Some(p) = prev {
-                            result.prev_kvs.push(p);
+                        if *prev_kv {
+                            if let Some(p) = prev {
+                                result.prev_kvs.push(p);
+                            }
                         }
                     }
                     if result.n > 0 {
@@ -664,6 +698,15 @@ impl MvccStore {
             .commit(ctx.batch, WriteOptions::default())
             .await?;
         state.current_rev = new_rev;
+        // Broadcast the event batch. Send error here means no
+        // subscribers — fine, just drop on the floor.
+        if !ctx.pending_events.is_empty() {
+            let batch = EventBatch {
+                revision: new_rev,
+                events: ctx.pending_events,
+            };
+            let _ = self.inner.event_tx.send(batch);
+        }
         Ok(())
     }
 
@@ -868,6 +911,9 @@ struct ApplyContext {
     batch: WriteBatch,
     idx_cache: std::collections::HashMap<Vec<u8>, KeyIndex>,
     latest_record_cache: std::collections::HashMap<Vec<u8>, KvRecord>,
+    /// Events accumulated during this apply, to be broadcast after a
+    /// successful commit. Order matches the order ops produced them.
+    pending_events: Vec<MvccEvent>,
 }
 
 fn implicit_zero_record(key: &[u8]) -> KvRecord {

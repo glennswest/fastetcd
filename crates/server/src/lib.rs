@@ -14,5 +14,6 @@ pub mod conv;
 pub mod kv;
 pub mod maintenance;
 pub mod state;
+pub mod watch;
 
 pub use state::ServerState;

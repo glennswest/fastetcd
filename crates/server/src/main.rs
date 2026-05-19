@@ -9,12 +9,14 @@ use tonic::transport::Server;
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
+use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_raft::log_store::MemLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::maintenance::MaintenanceService;
+use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
@@ -152,12 +154,14 @@ async fn main() -> anyhow::Result<()> {
         peer_urls,
         client_urls,
     );
-    let maintenance = MaintenanceService::new(server_state);
+    let maintenance = MaintenanceService::new(server_state.clone());
+    let watch = WatchService::new(server_state);
 
     Server::builder()
         .add_service(KvServer::new(kv))
         .add_service(ClusterServer::new(cluster))
         .add_service(MaintenanceServer::new(maintenance))
+        .add_service(WatchServer::new(watch))
         .serve(listen)
         .await?;
 
