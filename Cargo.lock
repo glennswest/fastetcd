@@ -870,6 +870,7 @@ dependencies = [
  "clap",
  "fastetcd-proto",
  "tokio",
+ "tokio-stream",
  "tonic 0.12.3",
  "tracing",
  "tracing-subscriber",

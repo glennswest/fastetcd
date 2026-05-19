@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(ctl):** `fastetcd-ctl` is now a real (small) client.
+  Subcommands: `put`, `get [--prefix]`, `del [--prefix]`,
+  `snapshot-save <path>` (streams `Maintenance.Snapshot` to a local
+  file). Useful for smoke-testing fastetcd without the Go
+  toolchain.
+- **docs:** README rewrite for v0.4.0. Updated architecture
+  diagram includes the AuthInterceptor + per-key authz; quick
+  start uses both `etcdctl` and `fastetcd-ctl`; testing section
+  cross-references `docs/02-testing.md`'s three rings; deployment
+  section pointers at `docs/03-deploy.md`.
 - **feat(server):** gRPC health service. Adds the standard
   `grpc.health.v1.Health` to the client port so service meshes
   and k8s gRPC probes work out of the box. All fastetcd services
