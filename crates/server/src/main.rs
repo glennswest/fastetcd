@@ -11,7 +11,7 @@ use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
 use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
-use fastetcd_raft::log_store::MemLogStore;
+use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
@@ -103,10 +103,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     std::fs::create_dir_all(&args.data_dir)?;
-    let engine = Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
-    let mvcc = MvccStore::open(engine).await?;
+    // Shared engine for both MVCC state and Raft log — single file
+    // makes ops (snapshot, backup) trivially correct.
+    let engine: Arc<dyn fastetcd_storage::KvStore> =
+        Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
+    let mvcc = MvccStore::open(engine.clone()).await?;
     let sm = FastetcdStateMachine::new(mvcc);
-    let log = MemLogStore::new();
+    let log = KvLogStore::new(engine);
 
     let config = Arc::new(
         Config {
@@ -136,13 +139,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("raft initialize: {e} — assuming already initialized");
     }
 
-    let server_state = Arc::new(ServerState::new(
-        raft,
-        sm,
-        args.cluster_id,
-        node_id,
-        log,
-    ));
+    let server_state = Arc::new(ServerState::new(raft, sm, args.cluster_id, node_id));
 
     let listen: std::net::SocketAddr = args.listen_client_url.parse()?;
     let peer_urls = vec![format!("http://{}", args.listen_peer_url)];

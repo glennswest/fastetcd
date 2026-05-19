@@ -3,7 +3,6 @@
 use openraft::Raft;
 
 use fastetcd_raft::{FastetcdStateMachine, TypeConfig};
-use fastetcd_raft::log_store::MemLogStore;
 
 /// Bundle of handles every gRPC service needs: the Raft node (for
 /// proposing writes), the state machine (for direct reads and
@@ -15,10 +14,6 @@ pub struct ServerState {
     pub sm: FastetcdStateMachine,
     pub cluster_id: u64,
     pub member_id: u64,
-    // Held to keep the in-memory log alive for as long as the server
-    // runs (it's already inside the Raft, but we keep a clone to
-    // expose for diagnostics later).
-    pub _log: MemLogStore,
 }
 
 impl ServerState {
@@ -27,14 +22,12 @@ impl ServerState {
         sm: FastetcdStateMachine,
         cluster_id: u64,
         member_id: u64,
-        log: MemLogStore,
     ) -> Self {
         Self {
             raft,
             sm,
             cluster_id,
             member_id,
-            _log: log,
         }
     }
 

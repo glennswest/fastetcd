@@ -15,6 +15,17 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(raft):** `KvLogStore` — `RaftLogStorage` implementation over
+  the engine-agnostic `KvStore`. Tables: `raft_log` (index_be -> Entry)
+  and `raft_meta` (vote, committed, last_purged_log_id). Append /
+  truncate / purge / save_vote / read_vote / save_committed all flow
+  through the same `WriteOptions { sync: true }` semantics the MVCC
+  layer uses, so log durability matches state-machine durability.
+  The server binary and the test harness now share **one engine
+  instance** between MVCC state and Raft log — a single redb file is
+  the entire on-disk surface, making operational backups (copy one
+  file) trivially correct. The old in-memory `MemLogStore` remains in
+  the crate for unit tests but is no longer used at the binary level.
 - **feat(server):** Watch historical replay. Watchers created with
   `start_revision > 0` now receive a backfill of every event in
   `(start_revision - 1, current_revision]` for their key range,

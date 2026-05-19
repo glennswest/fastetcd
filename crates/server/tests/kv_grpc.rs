@@ -13,7 +13,7 @@ use tonic::transport::Channel;
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::kv_client::KvClient;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
-use fastetcd_raft::log_store::MemLogStore;
+use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::kv::KvService;
@@ -110,10 +110,10 @@ async fn wait_for_leader(raft: &Raft<TypeConfig>) {
 async fn start_test_server() -> (KvClient<Channel>, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("kv.redb");
-    let engine = Arc::new(RedbEngine::open(&path).unwrap());
-    let mvcc = MvccStore::open(engine).await.unwrap();
+    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
+    let mvcc = MvccStore::open(engine.clone()).await.unwrap();
     let sm = FastetcdStateMachine::new(mvcc);
-    let log = MemLogStore::new();
+    let log = KvLogStore::new(engine);
     let config = Arc::new(
         Config {
             heartbeat_interval: 100,
@@ -132,7 +132,8 @@ async fn start_test_server() -> (KvClient<Channel>, tempfile::TempDir) {
     raft.initialize(members).await.unwrap();
     wait_for_leader(&raft).await;
 
-    let state = Arc::new(ServerState::new(raft, sm, 7, 1, log));
+    let state = Arc::new(ServerState::new(raft, sm, 7, 1));
+    let _ = log;
     let kv = KvService::new(state);
 
     // Bind to an ephemeral port (async — tokio doesn't like

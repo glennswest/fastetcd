@@ -6,6 +6,7 @@
 //! - [`log_store`] — `RaftLogStorage` impl over an in-memory map for
 //!   now; a KvStore-backed impl lands in task #14.
 
+pub mod kv_log_store;
 pub mod log_store;
 pub mod state_machine;
 pub mod types;
