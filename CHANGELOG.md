@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+<!-- New unreleased changes go here -->
+
+## [v0.4.0] — 2026-05-19
+
+Production-grade hardening since v0.3.0: TLS, full Auth enforcement
+(Phase 2 + Phase 3), Prometheus metrics, GitHub Actions CI,
+distroless container, deployment guide.
+
+### Added
+
+- **TLS** for the client and peer gRPC listeners
+  (`--cert-file` / `--key-file` / `--trusted-ca-file` /
+  `--client-cert-auth`, matching etcd's flag shape).
+- **Auth Phase 2** — per-request token enforcement.
+  `AuthInterceptor` wraps every non-Auth gRPC service via
+  `with_interceptor`; when auth is enabled, requests must carry a
+  valid `token` metadata field. `AuthState` is now backed by
+  `std::sync` primitives so the sync tonic interceptor can read
+  live state. 4 enforcement tests.
+- **Auth Phase 3** — per-key permission enforcement. New `authz`
+  module checks every KV request against the authenticated user's
+  roles + permissions. `Range` requires Read; `Put` /
+  `DeleteRange` require Write. `root` user / `root` role bypass.
+  3 enforcement tests.
+- **Prometheus `/metrics`** endpoint on a side port
+  (`--listen-metrics-url`, default `127.0.0.1:2381`). Exports
+  etcd-compatible names: `etcd_server_has_leader`,
+  `etcd_server_leader_changes_seen_total`,
+  `etcd_mvcc_db_total_size_in_bytes`,
+  `etcd_debugging_mvcc_current_revision`,
+  `etcd_debugging_mvcc_compact_revision`. Lazy-refreshed on each
+  scrape; no background task.
+- **GitHub Actions CI** at `.github/workflows/ci.yml`. Matrix:
+  Linux + macOS × default features, plus Linux-only `wal-engine`
+  + `iouring` jobs. On tag push: builds release Linux binary and
+  pushes a container image to `ghcr.io/glennswest/fastetcd`.
+- **Container** images: `Dockerfile` (build-from-source) and
+  `Dockerfile.ci` (consume pre-built artifact). Distroless
+  runtime; runs as `nonroot`; exposes 2379 (client) + 2380 (peer)
+  + 2381 (metrics).
+- **`docs/03-deploy.md`** — production deployment guide covering
+  container, systemd unit, TLS, Auth bootstrap, multi-node config,
+  backups, and migration from upstream etcd.
+
+### Remaining gap
+
+- **openraft 0.10 upgrade** (waiting on its stable release) for
+  real `MoveLeader.transfer_leader()`.
+
+## [v0.3.0] — 2026-05-19
+
 ### 2026-05-19
 - **feat(server):** Prometheus `/metrics` endpoint on a side port
   (`--listen-metrics-url`, default `127.0.0.1:2381`). Exports

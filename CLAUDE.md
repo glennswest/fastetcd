@@ -10,12 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.3.0`** — adds the full Auth gRPC surface (Phase 1: User/Role
-management + Authenticate with argon2), real `Maintenance.Defragment`
-backed by engine-level compaction, and a real `IouringEngine` on
-Linux backed by `tokio-uring`. The only remaining v0.1.0-era gap
-is the openraft 0.10 upgrade for real `MoveLeader`, deferred until
-0.10 stabilizes.
+**`0.4.0`** — production-grade additions: TLS for client+peer,
+Auth Phase 2 (per-request token enforcement) + Phase 3 (per-key
+permissions), Prometheus `/metrics`, GitHub Actions CI, distroless
+container image, and a deployment guide. Only remaining gap from
+the v0.1.0 era is the openraft 0.10 upgrade (waiting on its stable
+release) for real `MoveLeader`.
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`
