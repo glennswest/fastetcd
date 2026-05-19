@@ -148,12 +148,18 @@ pub async fn start_test_server_full() -> TestServerHandles {
     let _ = log;
 
     let kv = KvService::new(state.clone());
-    let cluster = ClusterService::new(
-        state.clone(),
+    let peers = fastetcd_raft::network::empty_peers();
+    let directory: fastetcd_server::cluster::MemberDirectory =
+        std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
+    ClusterService::seed_self(
+        &directory,
+        1,
         "test-node".to_string(),
         vec!["http://test-peer:0".to_string()],
         vec!["http://test-client:0".to_string()],
-    );
+    )
+    .await;
+    let cluster = ClusterService::new(state.clone(), 1, peers, directory);
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state.clone());

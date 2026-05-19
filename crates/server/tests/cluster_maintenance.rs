@@ -119,16 +119,30 @@ async fn snapshot_streams_bytes() {
 }
 
 #[tokio::test]
-async fn member_add_returns_unimplemented() {
+async fn member_add_as_learner_appears_in_member_list() {
+    // The test harness is single-node with no live peer reachable at
+    // the URL we pass — so a voting MemberAdd would block on
+    // change_membership waiting for the new voter to catch up. As a
+    // learner, the add proceeds without requiring liveness.
     let h = start_test_server_full().await;
     let mut cluster = ClusterClient::connect(h.endpoint.clone()).await.unwrap();
-    let err = cluster
+    let resp = cluster
         .member_add(pb::MemberAddRequest {
-            peer_ur_ls: vec!["http://peer:0".to_string()],
-            is_learner: false,
+            peer_ur_ls: vec!["http://127.0.0.1:65535".to_string()],
+            is_learner: true,
         })
         .await
-        .err()
-        .expect("should be unimplemented");
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect("MemberAdd should succeed")
+        .into_inner();
+    let added = resp.member.expect("member field set");
+    assert!(added.is_learner);
+    assert_eq!(added.peer_ur_ls, vec!["http://127.0.0.1:65535".to_string()]);
+
+    let listed = cluster
+        .member_list(pb::MemberListRequest { linearizable: false })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.members.len(), 2, "expected self + new learner");
+    assert!(listed.members.iter().any(|m| m.id == added.id && m.is_learner));
 }

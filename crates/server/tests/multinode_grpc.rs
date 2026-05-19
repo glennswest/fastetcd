@@ -73,12 +73,18 @@ async fn start_node(
 
     let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id));
     let kv = KvService::new(state.clone());
-    let cluster_svc = ClusterService::new(
-        state.clone(),
+    let test_peers = fastetcd_raft::network::empty_peers();
+    let test_dir: fastetcd_server::cluster::MemberDirectory =
+        std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
+    ClusterService::seed_self(
+        &test_dir,
+        id,
         format!("node-{id}"),
         vec![format!("http://peer-{id}:0")],
         vec![format!("http://client-{id}:0")],
-    );
+    )
+    .await;
+    let cluster_svc = ClusterService::new(state.clone(), id, test_peers, test_dir);
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state);

@@ -160,6 +160,25 @@ async fn main() -> anyhow::Result<()> {
     }
     let peers = Arc::new(RwLock::new(peers_map.into_iter().collect()));
 
+    // Seed the cluster directory with peers we know at boot.
+    let directory: fastetcd_server::cluster::MemberDirectory =
+        Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
+    {
+        let mut dir = directory.write().await;
+        for (name, url) in &initial_cluster {
+            let nid = derive_node_id(name);
+            dir.insert(
+                nid,
+                fastetcd_server::cluster::MemberInfo {
+                    name: name.clone(),
+                    peer_urls: vec![url.clone()],
+                    client_urls: Vec::new(),
+                    is_learner: false,
+                },
+            );
+        }
+    }
+
     let factory = GrpcNetworkFactory::new(peers.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
 
@@ -183,11 +202,19 @@ async fn main() -> anyhow::Result<()> {
     let client_urls = vec![format!("http://{}", args.listen_client_url)];
 
     let kv = KvService::new(server_state.clone());
-    let cluster = ClusterService::new(
-        server_state.clone(),
+    ClusterService::seed_self(
+        &directory,
+        node_id,
         args.name.clone(),
         peer_urls,
         client_urls,
+    )
+    .await;
+    let cluster = ClusterService::new(
+        server_state.clone(),
+        node_id,
+        peers.clone(),
+        directory.clone(),
     );
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone());

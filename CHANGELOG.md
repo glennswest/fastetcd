@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(server):** Real cluster membership handlers. `MemberAdd`
+  derives a stable node id from the peer URL (FNV-1a hash, masked
+  to 63 bits), registers the URL with the live `PeerEndpoints` map
+  used by `GrpcNetworkFactory` (so the leader can dial the new node
+  immediately), and calls openraft's `add_learner`; voting members
+  additionally call `change_membership` to promote. `MemberRemove`
+  removes from voters via `change_membership(remaining, false)` and
+  drops the peer/directory entries (refuses to remove self).
+  `MemberUpdate` rewrites the peer URL entry; `MemberPromote` lifts
+  a learner to voter. `MemberList` returns the live directory which
+  also tracks `name`, `client_urls`, and `is_learner` per member.
+  The directory is seeded from `--initial-cluster` on bootstrap.
+  Replaces the previous `Unimplemented` stubs. New test verifies
+  MemberAdd-as-learner appears in MemberList.
 - **feat(server):** Lease auto-expiry ticker. Background task runs
   on the leader only (followers are no-ops) and once per second
   walks the persisted lease set; any lease with
