@@ -18,6 +18,7 @@
 //! Compaction and `Txn` semantics are implemented in the next module
 //! commit (tracked as task #17).
 
+pub mod auth;
 pub mod event;
 pub mod lease;
 pub mod record;

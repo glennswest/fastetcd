@@ -7,6 +7,7 @@ use openraft::{Config, Raft};
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 
+use fastetcd_proto::etcdserverpb::auth_server::AuthServer;
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
@@ -17,6 +18,7 @@ use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
+use fastetcd_server::auth::{AuthService, AuthState};
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::lease::LeaseService;
@@ -218,7 +220,12 @@ async fn main() -> anyhow::Result<()> {
     );
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone());
-    let lease = LeaseService::new(server_state);
+    let lease = LeaseService::new(server_state.clone());
+
+    // Load any persisted auth state.
+    let auth_state = AuthState::default();
+    AuthService::load_persisted(server_state.sm.mvcc().engine(), &auth_state).await?;
+    let auth = AuthService::new(server_state, auth_state);
 
     let peer_service = RaftPeerService::new(raft);
 

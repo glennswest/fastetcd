@@ -20,6 +20,8 @@ homepage = "https://github.com/glennswest/fastetcd"
 
 [workspace.dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+argon2 = "0.5"
+rand = "0.8"
 
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }

@@ -32,6 +32,8 @@ fastetcd-raft.workspace = true
 
 sha2.workspace = true
 bincode.workspace = true
+argon2.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"

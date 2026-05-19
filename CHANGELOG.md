@@ -2,7 +2,24 @@
 
 ## [Unreleased]
 
-<!-- New unreleased changes go here -->
+### 2026-05-19
+- **feat(server):** Auth gRPC service — Phase 1. Implements every
+  Auth RPC (`AuthEnable` / `Disable` / `Status`, `Authenticate`,
+  full User / Role CRUD, grant / revoke). Passwords hashed with
+  `argon2` (default cost). Authenticate validates the stored hash
+  and returns a 32-byte hex-encoded random token; tokens live in
+  an in-memory registry on the local node. AuthEnable refuses
+  unless a `root` user has been added (matches etcd's
+  precondition). RoleDelete cascade-drops the role from every
+  user that referenced it. New `mvcc/auth.rs` defines persisted
+  `StoredUser` / `StoredRole` / `StoredPermission` types; auth
+  data lives in dedicated tables outside the MVCC revisioned
+  space (matching etcd's split). 6 new gRPC tests pass.
+- **Phase 2 (not in this commit):** per-request token enforcement
+  via a tower::Layer wrapper. The Phase 1 `AuthInterceptor`
+  placeholder is wired but accepts every request — tonic 0.12's
+  sync interceptor signature can't await the token registry
+  cleanly; switching to a tower::Layer is the right shape.
 
 ## [v0.2.0] — 2026-05-19
 

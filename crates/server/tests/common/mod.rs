@@ -13,6 +13,7 @@ use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
+use fastetcd_proto::etcdserverpb::auth_server::AuthServer;
 use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
@@ -20,6 +21,7 @@ use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::maintenance::MaintenanceService;
+use fastetcd_server::auth::{AuthService, AuthState};
 use fastetcd_server::lease::LeaseService;
 use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
@@ -163,6 +165,8 @@ pub async fn start_test_server_full() -> TestServerHandles {
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state.clone());
+    let auth_state = AuthState::default();
+    let auth = AuthService::new(state.clone(), auth_state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -175,6 +179,7 @@ pub async fn start_test_server_full() -> TestServerHandles {
             .add_service(MaintenanceServer::new(maintenance))
             .add_service(WatchServer::new(watch))
             .add_service(LeaseServer::new(lease))
+            .add_service(AuthServer::new(auth))
             .serve_with_incoming(incoming)
             .await
             .unwrap();
