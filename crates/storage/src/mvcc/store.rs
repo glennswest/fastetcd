@@ -31,6 +31,7 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -69,7 +70,7 @@ pub enum MvccError {
 pub type MvccResult<T> = Result<T, MvccError>;
 
 /// A single mutation request: put one key, or delete a range.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Mutation {
     Put {
         key: Vec<u8>,
@@ -94,7 +95,7 @@ pub enum Mutation {
 
 /// Outcome of an applied mutation, returned to the caller for shaping
 /// the wire response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MutationResult {
     /// Number of keys actually written or deleted.
     pub n: i64,
@@ -104,7 +105,7 @@ pub struct MutationResult {
 }
 
 /// Outcome of a `range` query.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RangeResult {
     pub kvs: Vec<KvRecord>,
     /// True if more keys would have been returned but were excluded
@@ -115,7 +116,7 @@ pub struct RangeResult {
 }
 
 /// Operators for a [`Compare`] in a `Txn`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareOp {
     Equal,
     NotEqual,
@@ -125,7 +126,7 @@ pub enum CompareOp {
 
 /// Right-hand side of a [`Compare`]. Variant chooses which field of
 /// the key's metadata is being compared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareTarget {
     Version(i64),
     CreateRevision(i64),
@@ -144,7 +145,7 @@ pub enum CompareTarget {
 /// key in the range. A key that is absent has version `0`,
 /// create_revision `0`, mod_revision `0`, value `[]`, lease `0` —
 /// matching etcd's semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compare {
     pub key: Vec<u8>,
     pub range_end: Vec<u8>,
@@ -153,7 +154,7 @@ pub struct Compare {
 }
 
 /// A read operation within a `Txn` `success`/`failure` list.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RangeOp {
     pub key: Vec<u8>,
     pub range_end: Vec<u8>,
@@ -167,21 +168,21 @@ pub struct RangeOp {
 /// (etcd permits `Txn` inside `Txn`) is intentionally not represented
 /// at this layer — the gRPC service flattens nested Txns into this
 /// shape, or returns an error for unsupported nesting depth.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TxnOp {
     Range(RangeOp),
     Mutation(Mutation),
 }
 
 /// Per-op result within a [`TxnResult`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TxnOpResult {
     Range(RangeResult),
     Mutation(MutationResult),
 }
 
 /// Outcome of a `Txn` call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxnResult {
     /// True if every `Compare` evaluated truthfully and the `success`
     /// branch was taken; false if the `failure` branch ran.

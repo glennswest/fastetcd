@@ -19,9 +19,14 @@ redb.workspace = true
 serde.workspace = true
 bincode.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 tracing.workspace = true
 tonic.workspace = true
 prost.workspace = true
 
 fastetcd-storage.workspace = true
 fastetcd-proto.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3.13"

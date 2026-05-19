@@ -36,7 +36,7 @@ prost-types = "0.13"
 redb = "2.2"
 
 # Consensus
-openraft = { version = "0.9", features = ["serde"] }
+openraft = { version = "0.9", features = ["serde", "storage-v2", "tracing-log"] }
 
 # Serde
 serde = { version = "1", features = ["derive"] }

@@ -15,6 +15,20 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(raft):** openraft integration (single-node). `TypeConfig`,
+  `FastetcdLogEntry` (Apply / Txn / Compact / Noop), and
+  `FastetcdLogResponse`. `FastetcdStateMachine` wraps `MvccStore` and
+  dispatches every committed entry to the matching MVCC operation;
+  snapshot building serializes the full MVCC state +
+  `last_applied_log_id` + membership into `Cursor<Vec<u8>>`.
+  `MemLogStore` (in-memory `BTreeMap<u64, Entry>`) implements
+  `RaftLogStorage` + `RaftLogReader` — production KvStore-backed log
+  storage lands in task #14. Integration test: a one-node cluster
+  proposes an `Apply` entry via `client_write`, sees revision 1
+  returned, then reads the value back from MVCC. Added serde derives
+  to MVCC `Mutation`, `MutationResult`, `RangeResult`, `Compare`,
+  `CompareOp`, `CompareTarget`, `RangeOp`, `TxnOp`, `TxnOpResult`,
+  `TxnResult` so log entries serialize round-trip.
 - **feat(storage):** MVCC `Txn(compare, success, failure)`. Compare
   types: `Version`, `CreateRevision`, `ModRevision`, `Value`, `Lease`
   with `Equal | NotEqual | Greater | Less`. Single-key and range
