@@ -15,6 +15,16 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(storage):** MVCC `Txn(compare, success, failure)`. Compare
+  types: `Version`, `CreateRevision`, `ModRevision`, `Value`, `Lease`
+  with `Equal | NotEqual | Greater | Less`. Single-key and range
+  compares (range compares require all keys in the range to satisfy);
+  absent keys compare against the implicit zero record (matches
+  etcd). Ops in chosen branch run in order: reads see the pre-mutation
+  snapshot, all writes share one new `main` revision (with distinct
+  sub-revisions). Internal refactor: extracted `apply_inner` /
+  `range_inner` so `apply()`, `range()`, and `txn()` share one write
+  lock. 7 new Txn tests (46 total pass).
 - **feat(storage):** MVCC `Compact(rev)`. Walks every `KeyIndex` and
   prunes generations whose tombstone is `<= rev`; in surviving
   generations drops all puts strictly older than the latest put

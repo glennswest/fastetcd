@@ -114,6 +114,87 @@ pub struct RangeResult {
     pub count: i64,
 }
 
+/// Operators for a [`Compare`] in a `Txn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Equal,
+    NotEqual,
+    Greater,
+    Less,
+}
+
+/// Right-hand side of a [`Compare`]. Variant chooses which field of
+/// the key's metadata is being compared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompareTarget {
+    Version(i64),
+    CreateRevision(i64),
+    ModRevision(i64),
+    Value(Vec<u8>),
+    Lease(i64),
+}
+
+/// One predicate within a `Txn.compare` list.
+///
+/// - `range_end == []` compares the single key `key`.
+/// - `range_end == [0x00]` compares `[key, +Inf)`.
+/// - Otherwise compares `[key, range_end)`.
+///
+/// When `range_end` is non-empty, the predicate must hold for **every**
+/// key in the range. A key that is absent has version `0`,
+/// create_revision `0`, mod_revision `0`, value `[]`, lease `0` —
+/// matching etcd's semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compare {
+    pub key: Vec<u8>,
+    pub range_end: Vec<u8>,
+    pub op: CompareOp,
+    pub target: CompareTarget,
+}
+
+/// A read operation within a `Txn` `success`/`failure` list.
+#[derive(Debug, Clone, Default)]
+pub struct RangeOp {
+    pub key: Vec<u8>,
+    pub range_end: Vec<u8>,
+    pub limit: usize,
+    pub revision: i64,
+    pub keys_only: bool,
+    pub count_only: bool,
+}
+
+/// A single op within a `Txn` `success`/`failure` list. Nested `Txn`
+/// (etcd permits `Txn` inside `Txn`) is intentionally not represented
+/// at this layer — the gRPC service flattens nested Txns into this
+/// shape, or returns an error for unsupported nesting depth.
+#[derive(Debug, Clone)]
+pub enum TxnOp {
+    Range(RangeOp),
+    Mutation(Mutation),
+}
+
+/// Per-op result within a [`TxnResult`].
+#[derive(Debug, Clone)]
+pub enum TxnOpResult {
+    Range(RangeResult),
+    Mutation(MutationResult),
+}
+
+/// Outcome of a `Txn` call.
+#[derive(Debug, Clone)]
+pub struct TxnResult {
+    /// True if every `Compare` evaluated truthfully and the `success`
+    /// branch was taken; false if the `failure` branch ran.
+    pub succeeded: bool,
+    /// Revision returned in the response header. If the chosen branch
+    /// produced no mutations, this is the current revision (txn did
+    /// not advance it). If it produced mutations, this is the new
+    /// `main` revision they share.
+    pub revision: i64,
+    /// One entry per op in the chosen branch, in the same order.
+    pub op_results: Vec<TxnOpResult>,
+}
+
 /// The MVCC layer. Thin handle; cheaply clonable.
 #[derive(Clone)]
 pub struct MvccStore {
@@ -277,28 +358,148 @@ impl MvccStore {
     /// should be the returned `main` revision.
     pub async fn apply(&self, mutations: &[Mutation]) -> MvccResult<(i64, Vec<MutationResult>)> {
         if mutations.is_empty() {
-            // Reads at "no mutation" don't advance the revision; behave
-            // as if a no-op was applied.
             let current = self.current_revision().await;
             return Ok((current, Vec::new()));
         }
-
         let mut state = self.inner.write_state.lock().await;
-        let main = state.current_rev + 1;
-        let mut batch = WriteBatch::new();
-        let mut results: Vec<MutationResult> = Vec::with_capacity(mutations.len());
-        let mut produced_any = false;
+        let snap = self.inner.engine.snapshot().await?;
+        let mut ctx = ApplyContext::default();
+        let (revision, results, produced) = self
+            .apply_inner(&*snap, &mut ctx, &mut state, mutations)
+            .await?;
+        if produced {
+            self.commit_ctx(&mut state, revision, ctx).await?;
+        }
+        Ok((revision, results))
+    }
+
+    /// Range query at `target_rev` (or current state if `target_rev == 0`).
+    pub async fn range(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        limit: usize,
+        target_rev: i64,
+        keys_only: bool,
+        count_only: bool,
+    ) -> MvccResult<RangeResult> {
+        let state = self.inner.write_state.lock().await;
+        let state_copy = *state;
+        drop(state);
+        let snap = self.inner.engine.snapshot().await?;
+        self.range_inner(
+            &*snap,
+            &ApplyContext::default(),
+            state_copy,
+            key,
+            range_end,
+            limit,
+            target_rev,
+            keys_only,
+            count_only,
+        )
+        .await
+    }
+
+    /// Transactional execute: evaluate `compares` against the current
+    /// snapshot; based on the AND of those results, execute either
+    /// `success` or `failure` ops in order. All writes share one
+    /// `main` revision (with distinct `sub`); reads within the txn
+    /// observe the pre-mutation state.
+    pub async fn txn(
+        &self,
+        compares: &[Compare],
+        success: &[TxnOp],
+        failure: &[TxnOp],
+    ) -> MvccResult<TxnResult> {
+        let mut state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
 
-        // In-memory KeyIndex cache: when one mutation puts/deletes a
-        // key and a later mutation in the same `apply` touches the
-        // same key, the second must see the first's effect.
-        let mut idx_cache: std::collections::HashMap<Vec<u8>, KeyIndex> =
-            std::collections::HashMap::new();
-        // Track records we wrote in this batch but haven't committed
-        // yet, so prev_kv lookups within the batch see them.
-        let mut latest_record_cache: std::collections::HashMap<Vec<u8>, KvRecord> =
-            std::collections::HashMap::new();
+        let succeeded = self.evaluate_compares(&*snap, compares).await?;
+        let ops: &[TxnOp] = if succeeded { success } else { failure };
+
+        let mut ctx = ApplyContext::default();
+        let mut op_results: Vec<TxnOpResult> = Vec::with_capacity(ops.len());
+        let mut mutations: Vec<Mutation> = Vec::new();
+        let mut produced_any = false;
+        let proposed_main = state.current_rev + 1;
+        let state_copy = *state;
+
+        // First pass: separate reads from writes; reads run now against
+        // the pre-mutation snapshot, writes are collected for the
+        // post-pass apply. Op order is preserved by interleaving the
+        // results vector with placeholders for writes.
+        let mut write_slots: Vec<Option<usize>> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                TxnOp::Range(r) => {
+                    let res = self
+                        .range_inner(
+                            &*snap,
+                            &ctx, // reads still see pre-mutation cache state
+                            state_copy,
+                            &r.key,
+                            &r.range_end,
+                            r.limit,
+                            r.revision,
+                            r.keys_only,
+                            r.count_only,
+                        )
+                        .await?;
+                    op_results.push(TxnOpResult::Range(res));
+                    write_slots.push(None);
+                }
+                TxnOp::Mutation(m) => {
+                    mutations.push(m.clone());
+                    write_slots.push(Some(op_results.len()));
+                    op_results.push(TxnOpResult::Mutation(MutationResult::default()));
+                }
+            }
+        }
+
+        // Second pass: run the mutations as one atomic apply.
+        if !mutations.is_empty() {
+            // We need to fill in mutation results back into the
+            // op_results slots in their original positions, so we
+            // run apply_inner directly and walk the result list.
+            let (revision, mut results, produced) = self
+                .apply_inner(&*snap, &mut ctx, &mut state, &mutations)
+                .await?;
+            produced_any = produced;
+            if produced {
+                self.commit_ctx(&mut state, revision, ctx).await?;
+            }
+            // Restore back into op order.
+            results.reverse();
+            for slot in write_slots {
+                if let Some(idx) = slot {
+                    if let Some(res) = results.pop() {
+                        op_results[idx] = TxnOpResult::Mutation(res);
+                    }
+                }
+            }
+        }
+
+        let revision = if produced_any { proposed_main } else { state.current_rev };
+        Ok(TxnResult {
+            succeeded,
+            revision,
+            op_results,
+        })
+    }
+
+    // ---------- internal helpers ----------
+
+    async fn apply_inner(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &mut ApplyContext,
+        state: &mut WriteState,
+        mutations: &[Mutation],
+    ) -> MvccResult<(i64, Vec<MutationResult>, bool)> {
+        let main = state.current_rev + 1;
+        let mut results: Vec<MutationResult> = Vec::with_capacity(mutations.len());
+        let mut produced_any = false;
 
         for (sub_zero_based, mutation) in mutations.iter().enumerate() {
             let sub = sub_zero_based as i64;
@@ -312,18 +513,12 @@ impl MvccStore {
                     ignore_lease,
                     prev_kv,
                 } => {
-                    let mut idx = load_or_init_index(
-                        &*snap,
-                        &idx_cache,
-                        key.as_slice(),
-                    )
-                    .await?;
-
-                    // Resolve prev record (only if requested or needed for ignore_*).
+                    let mut idx =
+                        load_or_init_index(snap, &ctx.idx_cache, key.as_slice()).await?;
                     let prev = if idx.is_live() {
                         load_latest_record(
-                            &*snap,
-                            &latest_record_cache,
+                            snap,
+                            &ctx.latest_record_cache,
                             key.as_slice(),
                             &idx,
                         )
@@ -358,27 +553,24 @@ impl MvccStore {
                     let record = KvRecord {
                         key: key.clone(),
                         value: effective_value,
-                        create_revision: created.main, // see note below
+                        create_revision: created.main,
                         mod_revision: rev.main,
                         version,
                         lease: effective_lease,
                         deleted: false,
                     };
-                    // etcd's KeyValue uses the main revision for both
-                    // create_revision and mod_revision. We mirror that
-                    // here so wire responses match exactly.
 
                     let kv_key = make_kv_key(key, rev);
                     let record_bytes = bincode::serialize(&record)
                         .map_err(|e| MvccError::Internal(format!("serialize KvRecord: {e}")))?;
-                    batch.put(TABLE_KV, &kv_key, &record_bytes);
+                    ctx.batch.put(TABLE_KV, &kv_key, &record_bytes);
 
                     let idx_bytes = bincode::serialize(&idx)
                         .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                    batch.put(TABLE_IDX, key, &idx_bytes);
+                    ctx.batch.put(TABLE_IDX, key, &idx_bytes);
 
-                    idx_cache.insert(key.clone(), idx);
-                    latest_record_cache.insert(key.clone(), record);
+                    ctx.idx_cache.insert(key.clone(), idx);
+                    ctx.latest_record_cache.insert(key.clone(), record);
 
                     results.push(MutationResult {
                         n: 1,
@@ -396,25 +588,24 @@ impl MvccStore {
                     prev_kv,
                 } => {
                     let live_keys = live_keys_in_range(
-                        &*snap,
-                        &idx_cache,
+                        snap,
+                        &ctx.idx_cache,
                         key.as_slice(),
                         range_end.as_slice(),
                     )
                     .await?;
-
                     let mut result = MutationResult::default();
                     for live_key in live_keys {
                         let mut idx = load_or_init_index(
-                            &*snap,
-                            &idx_cache,
+                            snap,
+                            &ctx.idx_cache,
                             live_key.as_slice(),
                         )
                         .await?;
                         let prev = if *prev_kv && idx.is_live() {
                             load_latest_record(
-                                &*snap,
-                                &latest_record_cache,
+                                snap,
+                                &ctx.latest_record_cache,
                                 live_key.as_slice(),
                                 &idx,
                             )
@@ -424,7 +615,7 @@ impl MvccStore {
                         };
                         let closed = idx.record_delete(rev);
                         if !closed {
-                            continue; // already deleted (raced with prior op in batch)
+                            continue;
                         }
                         let tombstone = KvRecord {
                             key: live_key.clone(),
@@ -438,15 +629,13 @@ impl MvccStore {
                         let kv_key = make_kv_key(&live_key, rev);
                         let bytes = bincode::serialize(&tombstone)
                             .map_err(|e| MvccError::Internal(format!("serialize tombstone: {e}")))?;
-                        batch.put(TABLE_KV, &kv_key, &bytes);
-
+                        ctx.batch.put(TABLE_KV, &kv_key, &bytes);
                         let idx_bytes = bincode::serialize(&idx)
                             .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                        batch.put(TABLE_IDX, &live_key, &idx_bytes);
-
-                        idx_cache.insert(live_key.clone(), idx);
-                        latest_record_cache.insert(live_key.clone(), tombstone);
-
+                        ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
+                        ctx.idx_cache.insert(live_key.clone(), idx);
+                        ctx.latest_record_cache
+                            .insert(live_key.clone(), tombstone);
                         result.n += 1;
                         if let Some(p) = prev {
                             result.prev_kvs.push(p);
@@ -459,26 +648,30 @@ impl MvccStore {
                 }
             }
         }
-
-        if !produced_any {
-            // No-op apply (e.g. delete on empty range). Don't advance
-            // the revision counter; commit nothing.
-            return Ok((state.current_rev, results));
-        }
-
-        // Persist the new current_rev as part of the same atomic batch.
-        write_i64(&mut batch, META_KEY_CURRENT_REV, main);
-        self.inner
-            .engine
-            .commit(batch, WriteOptions::default())
-            .await?;
-        state.current_rev = main;
-        Ok((main, results))
+        Ok((main, results, produced_any))
     }
 
-    /// Range query at `target_rev` (or current state if `target_rev == 0`).
-    pub async fn range(
+    async fn commit_ctx(
         &self,
+        state: &mut WriteState,
+        new_rev: i64,
+        mut ctx: ApplyContext,
+    ) -> MvccResult<()> {
+        write_i64(&mut ctx.batch, META_KEY_CURRENT_REV, new_rev);
+        self.inner
+            .engine
+            .commit(ctx.batch, WriteOptions::default())
+            .await?;
+        state.current_rev = new_rev;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn range_inner(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &ApplyContext,
+        state: WriteState,
         key: &[u8],
         range_end: &[u8],
         limit: usize,
@@ -486,11 +679,8 @@ impl MvccStore {
         keys_only: bool,
         count_only: bool,
     ) -> MvccResult<RangeResult> {
-        let snap = self.inner.engine.snapshot().await?;
-        let state = self.inner.write_state.lock().await;
         let current_rev = state.current_rev;
         let compact_rev = state.compact_rev;
-        drop(state);
 
         if target_rev > 0 {
             if target_rev > current_rev {
@@ -499,8 +689,6 @@ impl MvccStore {
                     current_rev,
                 });
             }
-            // Compact(K) preserves rev K — reads at K must succeed. Only
-            // strictly older revisions are gone.
             if target_rev < compact_rev {
                 return Err(MvccError::Compacted {
                     requested: target_rev,
@@ -514,7 +702,6 @@ impl MvccStore {
             Revision::new(target_rev, i64::MAX)
         };
 
-        // Range over the key index.
         let (start, end) = range_bounds(key, range_end);
         let entries = snap
             .range(TABLE_IDX, start, end, 0)
@@ -523,36 +710,36 @@ impl MvccStore {
 
         let mut matches: Vec<KvRecord> = Vec::new();
         let mut total: i64 = 0;
+        // Avoid double-counting keys that also live in the ctx cache.
+        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
         for (idx_key, idx_bytes) in entries {
-            let idx: KeyIndex = bincode::deserialize(&idx_bytes)
-                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
-            let Some(rec_rev) = idx.revision_at(read_rev) else {
-                continue;
+            let idx: KeyIndex = match ctx.idx_cache.get(&idx_key) {
+                Some(c) => c.clone(),
+                None => bincode::deserialize(&idx_bytes)
+                    .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?,
             };
-            total += 1;
-            if count_only {
+            seen.insert(idx_key.clone());
+            self.range_match_one(
+                snap, ctx, &idx_key, &idx, read_rev, keys_only, count_only, &mut total, &mut matches,
+            )
+            .await?;
+        }
+        // Cache-only keys (created within this same apply batch).
+        for (k, idx) in &ctx.idx_cache {
+            if seen.contains(k) {
                 continue;
             }
-            // Fetch the record.
-            let kv_key = make_kv_key(&idx_key, rec_rev);
-            let rec_bytes = snap
-                .get(TABLE_KV, &kv_key)
-                .await
-                .map_err(MvccError::Storage)?
-                .ok_or_else(|| {
-                    MvccError::Internal(format!(
-                        "missing KvRecord for key {} at rev {:?}",
-                        String::from_utf8_lossy(&idx_key),
-                        rec_rev
-                    ))
-                })?;
-            let mut rec: KvRecord = bincode::deserialize(&rec_bytes)
-                .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
-            if keys_only {
-                rec.value.clear();
+            if !in_range(k.as_slice(), key, range_end) {
+                continue;
             }
-            matches.push(rec);
+            self.range_match_one(
+                snap, ctx, k, idx, read_rev, keys_only, count_only, &mut total, &mut matches,
+            )
+            .await?;
         }
+
+        matches.sort_by(|a, b| a.key.cmp(&b.key));
 
         let more = limit > 0 && matches.len() > limit;
         if more {
@@ -564,9 +751,174 @@ impl MvccStore {
             count: total,
         })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn range_match_one(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &ApplyContext,
+        idx_key: &[u8],
+        idx: &KeyIndex,
+        read_rev: Revision,
+        keys_only: bool,
+        count_only: bool,
+        total: &mut i64,
+        matches: &mut Vec<KvRecord>,
+    ) -> MvccResult<()> {
+        let Some(rec_rev) = idx.revision_at(read_rev) else {
+            return Ok(());
+        };
+        *total += 1;
+        if count_only {
+            return Ok(());
+        }
+        // Prefer ctx cache for fresh-in-batch records.
+        if let Some(rec) = ctx.latest_record_cache.get(idx_key) {
+            if !rec.is_tombstone() {
+                let mut r = rec.clone();
+                if keys_only {
+                    r.value.clear();
+                }
+                matches.push(r);
+                return Ok(());
+            }
+        }
+        let kv_key = make_kv_key(idx_key, rec_rev);
+        let rec_bytes = snap
+            .get(TABLE_KV, &kv_key)
+            .await
+            .map_err(MvccError::Storage)?
+            .ok_or_else(|| {
+                MvccError::Internal(format!(
+                    "missing KvRecord for key {} at rev {:?}",
+                    String::from_utf8_lossy(idx_key),
+                    rec_rev
+                ))
+            })?;
+        let mut rec: KvRecord = bincode::deserialize(&rec_bytes)
+            .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
+        if keys_only {
+            rec.value.clear();
+        }
+        matches.push(rec);
+        Ok(())
+    }
+
+    async fn evaluate_compares(
+        &self,
+        snap: &dyn Snapshot,
+        compares: &[Compare],
+    ) -> MvccResult<bool> {
+        for cmp in compares {
+            if !self.evaluate_one_compare(snap, cmp).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn evaluate_one_compare(
+        &self,
+        snap: &dyn Snapshot,
+        cmp: &Compare,
+    ) -> MvccResult<bool> {
+        // For a single-key compare, look up the latest live record (or
+        // implicit zero-record if absent) and compare against the target.
+        // For a range compare, every key in the range must satisfy.
+        let (start, end) = range_bounds(&cmp.key, &cmp.range_end);
+        let entries = snap
+            .range(TABLE_IDX, start, end, 0)
+            .await
+            .map_err(MvccError::Storage)?;
+
+        if cmp.range_end.is_empty() {
+            // Single-key compare. If absent, use the implicit zero record.
+            let rec = if entries.is_empty() {
+                implicit_zero_record(&cmp.key)
+            } else {
+                let (k, idx_bytes) = &entries[0];
+                debug_assert_eq!(k, &cmp.key);
+                let idx: KeyIndex = bincode::deserialize(idx_bytes)
+                    .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+                load_latest_or_zero(snap, &idx, &cmp.key).await?
+            };
+            return Ok(eval_compare(&rec, &cmp.op, &cmp.target));
+        }
+
+        // Range compare. All matching keys must satisfy. Empty range
+        // matches vacuously (matches etcd).
+        for (idx_key, idx_bytes) in entries {
+            let idx: KeyIndex = bincode::deserialize(&idx_bytes)
+                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+            let rec = load_latest_or_zero(snap, &idx, &idx_key).await?;
+            if !eval_compare(&rec, &cmp.op, &cmp.target) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 // ---------- helpers ----------
+
+/// Per-apply mutable state shared between read and write paths.
+#[derive(Default)]
+struct ApplyContext {
+    batch: WriteBatch,
+    idx_cache: std::collections::HashMap<Vec<u8>, KeyIndex>,
+    latest_record_cache: std::collections::HashMap<Vec<u8>, KvRecord>,
+}
+
+fn implicit_zero_record(key: &[u8]) -> KvRecord {
+    KvRecord {
+        key: key.to_vec(),
+        value: Vec::new(),
+        create_revision: 0,
+        mod_revision: 0,
+        version: 0,
+        lease: 0,
+        deleted: false,
+    }
+}
+
+async fn load_latest_or_zero(
+    snap: &dyn Snapshot,
+    idx: &KeyIndex,
+    key: &[u8],
+) -> MvccResult<KvRecord> {
+    if let Some((rev, _ver)) = idx.current() {
+        let kv_key = make_kv_key(key, rev);
+        if let Some(bytes) = snap
+            .get(TABLE_KV, &kv_key)
+            .await
+            .map_err(MvccError::Storage)?
+        {
+            let rec: KvRecord = bincode::deserialize(&bytes)
+                .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
+            if !rec.is_tombstone() {
+                return Ok(rec);
+            }
+        }
+    }
+    Ok(implicit_zero_record(key))
+}
+
+fn eval_compare(rec: &KvRecord, op: &CompareOp, target: &CompareTarget) -> bool {
+    use std::cmp::Ordering;
+    let ordering: Ordering = match target {
+        CompareTarget::Version(v) => rec.version.cmp(v),
+        CompareTarget::CreateRevision(v) => rec.create_revision.cmp(v),
+        CompareTarget::ModRevision(v) => rec.mod_revision.cmp(v),
+        CompareTarget::Lease(v) => rec.lease.cmp(v),
+        CompareTarget::Value(v) => rec.value.as_slice().cmp(v.as_slice()),
+    };
+    match op {
+        CompareOp::Equal => ordering == Ordering::Equal,
+        CompareOp::NotEqual => ordering != Ordering::Equal,
+        CompareOp::Greater => ordering == Ordering::Greater,
+        CompareOp::Less => ordering == Ordering::Less,
+    }
+}
 
 async fn read_i64(snap: &dyn Snapshot, key: &[u8]) -> Result<Option<i64>, StorageError> {
     let bytes = snap.get(TABLE_META, key).await?;
@@ -1008,6 +1360,185 @@ mod tests {
         // Old revisions still gone after reopen.
         let err = s.range(b"k", b"", 0, 1, false, false).await.err().unwrap();
         assert!(matches!(err, MvccError::Compacted { .. }));
+    }
+
+    fn cmp_value_eq(key: &[u8], value: &[u8]) -> Compare {
+        Compare {
+            key: key.to_vec(),
+            range_end: Vec::new(),
+            op: CompareOp::Equal,
+            target: CompareTarget::Value(value.to_vec()),
+        }
+    }
+
+    fn cmp_version_eq(key: &[u8], version: i64) -> Compare {
+        Compare {
+            key: key.to_vec(),
+            range_end: Vec::new(),
+            op: CompareOp::Equal,
+            target: CompareTarget::Version(version),
+        }
+    }
+
+    fn txn_put(key: &[u8], value: &[u8]) -> TxnOp {
+        TxnOp::Mutation(put(key, value))
+    }
+
+    fn txn_range(key: &[u8], range_end: &[u8]) -> TxnOp {
+        TxnOp::Range(RangeOp {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn txn_success_branch_runs_when_compares_pass() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let r = s
+            .txn(
+                &[cmp_value_eq(b"k", b"v0")],
+                &[txn_put(b"k", b"v1")],
+                &[txn_put(b"k", b"failure")],
+            )
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        assert_eq!(r.op_results.len(), 1);
+        let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"v1");
+    }
+
+    #[tokio::test]
+    async fn txn_failure_branch_runs_when_compares_fail() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let r = s
+            .txn(
+                &[cmp_value_eq(b"k", b"nope")],
+                &[txn_put(b"k", b"success")],
+                &[txn_put(b"k", b"failure")],
+            )
+            .await
+            .unwrap();
+        assert!(!r.succeeded);
+        let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"failure");
+    }
+
+    #[tokio::test]
+    async fn txn_compare_on_absent_key_uses_zero_record() {
+        let (_d, s) = open_mvcc().await;
+        // Compare version == 0 should pass for an absent key.
+        let r = s
+            .txn(
+                &[cmp_version_eq(b"missing", 0)],
+                &[txn_put(b"missing", b"created")],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        let out = s.range(b"missing", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"created");
+    }
+
+    #[tokio::test]
+    async fn txn_with_mixed_read_and_write_ops_preserves_order() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"a", b"A"), put(b"b", b"B")]).await.unwrap();
+        let r = s
+            .txn(
+                &[], // no compares -> success branch
+                &[
+                    txn_range(b"a", b"c"),
+                    txn_put(b"c", b"C"),
+                    txn_range(b"a", b"d"),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        // First range observes pre-mutation state (no "c").
+        let first = match &r.op_results[0] {
+            TxnOpResult::Range(rr) => rr.kvs.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
+            _ => panic!("expected Range"),
+        };
+        assert_eq!(first, vec![b"a".to_vec(), b"b".to_vec()]);
+        // Mutation result.
+        match &r.op_results[1] {
+            TxnOpResult::Mutation(m) => assert_eq!(m.n, 1),
+            _ => panic!("expected Mutation"),
+        };
+        // Second range — etcd's behavior: reads inside the txn see the
+        // pre-mutation snapshot. So "c" should NOT be observable here.
+        let second = match &r.op_results[2] {
+            TxnOpResult::Range(rr) => rr.kvs.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
+            _ => panic!("expected Range"),
+        };
+        assert_eq!(second, vec![b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn txn_with_no_mutations_does_not_advance_revision() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let r_before = s.current_revision().await;
+        let r = s
+            .txn(&[cmp_value_eq(b"k", b"v0")], &[txn_range(b"k", b"")], &[])
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        assert_eq!(r.revision, r_before);
+        assert_eq!(s.current_revision().await, r_before);
+    }
+
+    #[tokio::test]
+    async fn txn_mutations_share_one_main_revision() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let r = s
+            .txn(
+                &[],
+                &[txn_put(b"a", b"1"), txn_put(b"b", b"2"), txn_put(b"c", b"3")],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        assert_eq!(r.revision, 2);
+        for key in [b"a".as_ref(), b"b", b"c"] {
+            let out = s.range(key, b"", 0, 0, false, false).await.unwrap();
+            assert_eq!(out.kvs[0].mod_revision, 2);
+            assert_eq!(out.kvs[0].create_revision, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn txn_range_compare_must_hold_for_every_key_in_range() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"a", b"v"), put(b"b", b"v"), put(b"c", b"x")])
+            .await
+            .unwrap();
+        // Range compare: all keys in [a, d) must equal "v" — fails on "c".
+        let r = s
+            .txn(
+                &[Compare {
+                    key: b"a".to_vec(),
+                    range_end: b"d".to_vec(),
+                    op: CompareOp::Equal,
+                    target: CompareTarget::Value(b"v".to_vec()),
+                }],
+                &[txn_put(b"result", b"success")],
+                &[txn_put(b"result", b"failure")],
+            )
+            .await
+            .unwrap();
+        assert!(!r.succeeded);
+        let out = s.range(b"result", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"failure");
     }
 
     #[tokio::test]

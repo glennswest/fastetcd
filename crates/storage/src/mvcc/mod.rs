@@ -24,4 +24,7 @@ pub mod store;
 
 pub use record::{Generation, KeyIndex, KvRecord};
 pub use revision::Revision;
-pub use store::{Mutation, MutationResult, MvccError, MvccResult, MvccStore, RangeResult};
+pub use store::{
+    Compare, CompareOp, CompareTarget, Mutation, MutationResult, MvccError, MvccResult,
+    MvccStore, RangeOp, RangeResult, TxnOp, TxnOpResult, TxnResult,
+};
