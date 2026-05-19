@@ -13,7 +13,8 @@ use openraft::TokioRuntime;
 use serde::{Deserialize, Serialize};
 
 use fastetcd_storage::mvcc::{
-    Compare, Mutation, MutationResult, RangeOp, RangeResult, TxnOp, TxnResult,
+    Compare, LeaseGrantResult, LeaseId, LeaseRevokeResult, LeaseTtlResult, Mutation,
+    MutationResult, RangeOp, RangeResult, TxnOp, TxnResult,
 };
 
 /// Cluster-unique node identifier. We use u64 to match openraft's
@@ -61,6 +62,20 @@ pub enum FastetcdLogEntry {
     /// advance the revision counter.
     Compact { rev: i64 },
 
+    /// Grant a new lease. `id == 0` allocates one; `now_unix` is the
+    /// leader's wall-clock when the entry was proposed.
+    LeaseGrant {
+        id: LeaseId,
+        ttl_secs: i64,
+        now_unix: i64,
+    },
+
+    /// Revoke a lease and cascade-delete every key attached to it.
+    LeaseRevoke { id: LeaseId },
+
+    /// Refresh a lease's deadline (KeepAlive).
+    LeaseKeepAlive { id: LeaseId, now_unix: i64 },
+
     /// No-op heartbeat / membership change marker. State machine
     /// records the applied log id and returns the current revision.
     Noop,
@@ -81,6 +96,12 @@ pub enum FastetcdLogResponse {
     Txn(TxnResult),
     /// Result of a `Compact` entry.
     Compact { compact_rev: i64 },
+    /// Result of `LeaseGrant`.
+    LeaseGrant(LeaseGrantResult),
+    /// Result of `LeaseRevoke`.
+    LeaseRevoke(LeaseRevokeResult),
+    /// Result of `LeaseKeepAlive`.
+    LeaseKeepAlive(LeaseTtlResult),
     /// `Noop` carries the current revision so callers can sequence
     /// reads against it (linearizable read-index path).
     Noop { revision: i64 },
@@ -94,6 +115,9 @@ impl FastetcdLogResponse {
             FastetcdLogResponse::Apply { revision, .. } => *revision,
             FastetcdLogResponse::Txn(t) => t.revision,
             FastetcdLogResponse::Compact { compact_rev } => *compact_rev,
+            FastetcdLogResponse::LeaseGrant(g) => g.revision,
+            FastetcdLogResponse::LeaseRevoke(r) => r.revision,
+            FastetcdLogResponse::LeaseKeepAlive(_) => 0,
             FastetcdLogResponse::Noop { revision } => *revision,
         }
     }

@@ -19,14 +19,17 @@
 //! commit (tracked as task #17).
 
 pub mod event;
+pub mod lease;
 pub mod record;
 pub mod revision;
 pub mod store;
 
 pub use event::{EventBatch, EventKind, MvccEvent};
+pub use lease::{LeaseId, LeaseRecord};
 pub use record::{Generation, KeyIndex, KvRecord};
 pub use revision::Revision;
 pub use store::{
-    Compare, CompareOp, CompareTarget, Mutation, MutationResult, MvccError, MvccResult,
-    MvccStore, RangeOp, RangeResult, TxnOp, TxnOpResult, TxnResult,
+    Compare, CompareOp, CompareTarget, LeaseGrantResult, LeaseRevokeResult, LeaseTtlResult,
+    Mutation, MutationResult, MvccError, MvccResult, MvccStore, RangeOp, RangeResult, TxnOp,
+    TxnOpResult, TxnResult,
 };

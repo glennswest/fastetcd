@@ -649,6 +649,7 @@ name = "fastetcd-server"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
  "fastetcd-proto",
  "fastetcd-raft",
@@ -657,6 +658,7 @@ dependencies = [
  "openraft",
  "prost",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

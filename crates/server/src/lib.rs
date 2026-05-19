@@ -12,6 +12,7 @@
 pub mod cluster;
 pub mod conv;
 pub mod kv;
+pub mod lease;
 pub mod maintenance;
 pub mod state;
 pub mod watch;

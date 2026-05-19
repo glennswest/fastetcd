@@ -15,6 +15,19 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(server):** Implement the Lease gRPC service — Phase 1.
+  Grant / Revoke / KeepAlive (bidi stream) / TimeToLive / Leases all
+  go through Raft via new `FastetcdLogEntry::Lease*` variants.
+  Storage layer additions: `lease` and `lease_keys` tables; Put
+  updates the `lease_keys` reverse index when `lease != 0`;
+  DeleteRange drops the index entry; LeaseRevoke cascades a delete
+  across every attached key (deletes share one main revision, fire
+  watch events). Lease IDs auto-allocate from a persisted
+  `next_lease_id` counter. Known gap: no leader-side ticker
+  auto-revokes expired leases — clients must explicitly revoke for
+  cascade-delete to fire (follow-up commit will add a ticker that
+  proposes LeaseRevoke entries when deadlines pass). 3 new gRPC
+  tests pass.
 - **feat(server):** Implement the Watch gRPC service — Phase 1.
   Bidirectional stream multiplexing many watchers per connection.
   `WatchCreate` (with key/range, filters, prev_kv flag,

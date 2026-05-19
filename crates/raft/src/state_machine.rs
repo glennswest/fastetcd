@@ -267,6 +267,22 @@ async fn apply_data(
             let compact_rev = mvcc.compact(*rev).await?;
             Ok(FastetcdLogResponse::Compact { compact_rev })
         }
+        FastetcdLogEntry::LeaseGrant {
+            id,
+            ttl_secs,
+            now_unix,
+        } => {
+            let res = mvcc.apply_lease_grant(*id, *ttl_secs, *now_unix).await?;
+            Ok(FastetcdLogResponse::LeaseGrant(res))
+        }
+        FastetcdLogEntry::LeaseRevoke { id } => {
+            let res = mvcc.apply_lease_revoke(*id).await?;
+            Ok(FastetcdLogResponse::LeaseRevoke(res))
+        }
+        FastetcdLogEntry::LeaseKeepAlive { id, now_unix } => {
+            let res = mvcc.apply_lease_keepalive(*id, *now_unix).await?;
+            Ok(FastetcdLogResponse::LeaseKeepAlive(res))
+        }
         FastetcdLogEntry::Noop => {
             let rev = mvcc.current_revision().await;
             Ok(FastetcdLogResponse::Noop { revision: rev })

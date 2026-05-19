@@ -38,6 +38,10 @@ use tokio::sync::{broadcast, Mutex};
 use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 
 use super::event::{EventBatch, EventKind, MvccEvent};
+use super::lease::{
+    lease_id_key, lease_key_index, lease_keys_bounds, parse_lease_keys_key, LeaseId, LeaseRecord,
+    TABLE_LEASE, TABLE_LEASE_KEYS,
+};
 use super::record::{KeyIndex, KvRecord};
 use super::revision::{make_kv_key, Revision};
 
@@ -47,6 +51,7 @@ const TABLE_META: &str = "mvcc_meta";
 
 const META_KEY_CURRENT_REV: &[u8] = b"current_rev";
 const META_KEY_COMPACT_REV: &[u8] = b"compact_rev";
+const META_KEY_NEXT_LEASE_ID: &[u8] = b"next_lease_id";
 
 /// Errors specific to the MVCC layer (atop [`StorageError`]).
 #[derive(Debug, Error)]
@@ -182,6 +187,34 @@ pub enum TxnOpResult {
     Mutation(MutationResult),
 }
 
+/// Outcome of a lease grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaseGrantResult {
+    pub id: LeaseId,
+    pub ttl_secs: i64,
+    pub revision: i64,
+}
+
+/// Outcome of a lease revoke (cascade delete of attached keys).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LeaseRevokeResult {
+    pub revision: i64,
+    /// Keys that were deleted as part of the cascade.
+    pub deleted_keys: i64,
+}
+
+/// Outcome of a `LeaseTimeToLive` query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaseTtlResult {
+    pub id: LeaseId,
+    pub granted_ttl_secs: i64,
+    /// Remaining TTL in seconds (clamped at 0; negative means expired
+    /// but not yet revoked).
+    pub remaining_ttl_secs: i64,
+    /// Attached keys; populated only when the caller asked for them.
+    pub keys: Vec<Vec<u8>>,
+}
+
 /// Outcome of a `Txn` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxnResult {
@@ -221,6 +254,8 @@ struct Inner {
 struct WriteState {
     current_rev: i64,
     compact_rev: i64,
+    /// High-water mark for auto-allocated lease IDs.
+    next_lease_id: i64,
 }
 
 impl MvccStore {
@@ -231,14 +266,16 @@ impl MvccStore {
         let snap = engine.snapshot().await?;
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
+        let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         drop(snap);
 
         // If meta keys were absent, persist their initial values so
         // size_on_disk and subsequent opens see consistent state.
-        if current == 0 && compact == 0 {
+        if current == 0 && compact == 0 && next_lease == 0 {
             let mut b = WriteBatch::new();
             write_i64(&mut b, META_KEY_CURRENT_REV, 0);
             write_i64(&mut b, META_KEY_COMPACT_REV, 0);
+            write_i64(&mut b, META_KEY_NEXT_LEASE_ID, 0);
             engine.commit(b, WriteOptions::default()).await?;
         }
 
@@ -249,6 +286,7 @@ impl MvccStore {
                 write_state: Mutex::new(WriteState {
                     current_rev: current,
                     compact_rev: compact,
+                    next_lease_id: next_lease,
                 }),
                 event_tx,
             }),
@@ -273,6 +311,204 @@ impl MvccStore {
 
     pub async fn compact_revision(&self) -> i64 {
         self.inner.write_state.lock().await.compact_rev
+    }
+
+    /// Grant a lease with `ttl_secs` and (server-current) `now_unix`
+    /// timestamp. `id == 0` allocates a fresh id (next sequential
+    /// from a counter persisted in `mvcc_meta`); a non-zero id is
+    /// used as-is. Goes through the meta lock so it serializes
+    /// with apply()/txn() (matches our "all writes serialize"
+    /// invariant).
+    pub async fn apply_lease_grant(
+        &self,
+        id: LeaseId,
+        ttl_secs: i64,
+        now_unix: i64,
+    ) -> MvccResult<LeaseGrantResult> {
+        if ttl_secs <= 0 {
+            return Err(MvccError::Internal(format!(
+                "lease TTL must be positive, got {ttl_secs}"
+            )));
+        }
+        let mut state = self.inner.write_state.lock().await;
+        let mut batch = WriteBatch::new();
+        let final_id = if id == 0 {
+            let next = state.next_lease_id + 1;
+            state.next_lease_id = next;
+            write_i64(&mut batch, META_KEY_NEXT_LEASE_ID, next);
+            next
+        } else {
+            // Track high-water-mark so auto-allocated ids don't collide.
+            if id > state.next_lease_id {
+                state.next_lease_id = id;
+                write_i64(&mut batch, META_KEY_NEXT_LEASE_ID, id);
+            }
+            id
+        };
+        let rec = LeaseRecord {
+            id: final_id,
+            ttl_secs,
+            deadline_unix_secs: now_unix.saturating_add(ttl_secs),
+        };
+        let bytes = bincode::serialize(&rec)
+            .map_err(|e| MvccError::Internal(format!("serialize LeaseRecord: {e}")))?;
+        batch.put(TABLE_LEASE, &lease_id_key(final_id), &bytes);
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(LeaseGrantResult {
+            id: final_id,
+            ttl_secs,
+            revision: state.current_rev,
+        })
+    }
+
+    /// Refresh a lease's deadline. Returns the granted TTL (so the
+    /// caller can pass it back to the client) or
+    /// `MvccError::Internal` if the lease does not exist.
+    pub async fn apply_lease_keepalive(
+        &self,
+        id: LeaseId,
+        now_unix: i64,
+    ) -> MvccResult<LeaseTtlResult> {
+        // Hold the write lock so KeepAlive is serialized with other
+        // lease mutations and the apply loop (matches our "all writes
+        // serialize" invariant).
+        let _state = self.inner.write_state.lock().await;
+        let snap = self.inner.engine.snapshot().await?;
+        let Some(rec_bytes) = snap.get(TABLE_LEASE, &lease_id_key(id)).await? else {
+            return Err(MvccError::Internal(format!("lease {id} not found")));
+        };
+        let mut rec: LeaseRecord = bincode::deserialize(&rec_bytes)
+            .map_err(|e| MvccError::Internal(format!("deserialize LeaseRecord: {e}")))?;
+        rec.deadline_unix_secs = now_unix.saturating_add(rec.ttl_secs);
+        let bytes = bincode::serialize(&rec)
+            .map_err(|e| MvccError::Internal(format!("serialize LeaseRecord: {e}")))?;
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_LEASE, &lease_id_key(id), &bytes);
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(LeaseTtlResult {
+            id,
+            granted_ttl_secs: rec.ttl_secs,
+            remaining_ttl_secs: rec.ttl_secs,
+            keys: Vec::new(),
+        })
+    }
+
+    /// Look up a lease and (optionally) its attached keys.
+    pub async fn lease_ttl(
+        &self,
+        id: LeaseId,
+        include_keys: bool,
+        now_unix: i64,
+    ) -> MvccResult<Option<LeaseTtlResult>> {
+        let snap = self.inner.engine.snapshot().await?;
+        let Some(rec_bytes) = snap.get(TABLE_LEASE, &lease_id_key(id)).await? else {
+            return Ok(None);
+        };
+        let rec: LeaseRecord = bincode::deserialize(&rec_bytes)
+            .map_err(|e| MvccError::Internal(format!("deserialize LeaseRecord: {e}")))?;
+        let remaining = rec.deadline_unix_secs.saturating_sub(now_unix);
+        let keys = if include_keys {
+            let (start, end) = lease_keys_bounds(id);
+            let entries = snap.range(TABLE_LEASE_KEYS, start, end, 0).await?;
+            entries
+                .into_iter()
+                .map(|(k, _)| parse_lease_keys_key(&k).map(|(_, uk)| uk))
+                .collect::<MvccResult<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        Ok(Some(LeaseTtlResult {
+            id,
+            granted_ttl_secs: rec.ttl_secs,
+            remaining_ttl_secs: remaining,
+            keys,
+        }))
+    }
+
+    /// List all lease IDs.
+    pub async fn lease_list(&self) -> MvccResult<Vec<LeaseId>> {
+        let snap = self.inner.engine.snapshot().await?;
+        let entries = snap
+            .range(TABLE_LEASE, Bound::Unbounded, Bound::Unbounded, 0)
+            .await?;
+        let mut out = Vec::with_capacity(entries.len());
+        for (k, _) in entries {
+            if k.len() != 8 {
+                continue;
+            }
+            out.push(i64::from_be_bytes(k.try_into().expect("8 bytes")));
+        }
+        Ok(out)
+    }
+
+    /// Revoke a lease and cascade-delete every key associated with it.
+    /// Each cascaded delete produces an MVCC event so watchers see
+    /// the deletes; all deletes share one `main` revision.
+    pub async fn apply_lease_revoke(&self, id: LeaseId) -> MvccResult<LeaseRevokeResult> {
+        let mut state = self.inner.write_state.lock().await;
+        let snap = self.inner.engine.snapshot().await?;
+
+        // Collect attached keys.
+        let (start, end) = lease_keys_bounds(id);
+        let entries = snap.range(TABLE_LEASE_KEYS, start, end, 0).await?;
+        let attached: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(k, _)| parse_lease_keys_key(k).map(|(_, uk)| uk))
+            .collect::<MvccResult<Vec<_>>>()?;
+
+        let mut ctx = ApplyContext::default();
+        // Use a single DeleteRange-per-key mutation list. Reuse the
+        // apply_inner pipeline so events fire normally.
+        let mutations: Vec<Mutation> = attached
+            .iter()
+            .map(|k| Mutation::DeleteRange {
+                key: k.clone(),
+                range_end: Vec::new(),
+                prev_kv: false,
+            })
+            .collect();
+
+        let mut produced_any = false;
+        let mut deleted_keys: i64 = 0;
+        let revision = if !mutations.is_empty() {
+            let (rev, results, produced) = self
+                .apply_inner(&*snap, &mut ctx, &mut state, &mutations)
+                .await?;
+            for r in &results {
+                deleted_keys += r.n;
+            }
+            produced_any = produced;
+            rev
+        } else {
+            state.current_rev
+        };
+
+        // Remove the lease record itself and the lease_keys entries.
+        ctx.batch.delete(TABLE_LEASE, &lease_id_key(id));
+        for (k, _) in &entries {
+            ctx.batch.delete(TABLE_LEASE_KEYS, k);
+        }
+
+        if produced_any {
+            self.commit_ctx(&mut state, revision, ctx).await?;
+        } else {
+            // No cascade — just drop the lease record / index entries.
+            self.inner
+                .engine
+                .commit(ctx.batch, WriteOptions::default())
+                .await?;
+        }
+
+        Ok(LeaseRevokeResult {
+            revision,
+            deleted_keys,
+        })
     }
 
     /// Compact the MVCC history at `rev`. After this call:
@@ -586,6 +822,24 @@ impl MvccStore {
                         .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
                     ctx.batch.put(TABLE_IDX, key, &idx_bytes);
 
+                    // If the lease association changed, update the
+                    // lease_keys reverse index. The previous lease (if
+                    // any) needs its entry removed; the new lease (if
+                    // non-zero) needs an entry added.
+                    let old_lease = prev.as_ref().map(|p| p.lease).unwrap_or(0);
+                    if old_lease != record.lease {
+                        if old_lease != 0 {
+                            ctx.batch.delete(
+                                TABLE_LEASE_KEYS,
+                                &lease_key_index(old_lease, key),
+                            );
+                        }
+                        if record.lease != 0 {
+                            ctx.batch
+                                .put(TABLE_LEASE_KEYS, &lease_key_index(record.lease, key), &[]);
+                        }
+                    }
+
                     ctx.idx_cache.insert(key.clone(), idx);
                     ctx.latest_record_cache.insert(key.clone(), record.clone());
 
@@ -659,6 +913,16 @@ impl MvccStore {
                         let idx_bytes = bincode::serialize(&idx)
                             .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
                         ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
+                        // Drop the lease_keys reverse index entry if the
+                        // deleted key was attached to a lease.
+                        if let Some(p) = &prev {
+                            if p.lease != 0 {
+                                ctx.batch.delete(
+                                    TABLE_LEASE_KEYS,
+                                    &lease_key_index(p.lease, &live_key),
+                                );
+                            }
+                        }
                         ctx.idx_cache.insert(live_key.clone(), idx);
                         ctx.latest_record_cache
                             .insert(live_key.clone(), tombstone.clone());
