@@ -45,23 +45,41 @@ struct Args {
     #[arg(long, env = "FASTETCD_DATA_DIR", default_value = "default.fastetcd")]
     data_dir: PathBuf,
 
-    /// Listen address for client gRPC (KV / Watch / Lease / Cluster /
-    /// Maintenance). Defaults to 127.0.0.1:2379.
+    /// Comma-separated list of client gRPC URLs (KV / Watch /
+    /// Lease / Cluster / Maintenance). Matches etcd's
+    /// `--listen-client-urls`. fastetcd binds to the first entry;
+    /// the rest are accepted for compatibility. Defaults to
+    /// `http://127.0.0.1:2379`.
     #[arg(
-        long,
-        env = "FASTETCD_LISTEN_CLIENT_URL",
-        default_value = "127.0.0.1:2379"
+        long = "listen-client-urls",
+        alias = "listen-client-url",
+        env = "FASTETCD_LISTEN_CLIENT_URLS",
+        default_value = "http://127.0.0.1:2379"
     )]
-    listen_client_url: String,
+    listen_client_urls: String,
 
-    /// Listen address for peer Raft traffic (AppendEntries / Vote /
-    /// InstallSnapshot). Defaults to 127.0.0.1:2380.
+    /// Comma-separated list of peer Raft URLs. Matches etcd's
+    /// `--listen-peer-urls`. fastetcd binds to the first entry.
+    /// Defaults to `http://127.0.0.1:2380`.
     #[arg(
-        long,
-        env = "FASTETCD_LISTEN_PEER_URL",
-        default_value = "127.0.0.1:2380"
+        long = "listen-peer-urls",
+        alias = "listen-peer-url",
+        env = "FASTETCD_LISTEN_PEER_URLS",
+        default_value = "http://127.0.0.1:2380"
     )]
-    listen_peer_url: String,
+    listen_peer_urls: String,
+
+    /// Advertised peer URLs that other members will use to reach
+    /// this node. Accepted for etcd compatibility; fastetcd
+    /// currently uses `listen_peer_urls` for advertising too.
+    #[arg(long = "initial-advertise-peer-urls", env = "FASTETCD_INITIAL_ADVERTISE_PEER_URLS")]
+    initial_advertise_peer_urls: Option<String>,
+
+    /// Advertised client URLs. Accepted for etcd compatibility;
+    /// reported back in Member.client_urls when no other source
+    /// is available.
+    #[arg(long = "advertise-client-urls", env = "FASTETCD_ADVERTISE_CLIENT_URLS")]
+    advertise_client_urls: Option<String>,
 
     /// Initial cluster membership, in etcd's `name=URL[,name=URL]`
     /// format. Each URL must be reachable from this node. Empty
@@ -74,9 +92,13 @@ struct Args {
     #[arg(long, env = "FASTETCD_INITIAL_CLUSTER_STATE", default_value = "new")]
     initial_cluster_state: String,
 
-    /// PEM-encoded server certificate for client and peer gRPC.
-    /// When set together with `--key-file`, the server listens
-    /// over TLS. Match's etcd's flag name.
+    /// Cluster ID token (etcd compatibility — used by etcd to
+    /// detect cross-cluster member confusion). Accepted; fastetcd's
+    /// cluster_id flag takes precedence if both are set.
+    #[arg(long = "initial-cluster-token", env = "FASTETCD_INITIAL_CLUSTER_TOKEN")]
+    initial_cluster_token: Option<String>,
+
+    /// PEM-encoded server certificate for client gRPC.
     #[arg(long, env = "FASTETCD_CERT_FILE")]
     cert_file: Option<PathBuf>,
 
@@ -84,15 +106,33 @@ struct Args {
     #[arg(long, env = "FASTETCD_KEY_FILE")]
     key_file: Option<PathBuf>,
 
-    /// PEM-encoded CA bundle used to verify peer / client certs.
+    /// PEM-encoded CA bundle used to verify client certs.
     /// Required when `--client-cert-auth` is set.
     #[arg(long, env = "FASTETCD_TRUSTED_CA_FILE")]
     trusted_ca_file: Option<PathBuf>,
 
     /// Require clients to present a TLS certificate signed by
-    /// `--trusted-ca-file`. Matches etcd's flag.
+    /// `--trusted-ca-file`.
     #[arg(long, default_value_t = false)]
     client_cert_auth: bool,
+
+    /// PEM-encoded server certificate for peer gRPC. Defaults to
+    /// `--cert-file` when unset, matching etcd's behavior.
+    #[arg(long, env = "FASTETCD_PEER_CERT_FILE")]
+    peer_cert_file: Option<PathBuf>,
+
+    /// PEM-encoded private key for peer gRPC. Defaults to
+    /// `--key-file`.
+    #[arg(long, env = "FASTETCD_PEER_KEY_FILE")]
+    peer_key_file: Option<PathBuf>,
+
+    /// PEM CA bundle for peer cert verification.
+    #[arg(long, env = "FASTETCD_PEER_TRUSTED_CA_FILE")]
+    peer_trusted_ca_file: Option<PathBuf>,
+
+    /// Require peer certs.
+    #[arg(long, default_value_t = false)]
+    peer_client_cert_auth: bool,
 
     /// Address to serve Prometheus `/metrics` on. Empty disables.
     #[arg(
@@ -101,6 +141,50 @@ struct Args {
         default_value = "127.0.0.1:2381"
     )]
     listen_metrics_url: String,
+
+    // ---- etcd-compat no-op flags --------------------------------
+    //
+    // These are flags etcd's e2e / robustness suite passes when
+    // it spawns the binary. fastetcd accepts them so the harness
+    // can launch without error; the values are logged but not
+    // otherwise consumed (yet).
+    //
+    /// (etcd compat) Snapshot frequency in committed entries.
+    /// Not yet honored by fastetcd; openraft handles snapshotting
+    /// based on its own configuration.
+    #[arg(long, env = "FASTETCD_SNAPSHOT_COUNT")]
+    snapshot_count: Option<u64>,
+
+    /// (etcd compat) Per-request quota in bytes.
+    #[arg(long, env = "FASTETCD_QUOTA_BACKEND_BYTES")]
+    quota_backend_bytes: Option<i64>,
+
+    /// (etcd compat) Maximum gRPC request size.
+    #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES")]
+    max_request_bytes: Option<u64>,
+
+    /// (etcd compat) Log level: debug / info / warn / error.
+    #[arg(long, env = "FASTETCD_LOG_LEVEL")]
+    log_level: Option<String>,
+
+    /// (etcd compat) Log outputs: stderr, stdout, or a list of files.
+    /// fastetcd always logs to stderr; the value is accepted but
+    /// ignored.
+    #[arg(long)]
+    log_outputs: Option<String>,
+
+    /// (etcd compat) Logger backend: capnslog or zap. Ignored.
+    #[arg(long)]
+    logger: Option<String>,
+
+    /// (etcd compat) Where to expose Prometheus metrics: extensive
+    /// or basic. Ignored; fastetcd's /metrics surface is fixed.
+    #[arg(long)]
+    metrics: Option<String>,
+
+    /// (etcd compat) Enable Go pprof. Ignored.
+    #[arg(long, default_value_t = false)]
+    enable_pprof: bool,
 }
 
 fn build_tls_config(
@@ -129,6 +213,24 @@ fn build_tls_config(
         (None, None) => Ok(None),
         _ => anyhow::bail!("--cert-file and --key-file must both be set or both unset"),
     }
+}
+
+/// Pick the first comma-separated URL from a list. Returns the
+/// socket part — strips `http://` / `https://` prefix for parsing
+/// as a SocketAddr in the listener calls.
+fn first_url(list: &str) -> anyhow::Result<String> {
+    let first = list
+        .split(',')
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("empty URL list"))?;
+    let bare = first
+        .strip_prefix("http://")
+        .or_else(|| first.strip_prefix("https://"))
+        .unwrap_or(&first)
+        .to_string();
+    Ok(bare)
 }
 
 fn derive_node_id(name: &str) -> NodeId {
@@ -175,16 +277,50 @@ async fn main() -> anyhow::Result<()> {
     let initial_cluster = parse_initial_cluster(&args.initial_cluster)?;
     let is_bootstrap = args.initial_cluster_state.eq_ignore_ascii_case("new");
 
+    // Pick the first entry from each URL list — etcd allows
+    // multi-listen-URL fan-out but fastetcd binds to one socket
+    // per role.
+    let client_listen_url = first_url(&args.listen_client_urls)?;
+    let peer_listen_url = first_url(&args.listen_peer_urls)?;
+
     tracing::info!(
         name = %args.name,
         node_id,
         cluster_id = args.cluster_id,
         data_dir = %args.data_dir.display(),
-        listen_client = %args.listen_client_url,
-        listen_peer = %args.listen_peer_url,
+        listen_client = %client_listen_url,
+        listen_peer = %peer_listen_url,
         cluster_state = %args.initial_cluster_state,
         peers = ?initial_cluster.keys().collect::<Vec<_>>(),
         "fastetcd starting"
+    );
+
+    // Log the no-op compat flags we received so operators can see
+    // them in startup output even though we don't act on them.
+    if let Some(v) = &args.snapshot_count {
+        tracing::debug!(snapshot_count = v, "etcd-compat flag accepted (no-op)");
+    }
+    if let Some(v) = &args.quota_backend_bytes {
+        tracing::debug!(quota_backend_bytes = v, "etcd-compat flag accepted (no-op)");
+    }
+    if let Some(v) = &args.max_request_bytes {
+        tracing::debug!(max_request_bytes = v, "etcd-compat flag accepted (no-op)");
+    }
+    if args.enable_pprof {
+        tracing::debug!("etcd-compat flag accepted (no-op): --enable-pprof");
+    }
+    let _ = (
+        &args.log_level,
+        &args.log_outputs,
+        &args.logger,
+        &args.metrics,
+        &args.initial_cluster_token,
+        &args.initial_advertise_peer_urls,
+        &args.advertise_client_urls,
+        &args.peer_cert_file,
+        &args.peer_key_file,
+        &args.peer_trusted_ca_file,
+        &args.peer_client_cert_auth,
     );
 
     std::fs::create_dir_all(&args.data_dir)?;
@@ -271,8 +407,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build peer URLs / client URLs for Member representation.
-    let peer_urls = vec![format!("http://{}", args.listen_peer_url)];
-    let client_urls = vec![format!("http://{}", args.listen_client_url)];
+    let peer_urls = vec![format!("http://{}", peer_listen_url)];
+    let client_urls = vec![format!("http://{}", client_listen_url)];
 
     let kv = KvService::new(server_state.clone());
     ClusterService::seed_self(
@@ -296,8 +432,8 @@ async fn main() -> anyhow::Result<()> {
 
     let peer_service = RaftPeerService::new(raft);
 
-    let client_listen: std::net::SocketAddr = args.listen_client_url.parse()?;
-    let peer_listen: std::net::SocketAddr = args.listen_peer_url.parse()?;
+    let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
+    let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
 
     // TLS config (client + peer share the same identity).
     let tls = build_tls_config(

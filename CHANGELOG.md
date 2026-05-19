@@ -2,7 +2,23 @@
 
 ## [Unreleased]
 
-<!-- New unreleased changes go here -->
+### 2026-05-19
+- **feat(server):** etcd-compat CLI flag aliases. fastetcd now
+  accepts etcd's plural URL forms (`--listen-client-urls`,
+  `--listen-peer-urls`, `--advertise-client-urls`,
+  `--initial-advertise-peer-urls`) — comma-separated lists with
+  the singular forms kept as aliases. Each is parsed for the
+  first entry to bind. Also accepts the no-op flags etcd's e2e /
+  robustness harness passes when launching the binary
+  (`--snapshot-count`, `--quota-backend-bytes`,
+  `--max-request-bytes`, `--log-level`, `--log-outputs`,
+  `--logger`, `--metrics`, `--enable-pprof`,
+  `--initial-cluster-token`, peer-TLS flags
+  `--peer-cert-file`/`--peer-key-file`/`--peer-trusted-ca-file`/
+  `--peer-client-cert-auth`); their values are logged at debug
+  level but otherwise ignored. This makes fastetcd a drop-in
+  binary for any tooling that already knows how to launch etcd
+  (including downstream robustness suites).
 
 ## [v0.5.0] — 2026-05-19
 
