@@ -15,6 +15,18 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(server):** Implement the Cluster + Maintenance gRPC services.
+  Cluster: `MemberList` returns self (one entry, with `peer_urls` /
+  `client_urls` from the CLI flags); `MemberAdd` / `MemberRemove` /
+  `MemberUpdate` / `MemberPromote` return `Status::unimplemented`
+  until peer transport (task #13) is in. Maintenance: `Status`
+  populates real values from openraft metrics (leader, term, applied
+  index) and the MVCC engine (db_size, revision); `Hash` / `HashKV`
+  compute SHA-256 over the `mvcc_kv` table (folded to a u32 for the
+  wire shape); `Snapshot` streams the bincode-serialized state
+  machine snapshot in 64 KiB chunks; `Defragment` is a no-op;
+  `MoveLeader` / `Downgrade` return `Status::unimplemented`.
+  `Alarm` returns an empty list. 5 new gRPC-level tests pass.
 - **feat(server):** Implement the KV gRPC service. `KvService`
   implements all five `Kv` RPCs (Range, Put, DeleteRange, Txn,
   Compact). Mutating ops propose `FastetcdLogEntry`s through

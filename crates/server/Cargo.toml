@@ -30,5 +30,8 @@ fastetcd-proto.workspace = true
 fastetcd-storage.workspace = true
 fastetcd-raft.workspace = true
 
+sha2.workspace = true
+bincode.workspace = true
+
 [dev-dependencies]
 tempfile = "3.13"

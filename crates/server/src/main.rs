@@ -6,11 +6,15 @@ use clap::Parser;
 use openraft::{Config, Raft};
 use tonic::transport::Server;
 
+use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
+use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_raft::log_store::MemLogStore;
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
+use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
+use fastetcd_server::maintenance::MaintenanceService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
@@ -137,11 +141,23 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let listen: std::net::SocketAddr = args.listen_client_url.parse()?;
-    tracing::info!(%listen, "serving KV gRPC");
+    let peer_urls = vec![format!("http://{}", args.listen_peer_url)];
+    let client_urls = vec![format!("http://{}", args.listen_client_url)];
+    tracing::info!(%listen, "serving KV / Cluster / Maintenance gRPC");
 
-    let kv = KvService::new(server_state);
+    let kv = KvService::new(server_state.clone());
+    let cluster = ClusterService::new(
+        server_state.clone(),
+        args.name.clone(),
+        peer_urls,
+        client_urls,
+    );
+    let maintenance = MaintenanceService::new(server_state);
+
     Server::builder()
         .add_service(KvServer::new(kv))
+        .add_service(ClusterServer::new(cluster))
+        .add_service(MaintenanceServer::new(maintenance))
         .serve(listen)
         .await?;
 

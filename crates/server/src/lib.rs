@@ -9,8 +9,10 @@
 //!   MVCC types.
 //! - [`kv`] — `KvService` implementing the etcd v3 KV gRPC service.
 
+pub mod cluster;
 pub mod conv;
 pub mod kv;
+pub mod maintenance;
 pub mod state;
 
 pub use state::ServerState;
