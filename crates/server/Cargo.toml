@@ -35,3 +35,8 @@ bincode.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"
+# Third-party etcd v3 client crate — used to validate wire
+# compatibility against an external client that doesn't share any
+# code with fastetcd. If this client's API works against fastetcd,
+# real etcd consumers will too.
+etcd-client = "0.18"

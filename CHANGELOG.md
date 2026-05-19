@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **test(server):** Third-party Rust client compatibility tests.
+  New `tests/etcd_client_compat.rs` uses the widely-used
+  `etcd-client` crate (etcdv3/etcd-client) — which shares no code
+  with fastetcd — to validate the wire protocol end-to-end: put /
+  get / range with prefix / delete-range with prev_kv / Txn
+  compare-and-set / Lease grant+attach+revoke with cascade-delete /
+  Watch (drop create-ack + progress notifies) / MemberList /
+  Status. 8 tests, runs in ~0.5s. This is the strongest in-repo
+  wire-compat signal.
+- **test(harness):** `tests/etcdctl_smoke.sh` — optional shell
+  harness that boots a release-build fastetcd and runs `etcdctl`
+  through a representative command set (put/get/del/range/txn/
+  lease/member/endpoint-status). Skipped when etcdctl isn't on
+  PATH.
+- **docs:** New `docs/02-testing.md` lays out the three-ring
+  testing strategy (workspace tests → third-party Rust client →
+  upstream etcd robustness / etcdctl / Jepsen / Kubernetes e2e)
+  and points future correctness work at etcd's robustness suite
+  as the highest-ROI investment.
 - **feat(storage + migrate):** Revision-preserving migration. New
   `MvccStore::bulk_load_records(BulkKey[], next_rev)` writes
   `mvcc_kv` + `mvcc_idx` (and `lease_keys`) directly so source
