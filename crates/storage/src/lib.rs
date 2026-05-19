@@ -16,6 +16,7 @@
 //! in this crate too, but land in later milestones.
 
 pub mod kvstore;
+pub mod mvcc;
 
 #[cfg(feature = "redb-engine")]
 pub mod redb_engine;
@@ -24,3 +25,4 @@ pub mod redb_engine;
 pub mod iouring_engine;
 
 pub use kvstore::{KvStore, Snapshot, StorageError, StorageResult, WriteBatch, WriteOptions};
+pub use mvcc::{Mutation, MutationResult, MvccError, MvccResult, MvccStore, RangeResult};

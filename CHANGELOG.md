@@ -15,6 +15,16 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(storage):** MVCC state machine over `KvStore`. Per-key
+  generation index (`KeyIndex` / `Generation`), revision-keyed values
+  (`KvRecord`), and atomic multi-mutation `apply` that assigns one
+  `main` revision per call with distinct `sub` per mutation. Range
+  reads support current state, historical revision (`target_rev`),
+  `limit` (with `more` flag), `keys_only`, `count_only`. `prev_kv` on
+  Put and DeleteRange returns the prior records. Future-revision and
+  compacted-revision errors match etcd's messages. 19 mvcc unit
+  tests pass on the redb backend (including reopen-persistence).
+  Compact + Txn deferred to follow-up commit (task #17).
 - **feat(storage):** Define the engine-agnostic `KvStore` trait and
   implement the `redb` engine. Concrete `WriteBatch` value type (no
   trait-object downcast). Conformance test suite under
