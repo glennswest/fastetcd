@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-ctl"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-migrate"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bbolt-rs",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-proto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-raft"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-server"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-storage"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",

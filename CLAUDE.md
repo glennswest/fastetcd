@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.0.0`** — pre-alpha, no public surface yet.
+**`0.1.0`** — initial usable release. KV / Watch / Lease / Cluster
+/ Maintenance gRPC services all working; multi-node Raft cluster
+operational; etcd snapshot migration tool; two storage engines
+(`redb` default, `wal-engine` opt-in); criterion bench harness.
+Known gaps documented in `CHANGELOG.md`.
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`

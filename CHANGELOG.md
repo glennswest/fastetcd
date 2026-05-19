@@ -2,212 +2,145 @@
 
 ## [Unreleased]
 
-### 2026-05-18
-- **chore:** Initial project scaffolding — README, CLAUDE.md, CHANGELOG,
-  .gitignore, design doc. No code yet.
-- **docs:** Design decision recorded: redb storage, openraft consensus,
-  tonic gRPC, multi-node from day one. See `docs/00-design.md`.
-- **docs:** Reframed project positioning to remove specific usage-context
-  framing; fastetcd is positioned as a Rust etcd v3 implementation focused
-  on low resource overhead and predictable latency.
-- **chore:** Set up Cargo workspace with six crates — `proto`, `storage`,
-  `raft`, `server`, `migrate`, `ctl`. Skeleton only; libraries are empty
-  and binaries print a "skeleton" notice.
+<!-- New unreleased changes go here -->
 
-### 2026-05-19
-- **feat(storage):** `WalEngine` — second first-class engine
-  delivered cross-platform via tokio fs, behind cargo feature
-  `wal-engine`. Architecture: append-only WAL (length-prefixed
-  bincode batches) + in-memory `BTreeMap<(table, user_key), value>`
-  index. Writes: append → fsync → mutate index. Reads: clone of the
-  index → snapshot. On open: WAL replay rebuilds index; truncated
-  trailing records (crash mid-write) are tolerated. Passes the same
-  conformance suite as redb (6 new tests) plus a
-  `wal_persists_across_reopen` integration. Engine selection at
-  runtime via the same `KvStore` trait dispatch — no caller changes.
-  Side-by-side bench addition: `mvcc_put_single/wal ~3.99 ms` vs
-  `redb ~4.07 ms` on macOS APFS.
-- **Note on the `iouring` feature:** the `iouring` cargo feature
-  (Linux-only) now depends on `wal-engine` and is positioned as a
-  drop-in swap of the file-I/O layer (open / append / fsync) under
-  `WalEngine` using `glommio` + `O_DIRECT`. The architectural shape
-  above this layer is the same; the kernel-bypass speedup is what
-  changes. Implementing the swap is its own multi-week effort and
-  remains a tracked follow-up.
-- **bench(storage):** Criterion microbenchmark harness in
-  `crates/storage/benches/mvcc.rs`. Four groups against the redb
-  engine: single-key put, single-key range, 100-key batched put,
-  100-key DeleteRange (with backfill). Numbers serve as the
-  baseline the iouring engine and any future tuning are measured
-  against. Local baseline on macOS APFS (median):
-    - `mvcc_put_single/redb`      ~3.9 ms
-    - `mvcc_range_single/redb`    ~29 µs
-    - `mvcc_put_batch_100/redb`   ~5.2 ms  (52 µs/op amortized)
-    - `mvcc_delete_range_100/redb` ~10.4 ms (insert + delete-range)
-- **feat(migrate):** `fastetcd-migrate` reads an etcd v3 BoltDB
-  snapshot (using `bbolt-rs` 1.3) and replays the latest record per
-  user-key into a fresh fastetcd data dir via a single `MvccStore::apply`.
-  Tombstones are detected by the trailing `b't'` on bolt keys and
-  cause the user key to be skipped. Logic lives in a library
-  `migrate_snapshot(from, to, force)` consumable from other binaries
-  / tests; the bin is a thin CLI wrapper. End-to-end test builds a
-  synthetic etcd snapshot using `bbolt-rs` in rw mode, runs the
-  migration, and verifies the data round-trips through `MvccStore`.
-  **Known gap:** revision history is not preserved — every imported
-  key has `create_revision = mod_revision = 1` after migration.
-  Phase 2 will add a revision-preserving bulk-load path.
-- **feat(raft):** **Multi-node operational** — gRPC peer transport
-  for openraft `AppendEntries` / `Vote` / `InstallSnapshot`.
-  New internal proto `fastetcd.raft.RaftPeer` with three RPCs each
-  carrying bincode-serialized openraft request/response structs
-  (no need to vendor openraft's evolving types into protobuf).
-  `GrpcNetworkFactory` lazily dials each peer over tonic and caches
-  the channel; `RaftPeerService` is the server-side handler that
-  deserializes and dispatches into `Raft::append_entries` /
-  `raft.vote` / `raft.install_snapshot`. Server binary now serves
-  `RaftPeer` on `--listen-peer-url` while client services stay on
-  `--listen-client-url`; new flags `--initial-cluster` (etcd
-  `name=URL[,name=URL]` form) and `--initial-cluster-state`
-  (`new` / `existing`) drive multi-node bootstrap. Integration
-  test (`multinode_grpc.rs`) brings up a 3-node cluster in process,
-  initializes via openraft, waits for leader election, puts on the
-  leader, and verifies all three followers see the value through
-  Raft replication via the gRPC transport. 1 new test.
-- **feat(raft):** `KvLogStore` — `RaftLogStorage` implementation over
-  the engine-agnostic `KvStore`. Tables: `raft_log` (index_be -> Entry)
-  and `raft_meta` (vote, committed, last_purged_log_id). Append /
-  truncate / purge / save_vote / read_vote / save_committed all flow
-  through the same `WriteOptions { sync: true }` semantics the MVCC
-  layer uses, so log durability matches state-machine durability.
-  The server binary and the test harness now share **one engine
-  instance** between MVCC state and Raft log — a single redb file is
-  the entire on-disk surface, making operational backups (copy one
-  file) trivially correct. The old in-memory `MemLogStore` remains in
-  the crate for unit tests but is no longer used at the binary level.
-- **feat(server):** Watch historical replay. Watchers created with
-  `start_revision > 0` now receive a backfill of every event in
-  `(start_revision - 1, current_revision]` for their key range,
-  delivered before live events resume. Storage layer adds
-  `MvccStore::range_events()` which walks the per-key generation
-  list, gathers `(rev, user_key)` pairs in the window, sorts by
-  `(rev, key)`, fetches each `KvRecord`, and computes `prev_kv` per
-  event. Compacted-rev detection in `range_events` matches the
-  watcher's create-time check. 1 new test.
-- **feat(server):** Implement the Lease gRPC service — Phase 1.
-  Grant / Revoke / KeepAlive (bidi stream) / TimeToLive / Leases all
-  go through Raft via new `FastetcdLogEntry::Lease*` variants.
-  Storage layer additions: `lease` and `lease_keys` tables; Put
-  updates the `lease_keys` reverse index when `lease != 0`;
-  DeleteRange drops the index entry; LeaseRevoke cascades a delete
-  across every attached key (deletes share one main revision, fire
-  watch events). Lease IDs auto-allocate from a persisted
-  `next_lease_id` counter. Known gap: no leader-side ticker
-  auto-revokes expired leases — clients must explicitly revoke for
-  cascade-delete to fire (follow-up commit will add a ticker that
-  proposes LeaseRevoke entries when deadlines pass). 3 new gRPC
-  tests pass.
-- **feat(server):** Implement the Watch gRPC service — Phase 1.
-  Bidirectional stream multiplexing many watchers per connection.
-  `WatchCreate` (with key/range, filters, prev_kv flag,
-  progress_notify), `WatchCancel`, and `WatchProgressRequest`
-  supported. Live event fan-out backed by a new
-  `tokio::sync::broadcast` channel on `MvccStore`: every committed
-  apply/txn emits an `EventBatch` carrying `Put` / `Delete`
-  `MvccEvent`s with optional `prev_kv`. Per-stream tasks: one
-  forwards filtered events; one ticks `ProgressNotify` every 10s
-  for watchers that enabled it. Watchers created at
-  `start_revision < compact_rev` receive a `canceled` response with
-  `compact_revision` set, matching etcd. 5 new gRPC tests pass.
-- **Known gap:** historical replay (watch starting at a past
-  `start_revision <= current`) is not yet implemented; deferred to
-  the next watch commit. Workaround: clients can `Range` at the
-  desired revision then watch from `start_revision = 0`.
-- **feat(server):** Implement the Cluster + Maintenance gRPC services.
-  Cluster: `MemberList` returns self (one entry, with `peer_urls` /
-  `client_urls` from the CLI flags); `MemberAdd` / `MemberRemove` /
-  `MemberUpdate` / `MemberPromote` return `Status::unimplemented`
-  until peer transport (task #13) is in. Maintenance: `Status`
-  populates real values from openraft metrics (leader, term, applied
-  index) and the MVCC engine (db_size, revision); `Hash` / `HashKV`
-  compute SHA-256 over the `mvcc_kv` table (folded to a u32 for the
-  wire shape); `Snapshot` streams the bincode-serialized state
-  machine snapshot in 64 KiB chunks; `Defragment` is a no-op;
-  `MoveLeader` / `Downgrade` return `Status::unimplemented`.
-  `Alarm` returns an empty list. 5 new gRPC-level tests pass.
-- **feat(server):** Implement the KV gRPC service. `KvService`
-  implements all five `Kv` RPCs (Range, Put, DeleteRange, Txn,
-  Compact). Mutating ops propose `FastetcdLogEntry`s through
-  `Raft::client_write`; reads serve directly from `MvccStore`
-  (serializable on single-node, which is equivalent to linearizable
-  with no peers). Header `cluster_id`, `member_id`, `revision`, and
-  `raft_term` are populated from `ServerState` + Raft metrics.
-  Compact maps `MvccError::Compacted` to gRPC `OutOfRange` matching
-  etcd. The `fastetcd` binary now boots a single-node Raft cluster
-  and serves the KV service on `--listen-client-url`. End-to-end
-  tests through real tonic clients pass (6 cases: put+range,
-  prev_kv, delete-range, historical read, txn success, compact).
-  Watch / Lease / Maintenance / Cluster services land in the next
-  commits.
-- **feat(raft):** openraft integration (single-node). `TypeConfig`,
-  `FastetcdLogEntry` (Apply / Txn / Compact / Noop), and
-  `FastetcdLogResponse`. `FastetcdStateMachine` wraps `MvccStore` and
-  dispatches every committed entry to the matching MVCC operation;
-  snapshot building serializes the full MVCC state +
-  `last_applied_log_id` + membership into `Cursor<Vec<u8>>`.
-  `MemLogStore` (in-memory `BTreeMap<u64, Entry>`) implements
-  `RaftLogStorage` + `RaftLogReader` — production KvStore-backed log
-  storage lands in task #14. Integration test: a one-node cluster
-  proposes an `Apply` entry via `client_write`, sees revision 1
-  returned, then reads the value back from MVCC. Added serde derives
-  to MVCC `Mutation`, `MutationResult`, `RangeResult`, `Compare`,
-  `CompareOp`, `CompareTarget`, `RangeOp`, `TxnOp`, `TxnOpResult`,
-  `TxnResult` so log entries serialize round-trip.
-- **feat(storage):** MVCC `Txn(compare, success, failure)`. Compare
-  types: `Version`, `CreateRevision`, `ModRevision`, `Value`, `Lease`
-  with `Equal | NotEqual | Greater | Less`. Single-key and range
-  compares (range compares require all keys in the range to satisfy);
-  absent keys compare against the implicit zero record (matches
-  etcd). Ops in chosen branch run in order: reads see the pre-mutation
-  snapshot, all writes share one new `main` revision (with distinct
-  sub-revisions). Internal refactor: extracted `apply_inner` /
-  `range_inner` so `apply()`, `range()`, and `txn()` share one write
-  lock. 7 new Txn tests (46 total pass).
-- **feat(storage):** MVCC `Compact(rev)`. Walks every `KeyIndex` and
-  prunes generations whose tombstone is `<= rev`; in surviving
-  generations drops all puts strictly older than the latest put
-  `<= rev` (preserving the floor so `Range` at `rev` still works).
-  Dropped `KvRecord`s removed atomically. Persists `compact_rev` so
-  the floor survives reopen. Range check is now strict: reads at
-  `target_rev < compact_rev` return `MvccError::Compacted`; reads at
-  `target_rev == compact_rev` succeed (off-by-one fix from previous
-  commit). 8 new tests (39 total pass).
-- **feat(storage):** MVCC state machine over `KvStore`. Per-key
-  generation index (`KeyIndex` / `Generation`), revision-keyed values
-  (`KvRecord`), and atomic multi-mutation `apply` that assigns one
-  `main` revision per call with distinct `sub` per mutation. Range
-  reads support current state, historical revision (`target_rev`),
-  `limit` (with `more` flag), `keys_only`, `count_only`. `prev_kv` on
-  Put and DeleteRange returns the prior records. Future-revision and
-  compacted-revision errors match etcd's messages. 19 mvcc unit
-  tests pass on the redb backend (including reopen-persistence).
-  Compact + Txn deferred to follow-up commit (task #17).
-- **feat(storage):** Define the engine-agnostic `KvStore` trait and
-  implement the `redb` engine. Concrete `WriteBatch` value type (no
-  trait-object downcast). Conformance test suite under
-  `crate::kvstore::conformance` runs against any engine; six tests pass
-  on the redb backend (put/get/delete, range scan, delete-range,
-  snapshot isolation, count, engine name). `iouring` engine module
-  ships as a feature-gated skeleton — calls return
-  `StorageError::Misuse` until task #15 lands.
-- **feat(proto):** Vendor etcd v3.6.11 .proto files (`rpc.proto`, `kv.proto`,
-  `auth.proto`) and wire up `tonic-build` codegen. Reproducible
-  re-vendoring via `crates/proto/vendor.sh` and `strip_annotations.py`,
-  which removes annotations we don't need (gogoproto, grpc-gateway,
-  versionpb metadata). Generated stubs re-exported from
-  `fastetcd_proto::{etcdserverpb, mvccpb, authpb}`.
-- **docs:** Storage layer reframed as a trait-first abstraction with two
-  first-class engines selectable at runtime: `redb` (default,
-  cross-platform) and `iouring` (Linux, `glommio` + `O_DIRECT` + custom
-  WAL; behind cargo feature `iouring`). Both are supported, not
-  prototype-and-replace. SPDK remains a long-term option, not committed
-  work. Design doc, README, CLAUDE.md updated.
+## [v0.1.0] — 2026-05-19
+
+Initial usable release. fastetcd boots a single-node or multi-node
+cluster, serves the full etcd v3 KV / Watch / Lease / Cluster /
+Maintenance gRPC surface, and persists state through openraft.
+
+### Added
+
+- **Project scaffold and Cargo workspace** with six crates: `proto`,
+  `storage`, `raft`, `server`, `migrate`, `ctl`. Apache 2.0 license.
+- **Vendored etcd v3.6.11 `.proto` files** (`rpc.proto`, `kv.proto`,
+  `auth.proto`) with a reproducible `vendor.sh` pipeline that strips
+  gogoproto / grpc-gateway / versionpb annotations. `tonic-build`
+  codegen emits stubs under `fastetcd_proto::{etcdserverpb, mvccpb,
+  authpb}`.
+- **Engine-agnostic `KvStore` trait** with concrete `WriteBatch`
+  value, `Snapshot` trait, `WriteOptions`, and a conformance test
+  suite reusable by any backend.
+- **`redb` storage engine** (default; cross-platform). Single-file
+  ACID B-tree. Passes the conformance suite (6 tests).
+- **`WalEngine` storage engine** (opt-in via `wal-engine` feature).
+  Append-only WAL + in-memory `BTreeMap` index, replay-on-open.
+  Passes the conformance suite + persistence-across-reopen.
+- **MVCC state machine** over `KvStore`: revisions
+  (`Revision { main, sub }` packed 16-byte BE), per-key
+  generation index, revision-keyed value table, atomic
+  multi-mutation `apply`. `Range` supports current/historical
+  reads, `limit` (with `more`), `keys_only`, `count_only`.
+  `Compact(rev)` walks `KeyIndex` and prunes generations whose
+  tombstone is `<= rev`; preserves the floor record per key for
+  exact-rev historical reads. `Txn` with `Compare`
+  (Version/CreateRev/ModRev/Value/Lease × Equal/NotEqual/Greater/
+  Less, single-key or range) and atomic success/failure branches
+  sharing one revision. `range_events()` backs Watch historical
+  replay.
+- **Lease layer** on `MvccStore`: lease records persisted in the
+  `lease` table, `lease_keys` reverse index updated on every
+  Put/DeleteRange with non-zero lease, `apply_lease_grant`,
+  `apply_lease_revoke` cascade-deletes attached keys, `lease_ttl`
+  computes remaining seconds, `lease_list`.
+- **openraft integration**: `FastetcdLogEntry` (Apply / Txn /
+  Compact / LeaseGrant / LeaseRevoke / LeaseKeepAlive / Noop),
+  `FastetcdLogResponse`, `FastetcdStateMachine` wrapping
+  `MvccStore`, `KvLogStore` (persistent `RaftLogStorage` over
+  `KvStore`), `FastetcdSnapshotBuilder`.
+- **Multi-node Raft peer transport**: internal proto
+  `fastetcd.raft.RaftPeer` (AppendEntries / Vote / InstallSnapshot)
+  carrying bincode-serialized openraft messages.
+  `GrpcNetworkFactory` lazily dials peers over tonic;
+  `RaftPeerService` handles inbound RPCs.
+- **KV gRPC service**: Range, Put, DeleteRange, Txn, Compact.
+  Routes mutations through Raft; reads served from `MvccStore`
+  (serializable; on single-node this is linearizable since there
+  are no replicas). `OutOfRange` on compacted-rev reads.
+- **Watch gRPC service** (Phase 1 + 2): live event fan-out via a
+  `broadcast::channel` on `MvccStore` plus historical replay from
+  `start_revision`. Range filters, NOPUT/NODELETE filters,
+  `prev_kv`, progress-notify timer, compacted-rev cancellation.
+- **Lease gRPC service**: Grant, Revoke, KeepAlive (bidi stream),
+  TimeToLive (with optional attached-keys list), Leases.
+- **Cluster gRPC service**: `MemberList` returns self;
+  Add/Remove/Update/Promote return `Unimplemented` (membership
+  changes via openraft are tracked as follow-up work).
+- **Maintenance gRPC service**: Status (real raft + MVCC values),
+  Hash / HashKV (SHA-256 folded to u32), Snapshot (streaming),
+  Alarm, Defragment (no-op), MoveLeader / Downgrade unimplemented.
+- **`fastetcd-migrate` tool**: reads an etcd v3 BoltDB snapshot
+  (via `bbolt-rs`), keeps the latest record per user-key, bulk-
+  applies into a fresh `MvccStore`. Tombstones detected via the
+  trailing `b't'` on bolt keys.
+- **`fastetcd` server binary** with etcd-shaped flags:
+  `--name`, `--node-id`, `--cluster-id`, `--data-dir`,
+  `--listen-client-url`, `--listen-peer-url`, `--initial-cluster`,
+  `--initial-cluster-state`. Multi-port serving: client services
+  on one socket, RaftPeer service on the peer socket. Single
+  `redb` file in `--data-dir` backs both MVCC state and Raft log.
+- **Criterion benchmark harness** for the MVCC layer: put-single,
+  range-single, batched put, delete-range, comparable across
+  engines (`redb` vs `wal`).
+- **75 tests pass workspace-wide.** All gRPC services have
+  end-to-end tests through real tonic clients; a 3-node multinode
+  test validates Raft replication over the gRPC peer transport.
+
+### Known gaps
+
+These are documented and tracked as follow-up work:
+
+- **iouring kernel-bypass file I/O.** The `iouring` cargo feature
+  exists and depends on `wal-engine`, but the glommio + `O_DIRECT`
+  file-I/O layer that delivers the actual sub-ms p99 is not yet
+  implemented. `WalEngine` provides the architectural shape that
+  swap will live under.
+- **Lease auto-expiry.** Deadlines are persisted and
+  `LeaseTimeToLive` returns correct remaining seconds, but no
+  leader-side ticker auto-revokes expired leases. Clients must
+  explicitly revoke for cascade-delete to fire.
+- **Cluster membership changes** (`MemberAdd` / `Remove` / `Update`
+  / `Promote`). The peer transport is in; the gRPC handlers
+  currently return `Unimplemented`. Wiring through openraft's
+  `change_membership` API is straightforward follow-up.
+- **Auth gRPC service** is deferred. Common deployments use TLS
+  client-cert authentication outside the etcd Auth subsystem.
+- **`MoveLeader` / `Defragment` / `Downgrade`** return
+  `Unimplemented`.
+- **Migration tool revision history**: currently imports only the
+  latest record per user-key. Revision-preserving import is a
+  follow-up (it requires direct mvcc_kv / mvcc_idx writes
+  bypassing the public `apply` path).
+
+### Storage architecture (recap)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ tonic gRPC: KV / Watch / Lease / Cluster / Maintenance           │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ (writes proposed through Raft)
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ openraft — consensus, log replication, membership, snapshots     │
+│ KvLogStore over KvStore   ·   FastetcdStateMachine over MvccStore │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ (apply)
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ MVCC state machine: revisions, generations, leases, events       │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ (KvStore trait, runtime-selectable)
+                               ▼
+                ┌──────────────┴──────────────┐
+                │                             │
+            redb engine                  wal-engine
+        (default, B-tree)         (append-only WAL +
+                                   in-memory BTreeMap;
+                                   iouring backend below
+                                   this is future work)
+```
+
+## [v0.0.0] — pre-release
+
+See git history for individual commits prior to v0.1.0.
