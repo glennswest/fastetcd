@@ -2,7 +2,17 @@
 
 ## [Unreleased]
 
-<!-- New unreleased changes go here -->
+### 2026-05-19
+- **feat(server):** Lease auto-expiry ticker. Background task runs
+  on the leader only (followers are no-ops) and once per second
+  walks the persisted lease set; any lease with
+  `deadline_unix_secs < now` is auto-revoked via the same
+  `FastetcdLogEntry::LeaseRevoke` path explicit revokes use, so
+  attached keys cascade-delete through Raft. Leadership transitions
+  hand the work to the new leader on its next tick. Closes a known
+  gap from v0.1.0. End-to-end test (`lease_expiry_grpc.rs`) grants
+  a 1-second lease, attaches two keys, waits 2.5s, and verifies the
+  lease is gone and both keys are deleted.
 
 ## [v0.1.0] — 2026-05-19
 

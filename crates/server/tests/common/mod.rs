@@ -116,6 +116,7 @@ pub async fn wait_for_leader(raft: &Raft<TypeConfig>) {
 pub struct TestServerHandles {
     pub _dir: TempDir,
     pub endpoint: String,
+    pub state: std::sync::Arc<ServerState>,
 }
 
 pub async fn start_test_server_full() -> TestServerHandles {
@@ -155,7 +156,7 @@ pub async fn start_test_server_full() -> TestServerHandles {
     );
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
-    let lease = LeaseService::new(state);
+    let lease = LeaseService::new(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -178,5 +179,18 @@ pub async fn start_test_server_full() -> TestServerHandles {
     TestServerHandles {
         _dir: dir,
         endpoint: format!("http://{addr}"),
+        state,
     }
+}
+
+/// Same as `start_test_server_full` but additionally spawns the
+/// lease auto-expiry ticker at 200ms cadence (faster than prod so
+/// tests don't have to sleep for a full second).
+pub async fn start_test_server_full_with_expiry_ticker() -> TestServerHandles {
+    let h = start_test_server_full().await;
+    fastetcd_server::lease_expiry::spawn_with_tick(
+        h.state.clone(),
+        Duration::from_millis(200),
+    );
+    h
 }

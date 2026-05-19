@@ -175,6 +175,9 @@ async fn main() -> anyhow::Result<()> {
 
     let server_state = Arc::new(ServerState::new(raft.clone(), sm, args.cluster_id, node_id));
 
+    // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
+    fastetcd_server::lease_expiry::spawn(server_state.clone());
+
     // Build peer URLs / client URLs for Member representation.
     let peer_urls = vec![format!("http://{}", args.listen_peer_url)];
     let client_urls = vec![format!("http://{}", args.listen_client_url)];
