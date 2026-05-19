@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
+use tokio::sync::RwLock;
 use tokio::task;
 
 use crate::kvstore::{
@@ -29,7 +30,7 @@ pub struct RedbEngine {
 }
 
 struct RedbInner {
-    db: Database,
+    db: RwLock<Database>,
     path: PathBuf,
 }
 
@@ -40,7 +41,10 @@ impl RedbEngine {
         let path = path.as_ref().to_path_buf();
         let db = Database::create(&path).map_err(StorageError::io)?;
         Ok(Self {
-            inner: Arc::new(RedbInner { db, path }),
+            inner: Arc::new(RedbInner {
+                db: RwLock::new(db),
+                path,
+            }),
         })
     }
 
@@ -53,22 +57,28 @@ impl RedbEngine {
 impl KvStore for RedbEngine {
     async fn snapshot(&self) -> StorageResult<Arc<dyn Snapshot>> {
         let inner = self.inner.clone();
-        let snap = task::spawn_blocking(move || -> StorageResult<RedbSnapshot> {
-            let txn = inner.db.begin_read().map_err(StorageError::io)?;
-            Ok(RedbSnapshot {
-                _engine: inner.clone(),
-                txn: Arc::new(txn),
-            })
-        })
-        .await
-        .map_err(|e| StorageError::Io(Box::new(e)))??;
-        Ok(Arc::new(snap))
+        let db_guard = inner.db.read().await;
+        let txn = db_guard.begin_read().map_err(StorageError::io)?;
+        drop(db_guard);
+        Ok(Arc::new(RedbSnapshot {
+            _engine: inner.clone(),
+            txn: Arc::new(txn),
+        }))
     }
 
     async fn commit(&self, batch: WriteBatch, _opts: WriteOptions) -> StorageResult<()> {
         let inner = self.inner.clone();
-        task::spawn_blocking(move || -> StorageResult<()> {
-            let txn = inner.db.begin_write().map_err(StorageError::io)?;
+        // Hold the read lock across the spawn_blocking. We use a
+        // read lock because redb begin_write only needs &self;
+        // exclusive access is only required for compact (taken via
+        // db.write().await below).
+        let db_guard = inner.db.read().await;
+        let txn = db_guard.begin_write().map_err(StorageError::io)?;
+        // Move ownership of txn into the blocking task. The
+        // db_guard must outlive the txn; we keep it on the calling
+        // task and the blocking task only sees the txn.
+        let result = task::spawn_blocking(move || -> StorageResult<()> {
+            let txn = txn;
             for op in batch.ops() {
                 match op {
                     BatchOp::Put { table, key, value } => {
@@ -110,7 +120,9 @@ impl KvStore for RedbEngine {
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::Io(Box::new(e)))??;
+        .map_err(|e| StorageError::Io(Box::new(e)))?;
+        drop(db_guard);
+        result?;
         Ok(())
     }
 
@@ -133,6 +145,14 @@ impl KvStore for RedbEngine {
 
     fn engine_name(&self) -> &'static str {
         "redb"
+    }
+
+    async fn defragment(&self) -> StorageResult<()> {
+        // Take the exclusive lock on the redb Database; this blocks
+        // any concurrent commit/snapshot until compaction completes.
+        let mut db_guard = self.inner.db.write().await;
+        let _changed = db_guard.compact().map_err(StorageError::io)?;
+        Ok(())
     }
 }
 

@@ -119,6 +119,50 @@ async fn snapshot_streams_bytes() {
 }
 
 #[tokio::test]
+async fn defragment_succeeds_after_writes() {
+    let h = start_test_server_full().await;
+    let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
+    let mut mnt = MaintenanceClient::connect(h.endpoint.clone()).await.unwrap();
+    for i in 0..50u32 {
+        kv.put(pb::PutRequest {
+            key: format!("k-{i}").into_bytes(),
+            value: vec![b'x'; 256],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    // Re-overwrite to create garbage that compaction can reclaim.
+    for i in 0..50u32 {
+        kv.put(pb::PutRequest {
+            key: format!("k-{i}").into_bytes(),
+            value: vec![b'y'; 256],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    let resp = mnt
+        .defragment(pb::DefragmentRequest {})
+        .await
+        .expect("defragment should succeed")
+        .into_inner();
+    assert!(resp.header.is_some());
+
+    // Data should still be readable after defragment.
+    let r = kv
+        .range(pb::RangeRequest {
+            key: b"k-0".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(r.kvs.len(), 1);
+    assert_eq!(r.kvs[0].value, vec![b'y'; 256]);
+}
+
+#[tokio::test]
 async fn member_add_as_learner_appears_in_member_list() {
     // The test harness is single-node with no live peer reachable at
     // the URL we pass — so a voting MemberAdd would block on

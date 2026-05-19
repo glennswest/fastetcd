@@ -259,6 +259,64 @@ impl KvStore for WalEngine {
     fn engine_name(&self) -> &'static str {
         "wal"
     }
+
+    async fn defragment(&self) -> StorageResult<()> {
+        // Rewrite the WAL: replay the in-memory index into a fresh
+        // file, then swap.
+        let mut g = self.inner.state.lock().await;
+        // Build a single WriteRecord containing one Put per current
+        // (table, key, value).
+        let ops: Vec<BatchOpWire> = g
+            .index
+            .iter()
+            .map(|((t, k), v)| BatchOpWire::Put {
+                table: t.clone(),
+                key: k.clone(),
+                value: v.clone(),
+            })
+            .collect();
+        let wire = WalRecord { ops };
+        let body = bincode::serialize(&wire).map_err(|e| {
+            StorageError::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        let mut framed = Vec::with_capacity(4 + body.len());
+        framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&body);
+
+        let tmp = self.inner.path.with_extension("compact-tmp");
+        // Write the new file.
+        let mut new_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&tmp)
+            .await
+            .map_err(StorageError::io)?;
+        new_file
+            .write_all(&framed)
+            .await
+            .map_err(StorageError::io)?;
+        new_file.sync_data().await.map_err(StorageError::io)?;
+        drop(new_file);
+
+        // Atomically swap.
+        tokio::fs::rename(&tmp, &self.inner.path)
+            .await
+            .map_err(StorageError::io)?;
+
+        // Reopen the WAL handle pointing at the new file (append mode).
+        let new_handle = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&self.inner.path)
+            .await
+            .map_err(StorageError::io)?;
+        g.wal = new_handle;
+        g.wal_bytes = framed.len() as u64;
+        Ok(())
+    }
 }
 
 struct WalSnapshot {

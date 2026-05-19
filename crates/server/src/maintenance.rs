@@ -98,9 +98,13 @@ impl Maintenance for MaintenanceService {
         &self,
         _request: Request<pb::DefragmentRequest>,
     ) -> Result<Response<pb::DefragmentResponse>, Status> {
-        // No-op for now. redb has compact-in-place but invoking it
-        // safely from here requires further work — track via task
-        // follow-up.
+        self.state
+            .sm
+            .mvcc()
+            .engine()
+            .defragment()
+            .await
+            .map_err(|e| Status::internal(format!("defragment: {e}")))?;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(pb::DefragmentResponse {

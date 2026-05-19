@@ -214,6 +214,15 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Engine-defined name for logging and metrics (`"redb"`, `"iouring"`).
     fn engine_name(&self) -> &'static str;
+
+    /// Best-effort online defragmentation. Engines that don't
+    /// support compaction may return `Ok(())` as a no-op. May
+    /// block (under `spawn_blocking`) for the duration of the
+    /// rewrite — callers should not hold open snapshots while
+    /// invoking.
+    async fn defragment(&self) -> StorageResult<()> {
+        Ok(())
+    }
 }
 
 /// Conformance tests for any [`KvStore`] implementation. Engines link to

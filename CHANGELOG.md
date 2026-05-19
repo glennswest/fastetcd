@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(storage + server):** `Maintenance.Defragment` is real.
+  New `KvStore::defragment()` trait method (default no-op for
+  engines that don't compact). redb engine wraps its
+  `Database` in a `tokio::sync::RwLock` and runs `compact()`
+  under the write lock; commit/snapshot take the read lock so
+  defrag serializes against writes without starving reads. WAL
+  engine compacts by replaying its in-memory index into a fresh
+  WAL file and atomically renaming. `Maintenance.Defragment`
+  delegates to the active engine's implementation.
+  Test: write+overwrite 50 keys, defragment, verify the latest
+  value is still readable.
 - **feat(server):** Auth gRPC service — Phase 1. Implements every
   Auth RPC (`AuthEnable` / `Disable` / `Status`, `Authenticate`,
   full User / Role CRUD, grant / revoke). Passwords hashed with
