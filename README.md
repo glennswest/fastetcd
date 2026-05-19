@@ -38,8 +38,13 @@ etcd v3 clients, with a migration path from existing etcd data.
 │ MVCC state machine: key→revision index, revision→value store,        │
 │                     leases, compaction, watches                      │
 └────────────────────────────┬─────────────────────────────────────────┘
+                             │   (KvStore trait — engine-agnostic)
                              ▼
-                       redb (single file, B-tree, ACID)
+        ┌────────────────────┴───────────────────┐
+        │                                        │
+   redb engine                            iouring engine
+   (default, cross-platform,              (Linux, glommio + O_DIRECT
+    ACID single-file B-tree)               + group-committed WAL)
 ```
 
 Peer transport is internal gRPC. Read-index linearizable reads by default;

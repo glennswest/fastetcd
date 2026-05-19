@@ -34,19 +34,35 @@ on the apply path, without requiring any client to change.
 
 ## Component choices
 
-### Storage: `redb`
+### Storage: trait-first, two first-class engines
 
-ACID, single-file, native Rust, B-tree (matches BoltDB's shape, simplifying
-MVCC translation). Single-writer with MVCC snapshots for readers, which
-is exactly what we need: writes serialize through the Raft apply thread,
-readers serve from snapshots.
+The storage layer is abstracted behind a `KvStore` trait. The MVCC state
+machine and Raft state machine adapter depend on the trait, not on any
+concrete engine. Two engines are first-class and selectable at runtime
+via `--storage-engine=redb|iouring` (default: `redb`):
 
-**Alternatives considered:** `fjall` (LSM; better for write-heavy but adds
-compaction tuning surface), `sled` (mature but pre-1.0 forever, less
-predictable), custom WAL+B-tree (out of scope to build from scratch).
+**`redb` engine.** ACID single-file B-tree, native Rust, no native
+dependencies, cross-platform. The default — works wherever fastetcd
+builds. Single-writer with MVCC snapshots for readers maps cleanly onto
+our Raft-serialized write path. Operationally simple: one file is the
+whole database.
 
-Re-evaluate redb if benchmarks show write amplification or compaction
-pauses that hurt p99 under sustained load.
+**`iouring` engine.** `glommio` (thread-per-core io_uring) +
+`O_DIRECT` + a custom group-committed WAL + in-memory MVCC index.
+Linux-only, compiled behind cargo feature `iouring` (enabled by default
+on Linux CI). Bypasses the kernel page cache and avoids filesystem
+metadata on the critical path, targeting sub-ms p99 on small writes.
+
+**Alternatives considered, not adopted:** `fjall` (LSM; bench-worthy
+later but adds compaction tuning surface neither engine above has),
+`sled` (pre-1.0 forever, less predictable), `rocksdb` (C++ dep, brings
+back GC-like compaction stalls in a different dialect). **SPDK**
+(userspace NVMe driver) stays a long-term option but is not committed
+work — only revisit if iouring has a kernel-side tail-latency floor we
+cannot push past.
+
+The trait abstraction means we can benchmark engines side-by-side
+(task #10) without rewriting the state machine.
 
 ### Consensus: `openraft`
 
@@ -54,8 +70,9 @@ Async-native, Rust-idiomatic, supports membership changes including joint
 consensus, snapshot install, log compaction. Mature enough to underpin a
 production system. We integrate by:
 
-- Implementing `RaftLogStorage` over a redb table (append-only with
-  truncation; fsync per batch before ack).
+- Implementing `RaftLogStorage` over an engine-agnostic log abstraction
+  with two impls (redb-backed; iouring + custom WAL). Append is durable
+  (fsync or `O_DIRECT` write) before ack.
 - Implementing `RaftStateMachine` as the MVCC store applying committed
   entries.
 - Implementing `RaftNetwork` over our internal gRPC peer transport.
@@ -84,7 +101,8 @@ OTLP export.
 ```
 crates/
   proto/      # generated etcd v3 stubs (tonic + prost)
-  storage/    # MVCC state machine, lease registry, watch fan-out
+  storage/    # KvStore trait + redb impl + (linux) iouring impl;
+              # MVCC state machine; lease registry; watch fan-out
   raft/       # openraft adapters: log storage, state machine wrapper, network
   server/     # binary: ties storage + raft + gRPC together; CLI flags
   migrate/    # binary: reads etcd BoltDB snapshot → fastetcd state machine
@@ -142,10 +160,15 @@ buckets are `key` (MVCC), `lease`, `auth`, `meta`. We:
   Default to in-process to preserve etcd's `--cert-file/--key-file` flag
   shape.
 - Auth: defer or include in v0.1? Lean defer.
-- Defragment semantics on redb: redb has compact-in-place — verify it is
-  online before claiming `Maintenance.Defragment` support.
+- `Maintenance.Defragment` semantics differ per engine — redb has
+  compact-in-place (verify it is online); the iouring engine will
+  expose a WAL-segment rotation or compaction trigger with its own
+  semantics. Document both.
 - Watch event ordering across compaction boundaries — etcd has specific
-  guarantees for `ErrCompacted`; match exactly.
+  guarantees for `ErrCompacted`; match exactly across both engines.
+- Default cargo features for the `storage` crate: `iouring` enabled on
+  Linux, disabled elsewhere. Verify CI matrix covers both engines on
+  Linux.
 
 ## What v0.1 ships
 

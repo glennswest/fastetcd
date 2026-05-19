@@ -19,11 +19,15 @@ Version locations (keep in sync):
 
 ## Architecture pillars
 
-- **Storage**: `redb` (ACID B-tree, single Rust crate, single file).
+- **Storage**: trait-first abstraction (`KvStore`) with two first-class
+  engines selectable at runtime: `redb` (default, cross-platform) and
+  `iouring` (Linux, `glommio` + `O_DIRECT` + custom WAL; behind cargo
+  feature `iouring`).
 - **Consensus**: `openraft` — core, not optional. Single-node is a
   cluster-of-one.
 - **gRPC**: `tonic` + `prost`, generated from vendored etcd `.proto` files.
-- **Async runtime**: `tokio` (multi-threaded).
+- **Async runtime**: `tokio` for the gRPC frontend and Raft node;
+  `glommio` runtime is internal to the iouring engine.
 - **Logging/tracing**: `tracing` + `tracing-subscriber`.
 
 ## Repo layout
@@ -47,16 +51,18 @@ Tracked live in the Claude task system. Snapshot of the order:
 
 1. Project scaffolding (done)
 2. Cargo workspace + crate skeletons
-3. Vendor etcd protos, wire up tonic codegen
-4. MVCC state machine over redb
-5. openraft integration (log storage, state machine adapter)
-6. Raft peer transport (gRPC) + discovery
-7. KV gRPC service
-8. Watch service
-9. Lease service
-10. Maintenance + Cluster services
-11. Migration tool from etcd BoltDB
-12. Benchmarks vs upstream etcd
+3. Vendor etcd protos, wire up tonic codegen (done)
+4. Design `KvStore` trait + implement redb engine
+5. MVCC state machine over `KvStore`
+6. openraft integration (log storage trait + redb impl, state machine adapter)
+7. Raft peer transport (gRPC) + discovery
+8. KV gRPC service
+9. Watch service
+10. Lease service
+11. Maintenance + Cluster services
+12. iouring engine implementing `KvStore` (Linux-only, cargo feature)
+13. Migration tool from etcd BoltDB
+14. Benchmarks: redb engine vs iouring engine vs upstream etcd
 
 ## Constraints & rules
 

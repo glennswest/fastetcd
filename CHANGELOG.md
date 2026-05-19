@@ -13,3 +13,17 @@
 - **chore:** Set up Cargo workspace with six crates — `proto`, `storage`,
   `raft`, `server`, `migrate`, `ctl`. Skeleton only; libraries are empty
   and binaries print a "skeleton" notice.
+
+### 2026-05-19
+- **feat(proto):** Vendor etcd v3.6.11 .proto files (`rpc.proto`, `kv.proto`,
+  `auth.proto`) and wire up `tonic-build` codegen. Reproducible
+  re-vendoring via `crates/proto/vendor.sh` and `strip_annotations.py`,
+  which removes annotations we don't need (gogoproto, grpc-gateway,
+  versionpb metadata). Generated stubs re-exported from
+  `fastetcd_proto::{etcdserverpb, mvccpb, authpb}`.
+- **docs:** Storage layer reframed as a trait-first abstraction with two
+  first-class engines selectable at runtime: `redb` (default,
+  cross-platform) and `iouring` (Linux, `glommio` + `O_DIRECT` + custom
+  WAL; behind cargo feature `iouring`). Both are supported, not
+  prototype-and-replace. SPDK remains a long-term option, not committed
+  work. Design doc, README, CLAUDE.md updated.
