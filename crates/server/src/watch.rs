@@ -234,12 +234,64 @@ async fn handle_create(
     };
     tx.send(Ok(resp)).await.map_err(|_| ())?;
 
-    // Historical replay is deferred to a follow-up commit. If the
-    // client asked for a past revision in the present-or-future range
-    // (start_revision <= current_revision), we don't backfill; we
-    // just start forwarding new events. This is a known v0.1 gap and
-    // documented in CHANGELOG.
-    let _ = create.start_revision;
+    // Historical replay: if start_revision > 0, backfill events
+    // strictly newer than start_revision - 1 (i.e., revision >=
+    // start_revision in etcd's semantics — the rev that introduced
+    // it should be included, so we pass start_revision - 1 as the
+    // exclusive lower bound).
+    if create.start_revision > 0 {
+        let lower = create.start_revision - 1;
+        let key = create.key.clone();
+        let range_end = create.range_end.clone();
+        match state.sm.mvcc().range_events(&key, &range_end, lower).await {
+            Ok(events) => {
+                if !events.is_empty() {
+                    use fastetcd_storage::mvcc::EventKind as EK;
+                    let mut pb_events: Vec<mvccpb::Event> = Vec::with_capacity(events.len());
+                    let mut last_rev = current_rev;
+                    for e in events {
+                        // Apply the same filters as live events.
+                        if (filter_no_put && matches!(e.kind, EK::Put))
+                            || (filter_no_delete && matches!(e.kind, EK::Delete))
+                        {
+                            continue;
+                        }
+                        last_rev = e.kv.mod_revision;
+                        let event_type = match e.kind {
+                            EK::Put => mvccpb::event::EventType::Put as i32,
+                            EK::Delete => mvccpb::event::EventType::Delete as i32,
+                        };
+                        pb_events.push(mvccpb::Event {
+                            r#type: event_type,
+                            kv: Some(crate::conv::record_to_kv(&e.kv)),
+                            prev_kv: if create.prev_kv {
+                                e.prev_kv.as_ref().map(crate::conv::record_to_kv)
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                    if !pb_events.is_empty() {
+                        let header = response_header(state, last_rev).await;
+                        let resp = pb::WatchResponse {
+                            header: Some(header),
+                            watch_id,
+                            created: false,
+                            canceled: false,
+                            compact_revision: 0,
+                            cancel_reason: String::new(),
+                            fragment: false,
+                            events: pb_events,
+                        };
+                        tx.send(Ok(resp)).await.map_err(|_| ())?;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "fastetcd::watch", "historical replay error: {e}");
+            }
+        }
+    }
 
     Ok(())
 }

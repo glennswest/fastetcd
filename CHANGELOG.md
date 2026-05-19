@@ -15,6 +15,15 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(server):** Watch historical replay. Watchers created with
+  `start_revision > 0` now receive a backfill of every event in
+  `(start_revision - 1, current_revision]` for their key range,
+  delivered before live events resume. Storage layer adds
+  `MvccStore::range_events()` which walks the per-key generation
+  list, gathers `(rev, user_key)` pairs in the window, sorts by
+  `(rev, key)`, fetches each `KvRecord`, and computes `prev_kv` per
+  event. Compacted-rev detection in `range_events` matches the
+  watcher's create-time check. 1 new test.
 - **feat(server):** Implement the Lease gRPC service — Phase 1.
   Grant / Revoke / KeepAlive (bidi stream) / TimeToLive / Leases all
   go through Raft via new `FastetcdLogEntry::Lease*` variants.

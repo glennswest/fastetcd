@@ -313,6 +313,95 @@ impl MvccStore {
         self.inner.write_state.lock().await.compact_rev
     }
 
+    /// Enumerate events in `[key, range_end)` whose revision is
+    /// strictly greater than `start_rev` and at most the current
+    /// revision. Returns events in `(revision, key)` order. Used by
+    /// the Watch service to backfill from `start_revision`.
+    ///
+    /// Errors with [`MvccError::Compacted`] if `start_rev < compact_rev`.
+    pub async fn range_events(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        start_rev: i64,
+    ) -> MvccResult<Vec<MvccEvent>> {
+        let state = self.inner.write_state.lock().await;
+        let current = state.current_rev;
+        let compact = state.compact_rev;
+        drop(state);
+
+        if start_rev < compact && compact > 0 {
+            return Err(MvccError::Compacted {
+                requested: start_rev,
+                compact_rev: compact,
+            });
+        }
+        if start_rev > current {
+            // Nothing to backfill; subscribe-only is correct.
+            return Ok(Vec::new());
+        }
+
+        let snap = self.inner.engine.snapshot().await?;
+        let (start, end) = range_bounds(key, range_end);
+        let idx_entries = snap.range(TABLE_IDX, start, end, 0).await?;
+
+        // Pre-collect (rev, user_key) pairs that fall in the window
+        // so we can sort by revision later.
+        let mut pairs: Vec<(Revision, Vec<u8>)> = Vec::new();
+        for (user_key, idx_bytes) in &idx_entries {
+            let idx: KeyIndex = bincode::deserialize(idx_bytes)
+                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+            for g in &idx.generations {
+                for r in &g.revs {
+                    if r.main > start_rev && r.main <= current {
+                        pairs.push((*r, user_key.clone()));
+                    }
+                }
+                if let Some(t) = g.tombstone {
+                    if t.main > start_rev && t.main <= current {
+                        pairs.push((t, user_key.clone()));
+                    }
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        // For each pair, fetch the record and the previous live
+        // record (if any) for prev_kv.
+        let mut events = Vec::with_capacity(pairs.len());
+        for (rev, user_key) in pairs {
+            let kv_key = make_kv_key(&user_key, rev);
+            let bytes = snap
+                .get(TABLE_KV, &kv_key)
+                .await
+                .map_err(MvccError::Storage)?
+                .ok_or_else(|| {
+                    MvccError::Internal(format!(
+                        "missing KvRecord for backfill key {:?} at rev {:?}",
+                        user_key, rev
+                    ))
+                })?;
+            let rec: KvRecord = bincode::deserialize(&bytes)
+                .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
+
+            // prev_kv: most recent rec for this user_key strictly
+            // before `rev` that isn't a tombstone. Re-load the
+            // KeyIndex for this key (could cache; fine for now).
+            let prev = previous_live_record(&*snap, &user_key, rev).await?;
+            let kind = if rec.is_tombstone() {
+                EventKind::Delete
+            } else {
+                EventKind::Put
+            };
+            events.push(MvccEvent {
+                kind,
+                kv: rec,
+                prev_kv: prev,
+            });
+        }
+        Ok(events)
+    }
+
     /// Grant a lease with `ttl_secs` and (server-current) `now_unix`
     /// timestamp. `id == 0` allocates a fresh id (next sequential
     /// from a counter persisted in `mvcc_meta`); a non-zero id is
@@ -1178,6 +1267,49 @@ struct ApplyContext {
     /// Events accumulated during this apply, to be broadcast after a
     /// successful commit. Order matches the order ops produced them.
     pending_events: Vec<MvccEvent>,
+}
+
+async fn previous_live_record(
+    snap: &dyn Snapshot,
+    user_key: &[u8],
+    before_rev: Revision,
+) -> MvccResult<Option<KvRecord>> {
+    let Some(idx_bytes) = snap
+        .get(TABLE_IDX, user_key)
+        .await
+        .map_err(MvccError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let idx: KeyIndex = bincode::deserialize(&idx_bytes)
+        .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+    // Walk generations newest-to-oldest; find the latest rev strictly
+    // less than `before_rev` and not a tombstone.
+    let mut candidate: Option<Revision> = None;
+    'outer: for g in idx.generations.iter().rev() {
+        for r in g.revs.iter().rev() {
+            if *r < before_rev {
+                candidate = Some(*r);
+                break 'outer;
+            }
+        }
+        // If we ran out of puts in this generation, the only thing
+        // older is a closing tombstone, which yields None.
+    }
+    let Some(rev) = candidate else { return Ok(None) };
+    let kv_key = make_kv_key(user_key, rev);
+    let bytes = snap
+        .get(TABLE_KV, &kv_key)
+        .await
+        .map_err(MvccError::Storage)?;
+    let Some(bytes) = bytes else { return Ok(None) };
+    let rec: KvRecord = bincode::deserialize(&bytes)
+        .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
+    if rec.is_tombstone() {
+        Ok(None)
+    } else {
+        Ok(Some(rec))
+    }
 }
 
 fn implicit_zero_record(key: &[u8]) -> KvRecord {

@@ -227,6 +227,70 @@ async fn watch_cancel_stops_events() {
 }
 
 #[tokio::test]
+async fn watch_with_start_revision_backfills_history() {
+    let h = start_test_server_full().await;
+    let mut wc = WatchClient::connect(h.endpoint.clone()).await.unwrap();
+    let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
+
+    // Build history first.
+    kv.put(pb::PutRequest {
+        key: b"k".to_vec(),
+        value: b"v1".to_vec(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    kv.put(pb::PutRequest {
+        key: b"k".to_vec(),
+        value: b"v2".to_vec(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    kv.put(pb::PutRequest {
+        key: b"k".to_vec(),
+        value: b"v3".to_vec(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Now subscribe from rev 2 — should receive the v2 and v3 events
+    // (rev=2, rev=3) as historical backfill.
+    let (tx, rx) = mpsc::channel::<pb::WatchRequest>(8);
+    tx.send(pb::WatchRequest {
+        request_union: Some(pb::watch_request::RequestUnion::CreateRequest(
+            pb::WatchCreateRequest {
+                key: b"k".to_vec(),
+                start_revision: 2,
+                ..Default::default()
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let mut stream = wc
+        .watch(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let ack = stream.next().await.unwrap().unwrap();
+    assert!(ack.created);
+
+    let backfill = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let vals: Vec<Vec<u8>> = backfill
+        .events
+        .iter()
+        .map(|e| e.kv.as_ref().unwrap().value.clone())
+        .collect();
+    assert_eq!(vals, vec![b"v2".to_vec(), b"v3".to_vec()]);
+}
+
+#[tokio::test]
 async fn watch_at_compacted_revision_returns_canceled() {
     let h = start_test_server_full().await;
     let mut watch_client = WatchClient::connect(h.endpoint.clone()).await.unwrap();
