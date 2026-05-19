@@ -2,6 +2,7 @@
 
 use openraft::Raft;
 
+use crate::auth::AuthState;
 use fastetcd_raft::{FastetcdStateMachine, TypeConfig};
 
 /// Bundle of handles every gRPC service needs: the Raft node (for
@@ -14,6 +15,7 @@ pub struct ServerState {
     pub sm: FastetcdStateMachine,
     pub cluster_id: u64,
     pub member_id: u64,
+    pub auth: AuthState,
 }
 
 impl ServerState {
@@ -22,12 +24,14 @@ impl ServerState {
         sm: FastetcdStateMachine,
         cluster_id: u64,
         member_id: u64,
+        auth: AuthState,
     ) -> Self {
         Self {
             raft,
             sm,
             cluster_id,
             member_id,
+            auth,
         }
     }
 

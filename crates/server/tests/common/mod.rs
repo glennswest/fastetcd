@@ -146,7 +146,8 @@ pub async fn start_test_server_full() -> TestServerHandles {
     raft.initialize(members).await.unwrap();
     wait_for_leader(&raft).await;
 
-    let state = Arc::new(ServerState::new(raft, sm, 7, 1));
+    let auth_state = AuthState::default();
+    let state = Arc::new(ServerState::new(raft, sm, 7, 1, auth_state.clone()));
     let _ = log;
 
     let kv = KvService::new(state.clone());
@@ -165,7 +166,6 @@ pub async fn start_test_server_full() -> TestServerHandles {
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state.clone());
-    let auth_state = AuthState::default();
     let auth = AuthService::new(state.clone(), auth_state.clone());
     let interceptor = AuthInterceptor::new(auth_state);
 

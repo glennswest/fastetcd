@@ -18,7 +18,14 @@ use tonic::Request;
 
 async fn enable_auth_with_user(endpoint: &str, name: &str, password: &str) {
     let mut c = AuthClient::connect(endpoint.to_string()).await.unwrap();
-    // Add root + the user we want.
+    // Add a root user (precondition for AuthEnable) plus the test
+    // user. Both get the "root" role so they bypass per-key
+    // permission checks — Phase-3 enforcement has its own tests.
+    c.role_add(pb::AuthRoleAddRequest {
+        name: "root".to_string(),
+    })
+    .await
+    .unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: "root".to_string(),
         password: "rootpw".to_string(),
@@ -26,10 +33,22 @@ async fn enable_auth_with_user(endpoint: &str, name: &str, password: &str) {
     })
     .await
     .unwrap();
+    c.user_grant_role(pb::AuthUserGrantRoleRequest {
+        user: "root".to_string(),
+        role: "root".to_string(),
+    })
+    .await
+    .unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: name.to_string(),
         password: password.to_string(),
         ..Default::default()
+    })
+    .await
+    .unwrap();
+    c.user_grant_role(pb::AuthUserGrantRoleRequest {
+        user: name.to_string(),
+        role: "root".to_string(),
     })
     .await
     .unwrap();

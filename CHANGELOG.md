@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(server):** Auth Phase 3 — per-key permission enforcement.
+  New `authz` module checks every KV request against the
+  authenticated user's roles. `Range` requires Read, `Put` and
+  `DeleteRange` require Write. `root` user / `root` role bypass.
+  Permission ranges follow etcd semantics (single key, prefix,
+  `[key, range_end)`). The `AuthInterceptor` now inserts a typed
+  `UserIdentity` into request extensions on every authenticated
+  call; KV handlers read it and call `authz::authorize(...)`. 3
+  new tests pass: out-of-range write is denied; in-range write is
+  allowed; read-only role can't write.
 - **feat(server):** TLS support for the client and peer gRPC
   listeners. New flags `--cert-file`, `--key-file`,
   `--trusted-ca-file`, `--client-cert-auth` matching etcd's

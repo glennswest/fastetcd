@@ -71,7 +71,8 @@ async fn start_node(
         .await
         .unwrap();
 
-    let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id));
+    let auth_state = fastetcd_server::auth::AuthState::default();
+    let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id, auth_state));
     let kv = KvService::new(state.clone());
     let test_peers = fastetcd_raft::network::empty_peers();
     let test_dir: fastetcd_server::cluster::MemberDirectory =

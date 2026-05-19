@@ -242,7 +242,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("cluster_state=existing — skipping raft.initialize; waiting to be joined");
     }
 
-    let server_state = Arc::new(ServerState::new(raft.clone(), sm, args.cluster_id, node_id));
+    let auth_state = AuthState::default();
+    AuthService::load_persisted(sm.mvcc().engine(), &auth_state).await?;
+    let server_state = Arc::new(ServerState::new(
+        raft.clone(),
+        sm,
+        args.cluster_id,
+        node_id,
+        auth_state.clone(),
+    ));
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());
@@ -269,10 +277,6 @@ async fn main() -> anyhow::Result<()> {
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone());
     let lease = LeaseService::new(server_state.clone());
-
-    // Load any persisted auth state.
-    let auth_state = AuthState::default();
-    AuthService::load_persisted(server_state.sm.mvcc().engine(), &auth_state).await?;
     let auth = AuthService::new(server_state, auth_state.clone());
 
     let peer_service = RaftPeerService::new(raft);

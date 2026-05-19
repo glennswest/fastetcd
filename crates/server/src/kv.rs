@@ -20,6 +20,7 @@ use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use fastetcd_storage::mvcc::{MutationResult, RangeResult, TxnOpResult, TxnResult};
 use tonic::{Request, Response, Status};
 
+use crate::authz::{authorize, RequiredPerm, UserIdentity};
 use crate::conv;
 use crate::state::{response_header, ServerState};
 
@@ -50,7 +51,17 @@ impl Kv for KvService {
         &self,
         request: Request<pb::RangeRequest>,
     ) -> Result<Response<pb::RangeResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        authorize(
+            self.state.sm.mvcc().engine(),
+            &self.state.auth,
+            user.as_ref(),
+            RequiredPerm::Read,
+            &req.key,
+            &req.range_end,
+        )
+        .await?;
         let result = serve_range(&self.state, &req).await?;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
@@ -61,7 +72,17 @@ impl Kv for KvService {
         &self,
         request: Request<pb::PutRequest>,
     ) -> Result<Response<pb::PutResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        authorize(
+            self.state.sm.mvcc().engine(),
+            &self.state.auth,
+            user.as_ref(),
+            RequiredPerm::Write,
+            &req.key,
+            b"",
+        )
+        .await?;
         let mutation = conv::put_request_to_mutation(&req);
         let resp = self
             .propose(FastetcdLogEntry::Apply {
@@ -87,7 +108,17 @@ impl Kv for KvService {
         &self,
         request: Request<pb::DeleteRangeRequest>,
     ) -> Result<Response<pb::DeleteRangeResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        authorize(
+            self.state.sm.mvcc().engine(),
+            &self.state.auth,
+            user.as_ref(),
+            RequiredPerm::Write,
+            &req.key,
+            &req.range_end,
+        )
+        .await?;
         let mutation = conv::delete_request_to_mutation(&req);
         let resp = self
             .propose(FastetcdLogEntry::Apply {

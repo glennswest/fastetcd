@@ -661,7 +661,7 @@ impl AuthInterceptor {
 }
 
 impl tonic::service::Interceptor for AuthInterceptor {
-    fn call(&mut self, req: Request<()>) -> Result<Request<()>, Status> {
+    fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
         if !self.auth.is_enabled() {
             return Ok(req);
         }
@@ -671,18 +671,20 @@ impl tonic::service::Interceptor for AuthInterceptor {
             .get("token")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        match token {
-            Some(t) => {
-                if self.auth.user_for_token(&t).is_some() {
-                    Ok(req)
-                } else {
-                    Err(Status::unauthenticated(
-                        "auth: invalid or expired token",
-                    ))
-                }
+        let user_name = match token {
+            Some(t) => self.auth.user_for_token(&t),
+            None => None,
+        };
+        match user_name {
+            Some(name) => {
+                // Attach user identity to the request extensions so
+                // per-handler authz (Phase 3) can read it.
+                req.extensions_mut()
+                    .insert(crate::authz::UserIdentity { name });
+                Ok(req)
             }
             None => Err(Status::unauthenticated(
-                "auth: missing `token` metadata; call Authenticate first",
+                "auth: missing or invalid `token` metadata; call Authenticate first",
             )),
         }
     }
