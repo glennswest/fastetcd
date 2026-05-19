@@ -10,12 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.4.0`** — production-grade additions: TLS for client+peer,
-Auth Phase 2 (per-request token enforcement) + Phase 3 (per-key
-permissions), Prometheus `/metrics`, GitHub Actions CI, distroless
-container image, and a deployment guide. Only remaining gap from
-the v0.1.0 era is the openraft 0.10 upgrade (waiting on its stable
-release) for real `MoveLeader`.
+**`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
+service-mesh probes, a Helm chart at `deploy/charts/fastetcd`,
+real `fastetcd-ctl` client (put/get/del/snapshot-save), README
+rewrite. Only remaining gap from the v0.1.0 era is the openraft
+0.10 upgrade for real `MoveLeader`.
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`

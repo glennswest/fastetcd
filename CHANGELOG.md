@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+<!-- New unreleased changes go here -->
+
+## [v0.5.0] — 2026-05-19
+
+Kubernetes-ready additions on top of v0.4.0's production hardening.
+
+### Added
+
+- **gRPC health service** (`grpc.health.v1.Health`) on the client
+  port. All fastetcd services (KV / Cluster / Maintenance / Watch
+  / Lease / Auth) report `SERVING` at startup. Service meshes and
+  k8s `readinessProbe.grpc` / `livenessProbe.grpc` work out of
+  the box.
+- **Helm chart** at `deploy/charts/fastetcd/`. StatefulSet of N
+  replicas with stable peer DNS via a headless Service;
+  auto-generates `--initial-cluster` from the replica set
+  (override-able). Persistent `volumeClaimTemplates` per replica.
+  Optional TLS via a referenced Secret. Optional `ServiceMonitor`
+  for the Prometheus operator.
+- **Real `fastetcd-ctl`** with subcommands `put`, `get [--prefix]`,
+  `del [--prefix]`, `snapshot-save <path>` (streams
+  `Maintenance.Snapshot` to a local file). Useful for end-to-end
+  smoke without needing the Go etcdctl binary.
+
+### Changed
+
+- **README rewrite** for v0.4/v0.5 reality. Architecture diagram
+  includes AuthInterceptor + per-key authz; quick-start uses
+  both etcdctl and fastetcd-ctl; testing section cross-references
+  the three-ring strategy doc; deployment section points at the
+  Kubernetes / systemd / container paths.
+
+### Remaining gap
+
+- **openraft 0.10 upgrade** (waiting on its stable release) for
+  real `MoveLeader.transfer_leader()`.
+
+## [v0.4.0] — 2026-05-19
+
 ### 2026-05-19
 - **feat(ctl):** `fastetcd-ctl` is now a real (small) client.
   Subcommands: `put`, `get [--prefix]`, `del [--prefix]`,
