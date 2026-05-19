@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(storage):** Real `IouringEngine` implementation
+  (Linux-only, behind cargo feature `iouring`). A dedicated OS
+  thread hosts a `tokio_uring::start` runtime that owns the WAL
+  file and the in-memory MVCC index; the public engine forwards
+  every operation through a bounded `mpsc::channel<Command>` and
+  awaits results on per-call oneshots. Same on-disk format as
+  `WalEngine` (length-prefixed bincode batches) so the two are
+  binary-compatible. Conformance suite ports verbatim — six
+  tests gated by `cfg(target_os = "linux")` exercise the engine
+  on Linux CI. macOS/Windows builds with `--features iouring`
+  compile cleanly because the `tokio-uring` dep is also
+  target-gated to Linux. **Known gaps** vs a full production
+  io_uring engine: `O_DIRECT` + aligned-buffer plumbing
+  (page-cache bypass) and group-commit windowing (coalescing
+  commits within ~1ms into one fsync) are both follow-ups; the
+  current commit lands the io_uring submission path, not yet
+  the tail-latency wins those features deliver.
 - **feat(storage + server):** `Maintenance.Defragment` is real.
   New `KvStore::defragment()` trait method (default no-op for
   engines that don't compact). redb engine wraps its

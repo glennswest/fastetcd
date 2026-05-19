@@ -19,10 +19,12 @@ redb-engine = ["dep:redb"]
 # using tokio fs today; the production `iouring` backend swaps the
 # file I/O layer for glommio + O_DIRECT below this same engine.
 wal-engine = []
-# `iouring` is the Linux-only kernel-bypass file I/O backend. Adds
-# glommio as a dependency. Currently aspirational — implementation
-# is a follow-up that swaps the file-I/O layer below `wal-engine`.
-iouring = ["dep:glommio", "wal-engine"]
+# `iouring` is the Linux-only kernel-bypass file I/O backend.
+# Implemented as a dedicated OS thread running `tokio_uring::start`,
+# bridged to the main tokio runtime via mpsc channels. Architecture
+# above the file-I/O layer mirrors `wal-engine`: append-only WAL +
+# in-memory MVCC index.
+iouring = ["dep:tokio-uring", "wal-engine"]
 # Expose the trait-level conformance test suite to downstream engines
 # (used by integration tests and any future engine crate).
 conformance = []
@@ -38,9 +40,13 @@ tracing.workspace = true
 sha2.workspace = true
 
 redb = { workspace = true, optional = true }
-# glommio is Linux-only; the iouring engine is gated behind the
-# `iouring` feature so non-Linux builds stay green.
-glommio = { version = "0.9", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tokio-uring is Linux-only; the iouring engine is gated behind the
+# `iouring` feature *and* the target-os filter so non-Linux builds
+# never try to compile the io-uring crate (which depends on Linux
+# syscalls).
+tokio-uring = { version = "0.5", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
