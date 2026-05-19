@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **chore(ci):** GitHub Actions workflow at `.github/workflows/ci.yml`.
+  Test matrix: Linux + macOS × default features, plus a
+  Linux-only `wal-engine` job and a Linux-only `iouring` job
+  (since `tokio-uring` is target-gated to Linux). On tag pushes
+  (`vX.Y.Z`), builds a release Linux binary, pushes it to
+  `ghcr.io/glennswest/fastetcd:tag` and `:latest` using
+  `Dockerfile.ci` (which expects the binary as build context).
+- **chore(container):** Two-Dockerfile setup. `Dockerfile` builds
+  fastetcd from source in `rust:1.82-slim` then copies the binary
+  into `gcr.io/distroless/cc-debian12`. `Dockerfile.ci` skips the
+  build stage and copies a pre-built binary (the artifact from
+  the CI job) for faster image production. Distroless gives us
+  glibc without the full Debian userland; image runs as
+  `nonroot`.
+- **docs:** New `docs/03-deploy.md` covers container, systemd
+  unit, TLS, Auth bootstrap, multi-node config, backups, and
+  migration from upstream etcd.
 - **feat(server):** Auth Phase 3 — per-key permission enforcement.
   New `authz` module checks every KV request against the
   authenticated user's roles. `Range` requires Read, `Put` and

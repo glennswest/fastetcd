@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features: ["", "wal-engine"]
+        include:
+          - os: ubuntu-latest
+            features: "iouring"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (workspace)
+        if: matrix.features == ''
+        run: cargo test --workspace --no-fail-fast
+      - name: cargo test (features=${{ matrix.features }})
+        if: matrix.features != ''
+        run: cargo test -p fastetcd-storage --features ${{ matrix.features }} --no-fail-fast
+
+  build-linux-binary:
+    name: build release Linux binary
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release -p fastetcd-server
+        run: cargo build --release -p fastetcd-server --bin fastetcd
+      - name: upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastetcd-linux-x86_64
+          path: target/release/fastetcd
+          if-no-files-found: error
+
+  build-container:
+    name: build & push container
+    runs-on: ubuntu-latest
+    needs: [build-linux-binary]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fastetcd-linux-x86_64
+          path: ./
+      - run: chmod +x ./fastetcd
+      - name: login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ci
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
