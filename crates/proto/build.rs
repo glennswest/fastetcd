@@ -12,6 +12,7 @@ fn main() -> std::io::Result<()> {
         proto_root.join("etcd/api/mvccpb/kv.proto"),
         proto_root.join("etcd/api/authpb/auth.proto"),
         proto_root.join("etcd/api/etcdserverpb/rpc.proto"),
+        proto_root.join("fastetcd/raft.proto"),
     ];
 
     for p in &protos {

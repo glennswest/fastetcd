@@ -15,6 +15,23 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(raft):** **Multi-node operational** — gRPC peer transport
+  for openraft `AppendEntries` / `Vote` / `InstallSnapshot`.
+  New internal proto `fastetcd.raft.RaftPeer` with three RPCs each
+  carrying bincode-serialized openraft request/response structs
+  (no need to vendor openraft's evolving types into protobuf).
+  `GrpcNetworkFactory` lazily dials each peer over tonic and caches
+  the channel; `RaftPeerService` is the server-side handler that
+  deserializes and dispatches into `Raft::append_entries` /
+  `raft.vote` / `raft.install_snapshot`. Server binary now serves
+  `RaftPeer` on `--listen-peer-url` while client services stay on
+  `--listen-client-url`; new flags `--initial-cluster` (etcd
+  `name=URL[,name=URL]` form) and `--initial-cluster-state`
+  (`new` / `existing`) drive multi-node bootstrap. Integration
+  test (`multinode_grpc.rs`) brings up a 3-node cluster in process,
+  initializes via openraft, waits for leader election, puts on the
+  leader, and verifies all three followers see the value through
+  Raft replication via the gRPC transport. 1 new test.
 - **feat(raft):** `KvLogStore` — `RaftLogStorage` implementation over
   the engine-agnostic `KvStore`. Tables: `raft_log` (index_be -> Entry)
   and `raft_meta` (vote, committed, last_purged_log_id). Append /

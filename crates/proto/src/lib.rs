@@ -19,3 +19,9 @@ pub mod mvccpb {
 pub mod authpb {
     tonic::include_proto!("authpb");
 }
+
+/// fastetcd-internal Raft peer RPC. Not part of the etcd v3 wire
+/// protocol — used between fastetcd nodes for openraft messages.
+pub mod fastetcd_raft {
+    tonic::include_proto!("fastetcd.raft");
+}

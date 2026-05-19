@@ -1,0 +1,21 @@
+syntax = "proto3";
+package fastetcd.raft;
+
+// Internal-only RPC service used for openraft peer communication.
+// Not part of the etcd v3 wire protocol; fastetcd peers serve and
+// dial this on the peer-URL endpoint (default port 2380).
+//
+// Payloads are opaque bincode-serialized openraft request/response
+// structs. We deliberately do NOT model the openraft messages in
+// protobuf — they evolve with the openraft crate and bincode tracks
+// that without us having to vendor and regenerate stubs every bump.
+
+service RaftPeer {
+    rpc AppendEntries(RaftPayload) returns (RaftPayload);
+    rpc Vote(RaftPayload) returns (RaftPayload);
+    rpc InstallSnapshot(RaftPayload) returns (RaftPayload);
+}
+
+message RaftPayload {
+    bytes data = 1;
+}

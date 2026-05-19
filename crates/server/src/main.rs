@@ -1,57 +1,50 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use openraft::{Config, Raft};
+use tokio::sync::RwLock;
 use tonic::transport::Server;
 
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
-use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
+use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
+use fastetcd_proto::fastetcd_raft::raft_peer_server::RaftPeerServer;
 use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
-use fastetcd_server::maintenance::MaintenanceService;
 use fastetcd_server::lease::LeaseService;
+use fastetcd_server::maintenance::MaintenanceService;
 use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
 
 /// fastetcd — a Rust implementation of the etcd v3 wire protocol.
-///
-/// Flags mirror etcd's where possible so existing client configurations
-/// work unmodified.
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd", version, about)]
 struct Args {
-    /// Human-readable node name. Must be unique within the cluster.
     #[arg(long, env = "FASTETCD_NAME", default_value = "default")]
     name: String,
 
-    /// Numeric node ID. Must be unique within the cluster. Auto-derived
-    /// from `name` if not supplied (FNV-1a hash of `name` truncated to
-    /// 63 bits to avoid collisions with `0` / openraft sentinel values).
+    /// Numeric node ID; auto-derived from `name` if omitted.
     #[arg(long, env = "FASTETCD_NODE_ID")]
     node_id: Option<u64>,
 
-    /// Cluster ID. Stable across restarts; clients see it in the
-    /// response header. Defaults to `1` for single-node tests.
     #[arg(long, env = "FASTETCD_CLUSTER_ID", default_value_t = 1)]
     cluster_id: u64,
 
-    /// Directory holding the storage and Raft log.
     #[arg(long, env = "FASTETCD_DATA_DIR", default_value = "default.fastetcd")]
     data_dir: PathBuf,
 
-    /// Address to listen on for client gRPC traffic. Currently a
-    /// single socket address; comma-separated lists like etcd will be
-    /// added later.
+    /// Listen address for client gRPC (KV / Watch / Lease / Cluster /
+    /// Maintenance). Defaults to 127.0.0.1:2379.
     #[arg(
         long,
         env = "FASTETCD_LISTEN_CLIENT_URL",
@@ -59,25 +52,54 @@ struct Args {
     )]
     listen_client_url: String,
 
-    /// Address to listen on for peer Raft traffic. Currently a single
-    /// socket address. Used once the peer transport (task #13) lands.
+    /// Listen address for peer Raft traffic (AppendEntries / Vote /
+    /// InstallSnapshot). Defaults to 127.0.0.1:2380.
     #[arg(
         long,
         env = "FASTETCD_LISTEN_PEER_URL",
         default_value = "127.0.0.1:2380"
     )]
     listen_peer_url: String,
+
+    /// Initial cluster membership, in etcd's `name=URL[,name=URL]`
+    /// format. Each URL must be reachable from this node. Empty
+    /// means single-node bootstrap (cluster of one).
+    #[arg(long, env = "FASTETCD_INITIAL_CLUSTER", default_value = "")]
+    initial_cluster: String,
+
+    /// `new` to bootstrap a fresh cluster; `existing` to join one
+    /// that's already initialized (skip `raft.initialize`).
+    #[arg(long, env = "FASTETCD_INITIAL_CLUSTER_STATE", default_value = "new")]
+    initial_cluster_state: String,
 }
 
 fn derive_node_id(name: &str) -> NodeId {
-    // FNV-1a 64-bit, then mask to 63 bits so the result is never zero
-    // and avoids the openraft sentinel.
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in name.as_bytes() {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     (hash & 0x7FFF_FFFF_FFFF_FFFF).max(1)
+}
+
+/// Parse an `initial_cluster` string of the form
+/// `n1=http://h1:2380,n2=http://h2:2380`.
+fn parse_initial_cluster(s: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    if s.trim().is_empty() {
+        return Ok(out);
+    }
+    for entry in s.split(',') {
+        let mut it = entry.splitn(2, '=');
+        let name = it
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing name in initial-cluster entry"))?;
+        let url = it
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing URL in initial-cluster entry for {name}"))?;
+        out.insert(name.trim().to_string(), url.trim().to_string());
+    }
+    Ok(out)
 }
 
 #[tokio::main]
@@ -92,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let node_id = args.node_id.unwrap_or_else(|| derive_node_id(&args.name));
 
+    let initial_cluster = parse_initial_cluster(&args.initial_cluster)?;
+    let is_bootstrap = args.initial_cluster_state.eq_ignore_ascii_case("new");
+
     tracing::info!(
         name = %args.name,
         node_id,
@@ -99,12 +124,12 @@ async fn main() -> anyhow::Result<()> {
         data_dir = %args.data_dir.display(),
         listen_client = %args.listen_client_url,
         listen_peer = %args.listen_peer_url,
+        cluster_state = %args.initial_cluster_state,
+        peers = ?initial_cluster.keys().collect::<Vec<_>>(),
         "fastetcd starting"
     );
 
     std::fs::create_dir_all(&args.data_dir)?;
-    // Shared engine for both MVCC state and Raft log — single file
-    // makes ops (snapshot, backup) trivially correct.
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
     let mvcc = MvccStore::open(engine.clone()).await?;
@@ -113,38 +138,46 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(
         Config {
-            heartbeat_interval: 100,
-            election_timeout_min: 200,
-            election_timeout_max: 500,
+            heartbeat_interval: 250,
+            election_timeout_min: 1000,
+            election_timeout_max: 2000,
             ..Default::default()
         }
         .validate()
         .map_err(|e| anyhow::anyhow!("raft config validate: {e}"))?,
     );
 
-    let raft = Raft::<TypeConfig>::new(
-        node_id,
-        config,
-        SingleNodeNet,
-        log.clone(),
-        sm.clone(),
-    )
-    .await?;
+    // Build a NodeId map for the initial cluster (excluding self).
+    let mut peers_map: BTreeMap<NodeId, String> = BTreeMap::new();
+    let mut all_members: BTreeSet<NodeId> = BTreeSet::new();
+    all_members.insert(node_id);
+    for (name, url) in &initial_cluster {
+        let nid = derive_node_id(name);
+        all_members.insert(nid);
+        if nid != node_id {
+            peers_map.insert(nid, url.clone());
+        }
+    }
+    let peers = Arc::new(RwLock::new(peers_map.into_iter().collect()));
 
-    // Bootstrap as a one-member cluster. Multi-node bootstrap arrives
-    // with task #13 (peer transport).
-    let mut members: BTreeSet<NodeId> = BTreeSet::new();
-    members.insert(node_id);
-    if let Err(e) = raft.initialize(members).await {
-        tracing::warn!("raft initialize: {e} — assuming already initialized");
+    let factory = GrpcNetworkFactory::new(peers.clone());
+    let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
+
+    // Bootstrap: only the `new` state initializes; `existing` waits
+    // for an external add-learner call.
+    if is_bootstrap {
+        if let Err(e) = raft.initialize(all_members).await {
+            tracing::warn!("raft initialize: {e} — assuming already initialized");
+        }
+    } else {
+        tracing::info!("cluster_state=existing — skipping raft.initialize; waiting to be joined");
     }
 
-    let server_state = Arc::new(ServerState::new(raft, sm, args.cluster_id, node_id));
+    let server_state = Arc::new(ServerState::new(raft.clone(), sm, args.cluster_id, node_id));
 
-    let listen: std::net::SocketAddr = args.listen_client_url.parse()?;
+    // Build peer URLs / client URLs for Member representation.
     let peer_urls = vec![format!("http://{}", args.listen_peer_url)];
     let client_urls = vec![format!("http://{}", args.listen_client_url)];
-    tracing::info!(%listen, "serving KV / Cluster / Maintenance gRPC");
 
     let kv = KvService::new(server_state.clone());
     let cluster = ClusterService::new(
@@ -157,95 +190,52 @@ async fn main() -> anyhow::Result<()> {
     let watch = WatchService::new(server_state.clone());
     let lease = LeaseService::new(server_state);
 
-    Server::builder()
-        .add_service(KvServer::new(kv))
-        .add_service(ClusterServer::new(cluster))
-        .add_service(MaintenanceServer::new(maintenance))
-        .add_service(WatchServer::new(watch))
-        .add_service(LeaseServer::new(lease))
-        .serve(listen)
-        .await?;
+    let peer_service = RaftPeerService::new(raft);
+
+    let client_listen: std::net::SocketAddr = args.listen_client_url.parse()?;
+    let peer_listen: std::net::SocketAddr = args.listen_peer_url.parse()?;
+
+    // Spawn the peer server on its own port.
+    let peer_handle = {
+        tokio::spawn(async move {
+            tracing::info!(%peer_listen, "serving RaftPeer gRPC");
+            Server::builder()
+                .add_service(RaftPeerServer::new(peer_service))
+                .serve(peer_listen)
+                .await
+        })
+    };
+
+    // Client services on the client port.
+    let client_handle = {
+        tokio::spawn(async move {
+            tracing::info!(%client_listen, "serving KV / Cluster / Maintenance / Watch / Lease gRPC");
+            Server::builder()
+                .add_service(KvServer::new(kv))
+                .add_service(ClusterServer::new(cluster))
+                .add_service(MaintenanceServer::new(maintenance))
+                .add_service(WatchServer::new(watch))
+                .add_service(LeaseServer::new(lease))
+                .serve(client_listen)
+                .await
+        })
+    };
+
+    tokio::select! {
+        r = peer_handle => {
+            if let Ok(Err(e)) = r {
+                anyhow::bail!("peer server exited: {e}");
+            }
+        }
+        r = client_handle => {
+            if let Ok(Err(e)) = r {
+                anyhow::bail!("client server exited: {e}");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("ctrl-c received, shutting down");
+        }
+    }
 
     Ok(())
-}
-
-/// Placeholder network for single-node operation. Errors on any peer
-/// message — a single-node cluster never sends them.
-#[derive(Clone)]
-struct SingleNodeNet;
-
-impl openraft::network::RaftNetworkFactory<TypeConfig> for SingleNodeNet {
-    type Network = SingleNodeConn;
-    async fn new_client(
-        &mut self,
-        _target: NodeId,
-        _node: &openraft::BasicNode,
-    ) -> Self::Network {
-        SingleNodeConn
-    }
-}
-
-struct SingleNodeConn;
-
-impl openraft::network::RaftNetwork<TypeConfig> for SingleNodeConn {
-    async fn append_entries(
-        &mut self,
-        _rpc: openraft::raft::AppendEntriesRequest<TypeConfig>,
-        _option: openraft::network::RPCOption,
-    ) -> Result<
-        openraft::raft::AppendEntriesResponse<NodeId>,
-        openraft::error::RPCError<
-            NodeId,
-            openraft::BasicNode,
-            openraft::error::RaftError<NodeId>,
-        >,
-    > {
-        Err(no_peer_err())
-    }
-
-    async fn install_snapshot(
-        &mut self,
-        _rpc: openraft::raft::InstallSnapshotRequest<TypeConfig>,
-        _option: openraft::network::RPCOption,
-    ) -> Result<
-        openraft::raft::InstallSnapshotResponse<NodeId>,
-        openraft::error::RPCError<
-            NodeId,
-            openraft::BasicNode,
-            openraft::error::RaftError<NodeId, openraft::error::InstallSnapshotError>,
-        >,
-    > {
-        Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "single-node: no peer network",
-            )),
-        ))
-    }
-
-    async fn vote(
-        &mut self,
-        _rpc: openraft::raft::VoteRequest<NodeId>,
-        _option: openraft::network::RPCOption,
-    ) -> Result<
-        openraft::raft::VoteResponse<NodeId>,
-        openraft::error::RPCError<
-            NodeId,
-            openraft::BasicNode,
-            openraft::error::RaftError<NodeId>,
-        >,
-    > {
-        Err(no_peer_err())
-    }
-}
-
-fn no_peer_err() -> openraft::error::RPCError<
-    NodeId,
-    openraft::BasicNode,
-    openraft::error::RaftError<NodeId>,
-> {
-    openraft::error::RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "single-node: no peer network",
-    )))
 }
