@@ -1,0 +1,16 @@
+//! fastetcd server library.
+//!
+//! The binary in `bin/fastetcd` is a thin shell around this crate.
+//! Submodules:
+//!
+//! - [`state`] — shared `ServerState` (Raft handle, state machine,
+//!   IDs) passed into every gRPC service.
+//! - [`conv`] — converters between etcd wire types and internal
+//!   MVCC types.
+//! - [`kv`] — `KvService` implementing the etcd v3 KV gRPC service.
+
+pub mod conv;
+pub mod kv;
+pub mod state;
+
+pub use state::ServerState;

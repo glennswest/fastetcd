@@ -15,6 +15,20 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(server):** Implement the KV gRPC service. `KvService`
+  implements all five `Kv` RPCs (Range, Put, DeleteRange, Txn,
+  Compact). Mutating ops propose `FastetcdLogEntry`s through
+  `Raft::client_write`; reads serve directly from `MvccStore`
+  (serializable on single-node, which is equivalent to linearizable
+  with no peers). Header `cluster_id`, `member_id`, `revision`, and
+  `raft_term` are populated from `ServerState` + Raft metrics.
+  Compact maps `MvccError::Compacted` to gRPC `OutOfRange` matching
+  etcd. The `fastetcd` binary now boots a single-node Raft cluster
+  and serves the KV service on `--listen-client-url`. End-to-end
+  tests through real tonic clients pass (6 cases: put+range,
+  prev_kv, delete-range, historical read, txn success, compact).
+  Watch / Lease / Maintenance / Cluster services land in the next
+  commits.
 - **feat(raft):** openraft integration (single-node). `TypeConfig`,
   `FastetcdLogEntry` (Apply / Txn / Compact / Noop), and
   `FastetcdLogResponse`. `FastetcdStateMachine` wraps `MvccStore` and

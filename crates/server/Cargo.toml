@@ -24,7 +24,11 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+openraft.workspace = true
 
 fastetcd-proto.workspace = true
 fastetcd-storage.workspace = true
 fastetcd-raft.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"
