@@ -10,11 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.2.0`** — adds real cluster membership handlers, lease
-auto-expiry, revision-preserving migration mode, third-party Rust
-client wire-compat tests, and a three-ring testing strategy doc.
-See `CHANGELOG.md` for the full set of v0.2.0 changes and the
-remaining known gaps.
+**`0.3.0`** — adds the full Auth gRPC surface (Phase 1: User/Role
+management + Authenticate with argon2), real `Maintenance.Defragment`
+backed by engine-level compaction, and a real `IouringEngine` on
+Linux backed by `tokio-uring`. The only remaining v0.1.0-era gap
+is the openraft 0.10 upgrade for real `MoveLeader`, deferred until
+0.10 stabilizes.
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`

@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+<!-- New unreleased changes go here -->
+
+## [v0.3.0] — 2026-05-19
+
+Closes Auth, Defragment, and the real iouring engine from the v0.2.0
+"remaining known gaps" list. The only gap from v0.1.0 still open is
+the openraft 0.10 upgrade (waiting on its stable release).
+
+### Added
+
+- **Auth gRPC service — Phase 1**: full surface of every Auth RPC
+  (`AuthEnable` / `Disable` / `Status`, `Authenticate`, complete
+  User / Role CRUD plus grant/revoke). Passwords hashed with
+  `argon2`. `Authenticate` returns a 32-byte hex-encoded token
+  tracked in an in-memory session registry. `AuthEnable` refuses
+  unless a `root` user exists (matches etcd). `RoleDelete`
+  cascade-drops the role from every user that referenced it.
+  Persisted in dedicated `auth_state` / `auth_users` / `auth_roles`
+  tables outside the MVCC revisioned space.
+- **Real `Maintenance.Defragment`**: new `KvStore::defragment()`
+  trait method (default no-op). redb wraps its `Database` in a
+  `tokio::sync::RwLock` and runs `compact()` under the write
+  lock; commits/reads share the read lock so defragmentation
+  serializes against writers without starving readers.
+  WAL-engine compacts by replaying its in-memory index to a tmp
+  WAL and atomic-renaming. Tested end-to-end via the
+  `Maintenance.Defragment` gRPC handler.
+- **Real `IouringEngine`** (Linux-only, behind cargo feature
+  `iouring`). A dedicated OS thread (`fastetcd-iouring`) hosts a
+  `tokio_uring::start` runtime that owns the WAL file and the
+  in-memory MVCC index. The public engine forwards every
+  operation through a bounded `mpsc` channel and awaits results
+  on per-call oneshots. Same on-disk format as `WalEngine` so a
+  file written by one can be read by the other. The conformance
+  suite ports verbatim (6 tests, gated `cfg(target_os = "linux")`).
+  Non-Linux builds with `--features iouring` compile cleanly
+  because `tokio-uring` is target-gated to Linux in `Cargo.toml`.
+
+### Changed
+
+- **`Maintenance.MoveLeader`** continues to return `Unimplemented`
+  pending the openraft 0.10 upgrade (alpha-only, not safe to
+  depend on yet). It now validates the target is a current voter
+  before bailing.
+
+### Known gaps remaining
+
+- **openraft 0.10 upgrade** (waiting on stable release) — unlocks
+  real `MoveLeader` via `Trigger::transfer_leader`.
+- **iouring tuning**: `O_DIRECT` + aligned buffers (page-cache
+  bypass) and group-commit windowing are follow-ups; the current
+  iouring engine delivers the io_uring submission path but not
+  yet the tail-latency wins those features unlock.
+- **Auth Phase 2**: per-request token enforcement. tonic 0.12's
+  sync interceptor signature can't `.await` the async token
+  registry; the right shape is a `tower::Layer` wrapper, which
+  is the next follow-up.
+
+## [v0.2.0] — 2026-05-19
+
 ### 2026-05-19
 - **feat(storage):** Real `IouringEngine` implementation
   (Linux-only, behind cargo feature `iouring`). A dedicated OS
