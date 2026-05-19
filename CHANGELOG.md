@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(server):** Prometheus `/metrics` endpoint on a side port
+  (`--listen-metrics-url`, default `127.0.0.1:2381`). Exports
+  metric names that match etcd's where they map directly so
+  existing dashboards and alerts work unchanged:
+  `etcd_server_has_leader`,
+  `etcd_server_leader_changes_seen_total`,
+  `etcd_mvcc_db_total_size_in_bytes`,
+  `etcd_debugging_mvcc_current_revision`,
+  `etcd_debugging_mvcc_compact_revision`. Lazy-refreshed on every
+  scrape — no background task — so the endpoint always reports
+  current truth. Served via a minimal `hyper` HTTP/1 handler.
 - **chore(ci):** GitHub Actions workflow at `.github/workflows/ci.yml`.
   Test matrix: Linux + macOS × default features, plus a
   Linux-only `wal-engine` job and a Linux-only `iouring` job

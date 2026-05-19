@@ -35,6 +35,10 @@ bincode.workspace = true
 argon2.workspace = true
 rand.workspace = true
 rustls-pemfile = "2.2"
+prometheus-client = "0.22"
+hyper = { version = "1", features = ["server", "http1"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 
 [dev-dependencies]
 tempfile = "3.13"
@@ -43,3 +47,4 @@ tempfile = "3.13"
 # code with fastetcd. If this client's API works against fastetcd,
 # real etcd consumers will too.
 etcd-client = "0.18"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

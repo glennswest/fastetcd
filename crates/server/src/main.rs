@@ -93,6 +93,14 @@ struct Args {
     /// `--trusted-ca-file`. Matches etcd's flag.
     #[arg(long, default_value_t = false)]
     client_cert_auth: bool,
+
+    /// Address to serve Prometheus `/metrics` on. Empty disables.
+    #[arg(
+        long,
+        env = "FASTETCD_LISTEN_METRICS_URL",
+        default_value = "127.0.0.1:2381"
+    )]
+    listen_metrics_url: String,
 }
 
 fn build_tls_config(
@@ -254,6 +262,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());
+
+    // Metrics endpoint (Prometheus /metrics).
+    if !args.listen_metrics_url.trim().is_empty() {
+        let m = fastetcd_server::metrics::Metrics::new();
+        let metrics_addr: std::net::SocketAddr = args.listen_metrics_url.parse()?;
+        fastetcd_server::metrics::spawn_server(metrics_addr, m, server_state.clone());
+    }
 
     // Build peer URLs / client URLs for Member representation.
     let peer_urls = vec![format!("http://{}", args.listen_peer_url)];

@@ -17,6 +17,7 @@ pub mod kv;
 pub mod lease;
 pub mod lease_expiry;
 pub mod maintenance;
+pub mod metrics;
 pub mod state;
 pub mod watch;
 
