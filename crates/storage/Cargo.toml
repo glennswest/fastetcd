@@ -39,3 +39,8 @@ glommio = { version = "0.9", optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3.13"
+criterion.workspace = true
+
+[[bench]]
+name = "mvcc"
+harness = false

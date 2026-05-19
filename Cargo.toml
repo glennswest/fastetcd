@@ -19,6 +19,8 @@ repository = "https://github.com/glennswest/fastetcd"
 homepage = "https://github.com/glennswest/fastetcd"
 
 [workspace.dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = "0.1"

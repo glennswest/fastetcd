@@ -15,6 +15,16 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **bench(storage):** Criterion microbenchmark harness in
+  `crates/storage/benches/mvcc.rs`. Four groups against the redb
+  engine: single-key put, single-key range, 100-key batched put,
+  100-key DeleteRange (with backfill). Numbers serve as the
+  baseline the iouring engine and any future tuning are measured
+  against. Local baseline on macOS APFS (median):
+    - `mvcc_put_single/redb`      ~3.9 ms
+    - `mvcc_range_single/redb`    ~29 µs
+    - `mvcc_put_batch_100/redb`   ~5.2 ms  (52 µs/op amortized)
+    - `mvcc_delete_range_100/redb` ~10.4 ms (insert + delete-range)
 - **feat(migrate):** `fastetcd-migrate` reads an etcd v3 BoltDB
   snapshot (using `bbolt-rs` 1.3) and replays the latest record per
   user-key into a fresh fastetcd data dir via a single `MvccStore::apply`.
