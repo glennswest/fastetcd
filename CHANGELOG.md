@@ -2,6 +2,81 @@
 
 ## [Unreleased]
 
+<!-- New unreleased changes go here -->
+
+## [v0.2.0] — 2026-05-19
+
+Closes every known gap from v0.1.0 except the iouring kernel-bypass
+backend (which remains genuinely multi-week follow-up work). 84
+tests pass workspace-wide (+9 since v0.1.0). The `etcd-client`
+third-party Rust client successfully drives a fastetcd server
+through put / get / range / delete / txn / lease / watch /
+member-list / status without modification — the strongest
+wire-compat signal we can ship in CI.
+
+### Added
+
+- **Lease auto-expiry ticker** (`crates/server/src/lease_expiry.rs`).
+  Background task runs on the leader only, once per second walks
+  the persisted lease set, and proposes `LeaseRevoke` entries for
+  any whose `deadline_unix_secs < now`. Cascade-delete fires through
+  the same path explicit revokes use, so watchers see the delete
+  events normally. Closes the v0.1.0 "no auto-expiry" gap.
+- **Real cluster membership handlers** (`crates/server/src/cluster.rs`).
+  `MemberAdd` derives a stable node id from the peer URL, registers
+  the URL with the live `PeerEndpoints` map, calls openraft's
+  `add_learner`, and (for non-learner) `change_membership` to
+  promote. `MemberRemove` rebuilds the voter set minus the target
+  and drops peer/directory entries (refuses self-removal).
+  `MemberUpdate` rewrites the peer URL. `MemberPromote` lifts a
+  learner to voter. `MemberList` returns the live directory with
+  name + URLs + learner state. Replaces the v0.1.0 `Unimplemented`
+  stubs.
+- **Revision-preserving migration**
+  (`MvccStore::bulk_load_records`, `MigrationMode::PreserveRevisions`).
+  `fastetcd-migrate --preserve-revisions` writes `mvcc_kv` +
+  `mvcc_idx` (+ `lease_keys`) directly so source records retain
+  their original `create_revision`, `mod_revision`, `version`, and
+  `lease`. After migration with the flag, `Range(rev)` and
+  `Watch(start_rev)` behave identically to the source server's
+  history.
+- **Third-party Rust client compatibility tests**
+  (`crates/server/tests/etcd_client_compat.rs`). Uses the
+  `etcd-client` crate (etcdv3/etcd-client) — which shares no code
+  with fastetcd — to drive fastetcd through put / get / range with
+  prefix / delete-range with prev_kv / Txn compare-and-set / lease
+  grant+attach+revoke with cascade-delete / Watch / MemberList /
+  Status. 8 tests, ~0.5s, runs in normal CI without needing the
+  Go toolchain.
+- **`tests/etcdctl_smoke.sh`** — optional out-of-tree wire-compat
+  smoke using the canonical `etcdctl` client. Boots a release-mode
+  fastetcd, runs a representative command set, tears down. Skips
+  with a clear message when etcdctl isn't installed.
+- **`docs/02-testing.md`** — three-ring testing strategy: workspace
+  tests, third-party client, upstream etcd suites (with concrete
+  pointers at the robustness suite + Jepsen + K8s e2e for higher
+  rings).
+
+### Changed
+
+- `Maintenance.MoveLeader` now validates the target is a current
+  voter (`FailedPrecondition` if not — matches etcd) and returns a
+  typed `Unimplemented` with a precise explanation of the
+  openraft-0.9 limitation. Real leader transfer arrives with an
+  openraft 0.10 upgrade.
+
+### Remaining known gaps
+
+- **iouring kernel-bypass file I/O.** `WalEngine` ships the
+  architecture; swapping the file-I/O layer for glommio + `O_DIRECT`
+  remains the right next step for sub-ms p99 on Linux.
+- **openraft 0.10 upgrade** — needed for `MoveLeader`'s real
+  implementation and potentially other primitives.
+- **Auth gRPC service**.
+- **`Defragment` / `Downgrade`**.
+
+## [v0.1.0] — 2026-05-19
+
 ### 2026-05-19
 - **test(server):** Third-party Rust client compatibility tests.
   New `tests/etcd_client_compat.rs` uses the widely-used

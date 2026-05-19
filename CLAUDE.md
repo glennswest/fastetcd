@@ -10,11 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.1.0`** — initial usable release. KV / Watch / Lease / Cluster
-/ Maintenance gRPC services all working; multi-node Raft cluster
-operational; etcd snapshot migration tool; two storage engines
-(`redb` default, `wal-engine` opt-in); criterion bench harness.
-Known gaps documented in `CHANGELOG.md`.
+**`0.2.0`** — adds real cluster membership handlers, lease
+auto-expiry, revision-preserving migration mode, third-party Rust
+client wire-compat tests, and a three-ring testing strategy doc.
+See `CHANGELOG.md` for the full set of v0.2.0 changes and the
+remaining known gaps.
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`
