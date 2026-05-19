@@ -18,7 +18,7 @@ use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
-use fastetcd_server::auth::{AuthService, AuthState};
+use fastetcd_server::auth::{AuthInterceptor, AuthService, AuthState};
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::lease::LeaseService;
@@ -225,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
     // Load any persisted auth state.
     let auth_state = AuthState::default();
     AuthService::load_persisted(server_state.sm.mvcc().engine(), &auth_state).await?;
-    let auth = AuthService::new(server_state, auth_state);
+    let auth = AuthService::new(server_state, auth_state.clone());
 
     let peer_service = RaftPeerService::new(raft);
 
@@ -243,16 +243,29 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    // Client services on the client port.
+    // Client services on the client port. Every non-Auth service is
+    // wrapped by AuthInterceptor; Auth stays open so clients can
+    // call Authenticate without a pre-existing token.
+    let interceptor = AuthInterceptor::new(auth_state.clone());
     let client_handle = {
         tokio::spawn(async move {
-            tracing::info!(%client_listen, "serving KV / Cluster / Maintenance / Watch / Lease gRPC");
+            tracing::info!(
+                %client_listen,
+                "serving KV / Cluster / Maintenance / Watch / Lease / Auth gRPC"
+            );
             Server::builder()
-                .add_service(KvServer::new(kv))
-                .add_service(ClusterServer::new(cluster))
-                .add_service(MaintenanceServer::new(maintenance))
-                .add_service(WatchServer::new(watch))
-                .add_service(LeaseServer::new(lease))
+                .add_service(KvServer::with_interceptor(kv, interceptor.clone()))
+                .add_service(ClusterServer::with_interceptor(
+                    cluster,
+                    interceptor.clone(),
+                ))
+                .add_service(MaintenanceServer::with_interceptor(
+                    maintenance,
+                    interceptor.clone(),
+                ))
+                .add_service(WatchServer::with_interceptor(watch, interceptor.clone()))
+                .add_service(LeaseServer::with_interceptor(lease, interceptor))
+                .add_service(AuthServer::new(auth))
                 .serve(client_listen)
                 .await
         })

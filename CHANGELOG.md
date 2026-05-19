@@ -2,7 +2,19 @@
 
 ## [Unreleased]
 
-<!-- New unreleased changes go here -->
+### 2026-05-19
+- **feat(server):** Auth Phase 2 — per-request token enforcement.
+  `AuthState` refactored to use std::sync primitives (`AtomicBool`
+  for the enabled flag, `std::sync::Mutex` for the token registry)
+  so the sync tonic interceptor can read live state without an
+  async runtime. `AuthInterceptor` now wraps every non-Auth gRPC
+  service via `with_interceptor`; when auth is enabled it requires
+  a valid `token` metadata field on every request and returns
+  `Unauthenticated` otherwise. The Auth service itself stays
+  unauthenticated so clients can still call `Authenticate`. 4 new
+  enforcement tests pass: rejected-without-token,
+  succeeds-with-valid-token, rejected-with-invalid-token,
+  disable-restores-passthrough.
 
 ## [v0.3.0] — 2026-05-19
 

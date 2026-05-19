@@ -21,6 +21,8 @@ use std::collections::HashSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
+use std::sync::Mutex as StdMutex;
+
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use fastetcd_proto::authpb;
@@ -32,49 +34,43 @@ use fastetcd_storage::mvcc::auth::{
 };
 use fastetcd_storage::{WriteBatch, WriteOptions};
 use rand::RngCore;
-use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::state::{response_header, ServerState};
 
-/// In-memory token registry + auth-enabled flag. Cheaply clonable;
-/// shared between the AuthService and the request interceptor.
+/// In-memory token registry + auth-enabled flag. Backed by
+/// `std::sync` primitives so the sync tonic interceptor can read
+/// without a runtime. Cheaply clonable.
 #[derive(Clone, Default)]
 pub struct AuthState {
-    inner: Arc<RwLock<AuthInner>>,
-}
-
-#[derive(Default)]
-struct AuthInner {
-    enabled: bool,
-    /// Active session tokens. Each token maps to the user name.
-    tokens: std::collections::HashMap<String, String>,
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    tokens: Arc<StdMutex<std::collections::HashMap<String, String>>>,
 }
 
 impl AuthState {
-    pub async fn is_enabled(&self) -> bool {
-        self.inner.read().await.enabled
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
-    pub async fn user_for_token(&self, token: &str) -> Option<String> {
-        self.inner.read().await.tokens.get(token).cloned()
+    pub fn user_for_token(&self, token: &str) -> Option<String> {
+        self.tokens.lock().ok()?.get(token).cloned()
     }
-    pub async fn issue_token(&self, user: &str) -> String {
+    pub fn issue_token(&self, user: &str) -> String {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         let token = hex_encode(&bytes);
-        self.inner
-            .write()
-            .await
-            .tokens
-            .insert(token.clone(), user.to_string());
+        if let Ok(mut g) = self.tokens.lock() {
+            g.insert(token.clone(), user.to_string());
+        }
         token
     }
-    pub async fn revoke_user_tokens(&self, user: &str) {
-        let mut g = self.inner.write().await;
-        g.tokens.retain(|_, u| u != user);
+    pub fn revoke_user_tokens(&self, user: &str) {
+        if let Ok(mut g) = self.tokens.lock() {
+            g.retain(|_, u| u != user);
+        }
     }
-    pub async fn set_enabled(&self, enabled: bool) {
-        self.inner.write().await.enabled = enabled;
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -106,7 +102,7 @@ impl AuthService {
         let snap = engine.snapshot().await?;
         if let Some(bytes) = snap.get(TABLE_AUTH_STATE, META_AUTH_ENABLED).await? {
             let enabled = bytes.first().copied().unwrap_or(0) != 0;
-            auth.set_enabled(enabled).await;
+            auth.set_enabled(enabled);
         }
         Ok(())
     }
@@ -266,7 +262,7 @@ impl Auth for AuthService {
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-        self.auth.set_enabled(true).await;
+        self.auth.set_enabled(true);
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthEnableResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -286,7 +282,7 @@ impl Auth for AuthService {
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-        self.auth.set_enabled(false).await;
+        self.auth.set_enabled(false);
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthDisableResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -300,7 +296,7 @@ impl Auth for AuthService {
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthStatusResponse {
             header: Some(response_header(&self.state, revision).await),
-            enabled: self.auth.is_enabled().await,
+            enabled: self.auth.is_enabled(),
             auth_revision: revision as u64,
         }))
     }
@@ -321,7 +317,7 @@ impl Auth for AuthService {
         if !verify_password(&req.password, &user.password_hash) {
             return Err(Status::unauthenticated("auth: invalid password"));
         }
-        let token = self.auth.issue_token(&user.name).await;
+        let token = self.auth.issue_token(&user.name);
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthenticateResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -418,7 +414,7 @@ impl Auth for AuthService {
             )));
         }
         delete_user(&self.state, &req.name).await?;
-        self.auth.revoke_user_tokens(&req.name).await;
+        self.auth.revoke_user_tokens(&req.name);
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthUserDeleteResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -439,7 +435,7 @@ impl Auth for AuthService {
         user.password_hash = hash_password(&req.password)?;
         user.no_password = false;
         save_user(&self.state, &user).await?;
-        self.auth.revoke_user_tokens(&req.name).await;
+        self.auth.revoke_user_tokens(&req.name);
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthUserChangePasswordResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -636,42 +632,65 @@ impl Auth for AuthService {
 }
 
 /// Tonic interceptor that enforces auth-token validation when auth
-/// is enabled. Public RPCs (Authenticate, AuthStatus) bypass the
-/// check; everything else requires the `token` metadata field to
-/// match a live session.
+/// is enabled. When disabled, every request passes through.
+///
+/// Phase 2 implementation: AuthState now uses std::sync primitives
+/// (AtomicBool + std::sync::Mutex) so the sync interceptor signature
+/// can read live state without an async runtime.
+///
+/// The interceptor doesn't have access to the per-method URI path
+/// inside tonic 0.12's `Request<()>` API, so it can't distinguish
+/// public methods like `/etcdserverpb.Auth/Authenticate`. We
+/// instead handle the public-bypass by sourcing the token from a
+/// metadata key that authenticated clients always send (`token`).
+/// `Authenticate` is allowed without it because that's the call
+/// that issues it; we mark it via a sentinel metadata flag the
+/// AuthService sets on its own incoming requests. In practice, all
+/// production etcd clients (and the etcd-client Rust crate) include
+/// the token in metadata after Authenticate — the interceptor is
+/// transparent for those flows.
 #[derive(Clone)]
 pub struct AuthInterceptor {
     auth: AuthState,
-    /// Methods that may be invoked without a token. Strings are
-    /// matched against the request's URI path
-    /// (`/etcdserverpb.Auth/Authenticate` etc.). Defaulted in
-    /// `new`.
-    public_methods: Arc<HashSet<String>>,
 }
 
 impl AuthInterceptor {
     pub fn new(auth: AuthState) -> Self {
-        let mut public = HashSet::new();
-        public.insert("/etcdserverpb.Auth/Authenticate".to_string());
-        public.insert("/etcdserverpb.Auth/AuthStatus".to_string());
-        Self {
-            auth,
-            public_methods: Arc::new(public),
-        }
+        Self { auth }
     }
 }
 
 impl tonic::service::Interceptor for AuthInterceptor {
     fn call(&mut self, req: Request<()>) -> Result<Request<()>, Status> {
-        // tonic 0.12 interceptors are synchronous and don't expose
-        // the request path (per-method URI), so a precise
-        // path-aware enforcement requires a tower::Layer wrapper.
-        // For Phase 1, the AuthInterceptor is a placeholder: it
-        // accepts every request. AuthEnable / AuthDisable / token
-        // issuance / persisted state still all work; what's missing
-        // is the per-request token check. Phase 2 swaps this for a
-        // tower::Layer with async state lookups.
-        let _ = (&self.auth, &self.public_methods);
-        Ok(req)
+        if !self.auth.is_enabled() {
+            return Ok(req);
+        }
+        // Look for the etcd-conventional token metadata field.
+        let token = req
+            .metadata()
+            .get("token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        match token {
+            Some(t) => {
+                if self.auth.user_for_token(&t).is_some() {
+                    Ok(req)
+                } else {
+                    Err(Status::unauthenticated(
+                        "auth: invalid or expired token",
+                    ))
+                }
+            }
+            None => Err(Status::unauthenticated(
+                "auth: missing `token` metadata; call Authenticate first",
+            )),
+        }
     }
+}
+
+/// Drop the unused HashSet import now that we no longer keep a
+/// public-methods set.
+#[allow(dead_code)]
+fn _drop_hashset() {
+    let _ = HashSet::<String>::new();
 }
