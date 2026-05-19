@@ -12,7 +12,7 @@ use fastetcd_storage::redb_engine::RedbEngine;
 use prost::Message;
 use tempfile::tempdir;
 
-use fastetcd_migrate::migrate_snapshot;
+use fastetcd_migrate::{migrate_snapshot, migrate_snapshot_with_mode, MigrationMode};
 
 /// Build a bolt key in etcd's format: `main_rev_be(8) || sub_rev_be(8)`
 /// optionally followed by `b't'` for tombstones.
@@ -97,4 +97,55 @@ async fn engine_snapshot(mvcc: &MvccStore) -> std::collections::HashMap<Vec<u8>,
 fn _bound_helper() {
     // Avoid an unused-imports warning if Bound is added later.
     let _ = Bound::<Vec<u8>>::Unbounded;
+}
+
+#[tokio::test]
+async fn preserve_revisions_keeps_history_visible_via_range_at_rev() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.db");
+
+    // Build a snapshot with three versions of the same key.
+    {
+        let mut db = Bolt::open(&snap_path).expect("open rw bolt");
+        db.update(|mut tx| -> bbolt_rs::Result<()> {
+            let mut bucket = tx.create_bucket(b"key")?;
+            bucket.put(bolt_key(1, 0, false), kv_bytes(b"k", b"v1", 1, 1, 1))?;
+            bucket.put(bolt_key(2, 0, false), kv_bytes(b"k", b"v2", 1, 2, 2))?;
+            bucket.put(bolt_key(3, 0, false), kv_bytes(b"k", b"v3", 1, 3, 3))?;
+            Ok(())
+        })
+        .expect("populate");
+        db.close();
+    }
+
+    let target = dir.path().join("fastetcd-data");
+    let summary = migrate_snapshot_with_mode(
+        &snap_path,
+        &target,
+        false,
+        MigrationMode::PreserveRevisions,
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.scanned, 3);
+    assert_eq!(summary.imported, 1);
+    assert_eq!(summary.revision_after, 3);
+
+    // Open the target and verify Range at each historical revision.
+    let engine: Arc<dyn fastetcd_storage::KvStore> =
+        Arc::new(RedbEngine::open(target.join("fastetcd.redb")).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    for (rev, want_value) in [(1i64, b"v1".as_ref()), (2, b"v2"), (3, b"v3")] {
+        let r = mvcc
+            .range(b"k", b"", 0, rev, false, false)
+            .await
+            .unwrap();
+        assert_eq!(r.kvs.len(), 1, "rev {rev}: expected one record");
+        assert_eq!(
+            r.kvs[0].value, want_value,
+            "rev {rev}: expected value {want_value:?}"
+        );
+        assert_eq!(r.kvs[0].create_revision, 1);
+        assert_eq!(r.kvs[0].mod_revision, rev);
+    }
 }

@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(storage + migrate):** Revision-preserving migration. New
+  `MvccStore::bulk_load_records(BulkKey[], next_rev)` writes
+  `mvcc_kv` + `mvcc_idx` (and `lease_keys`) directly so source
+  records retain their original `create_revision`, `mod_revision`,
+  `version`, `lease`, and tombstone state. `fastetcd-migrate`
+  gains `--preserve-revisions` (and a corresponding
+  `MigrationMode::PreserveRevisions` library API). After migration
+  with the new flag, `Range(rev)` and `Watch(start_rev)` behave
+  identically to the source server's history. Multi-generation
+  per-key is collapsed to "everything up to the most recent
+  tombstone + its generation"; multi-generation history support
+  is a follow-up.
+- **feat(server):** `Maintenance.MoveLeader` now validates the
+  target is a current voter and returns a typed
+  `FailedPrecondition` for invalid targets; for valid ones it
+  surfaces openraft 0.9's lack of an explicit `transfer_leader`
+  primitive via `Unimplemented` with a precise message. Real
+  transfer arrives with the openraft 0.10 upgrade.
 - **feat(server):** Real cluster membership handlers. `MemberAdd`
   derives a stable node id from the peer URL (FNV-1a hash, masked
   to 63 bits), registers the URL with the live `PeerEndpoints` map

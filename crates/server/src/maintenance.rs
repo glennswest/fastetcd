@@ -189,10 +189,26 @@ impl Maintenance for MaintenanceService {
 
     async fn move_leader(
         &self,
-        _request: Request<pb::MoveLeaderRequest>,
+        request: Request<pb::MoveLeaderRequest>,
     ) -> Result<Response<pb::MoveLeaderResponse>, Status> {
+        let req = request.into_inner();
+        // Validate target is a current voter — etcd does the same check.
+        let metrics = self.state.raft.metrics().borrow().clone();
+        let voters: Vec<_> = metrics.membership_config.voter_ids().collect();
+        if !voters.contains(&req.target_id) {
+            return Err(Status::failed_precondition(format!(
+                "MoveLeader target {} is not a voting member",
+                req.target_id
+            )));
+        }
+        // openraft 0.9 doesn't expose an explicit `transfer_leader`
+        // primitive (added in 0.10). The closest correct behavior is
+        // to surface that limitation rather than do something racy.
+        // Upgrade-to-0.10 lifts this restriction.
         Err(Status::unimplemented(
-            "MoveLeader requires peer transport (task #13)",
+            "MoveLeader is not yet supported on openraft 0.9; \
+             pending upgrade to openraft 0.10 which exposes \
+             trigger().transfer_leader()",
         ))
     }
 

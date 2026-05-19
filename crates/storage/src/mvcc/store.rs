@@ -187,6 +187,20 @@ pub enum TxnOpResult {
     Mutation(MutationResult),
 }
 
+/// Input for `bulk_load_records`. Each `BulkKey` carries one user
+/// key with its (revision-sorted) put records, optionally followed
+/// by a tombstone that closes the most recent generation. Multiple
+/// generations per user key are not yet supported in this Phase-1
+/// migration path — historical reads after the import will return
+/// `None` for keys whose ancient generations were tombstoned (which
+/// is also what etcd does after compaction).
+#[derive(Debug, Clone)]
+pub struct BulkKey {
+    pub key: Vec<u8>,
+    pub puts: Vec<KvRecord>,
+    pub tombstone: Option<KvRecord>,
+}
+
 /// Outcome of a lease grant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseGrantResult {
@@ -311,6 +325,101 @@ impl MvccStore {
 
     pub async fn compact_revision(&self) -> i64 {
         self.inner.write_state.lock().await.compact_rev
+    }
+
+    /// Bulk-load records into a freshly-opened store, preserving the
+    /// source revisions. Designed for migration tools that need
+    /// post-migration `Range(rev)` and `Watch(start_rev)` to behave
+    /// exactly as they did upstream.
+    ///
+    /// Caller invariants:
+    /// - The store is empty (no prior `apply`/`bulk_load` since open).
+    ///   This is enforced by checking `current_rev == 0`.
+    /// - For each user key, `puts` are sorted strictly increasing by
+    ///   revision. A `tombstone` (if present) is after every put it
+    ///   closes.
+    ///
+    /// `next_rev` is the value the store's revision counter will be
+    /// set to after the load (typically `max_observed_rev`); subsequent
+    /// `apply` calls allocate from `next_rev + 1`.
+    pub async fn bulk_load_records(
+        &self,
+        per_key: Vec<BulkKey>,
+        next_rev: i64,
+    ) -> MvccResult<()> {
+        let mut state = self.inner.write_state.lock().await;
+        if state.current_rev != 0 {
+            return Err(MvccError::Internal(format!(
+                "bulk_load_records requires an empty store (current_rev = {})",
+                state.current_rev
+            )));
+        }
+
+        let mut batch = WriteBatch::new();
+        for entry in per_key {
+            let BulkKey {
+                key,
+                puts,
+                tombstone,
+            } = entry;
+            if puts.is_empty() && tombstone.is_none() {
+                continue;
+            }
+            // Build KeyIndex from the supplied (sorted) records.
+            let mut idx = KeyIndex::new(key.clone());
+            let mut current_gen_revs: Vec<Revision> = Vec::new();
+            let mut current_gen_created: Option<Revision> = None;
+            for rec in &puts {
+                let rev = Revision::new(rec.mod_revision, 0);
+                if current_gen_created.is_none() {
+                    current_gen_created = Some(rev);
+                }
+                current_gen_revs.push(rev);
+                let kv_key = make_kv_key(&key, rev);
+                let bytes = bincode::serialize(rec).map_err(|e| {
+                    MvccError::Internal(format!("serialize KvRecord: {e}"))
+                })?;
+                batch.put(TABLE_KV, &kv_key, &bytes);
+                if rec.lease != 0 {
+                    batch.put(
+                        TABLE_LEASE_KEYS,
+                        &lease_key_index(rec.lease, &key),
+                        &[],
+                    );
+                }
+            }
+            // Close the current generation if a tombstone is supplied.
+            if let Some(tomb) = &tombstone {
+                let rev = Revision::new(tomb.mod_revision, 0);
+                idx.generations.push(super::record::Generation {
+                    created: current_gen_created.unwrap_or(rev),
+                    revs: std::mem::take(&mut current_gen_revs),
+                    tombstone: Some(rev),
+                });
+                current_gen_created = None;
+                let kv_key = make_kv_key(&key, rev);
+                let bytes = bincode::serialize(tomb).map_err(|e| {
+                    MvccError::Internal(format!("serialize tombstone: {e}"))
+                })?;
+                batch.put(TABLE_KV, &kv_key, &bytes);
+            } else if !current_gen_revs.is_empty() {
+                idx.generations.push(super::record::Generation {
+                    created: current_gen_created.unwrap(),
+                    revs: current_gen_revs,
+                    tombstone: None,
+                });
+            }
+            let idx_bytes = bincode::serialize(&idx)
+                .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
+            batch.put(TABLE_IDX, &key, &idx_bytes);
+        }
+        write_i64(&mut batch, META_KEY_CURRENT_REV, next_rev);
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        state.current_rev = next_rev;
+        Ok(())
     }
 
     /// Enumerate events in `[key, range_end)` whose revision is
