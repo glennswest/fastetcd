@@ -6,17 +6,36 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "MVCC state machine for fastetcd, backed by redb. Applied behind Raft."
+description = "Storage layer for fastetcd: KvStore trait + engines (redb + io_uring) + MVCC state machine."
 
 [lib]
 path = "src/lib.rs"
 
+[features]
+# `redb` is default and cross-platform.
+default = ["redb-engine"]
+redb-engine = ["dep:redb"]
+# `iouring` is Linux-only; enable it explicitly on Linux builds.
+iouring = ["dep:glommio"]
+# Expose the trait-level conformance test suite to downstream engines
+# (used by integration tests and any future engine crate).
+conformance = []
+
 [dependencies]
 tokio.workspace = true
-redb.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 bincode.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+
+redb = { workspace = true, optional = true }
+# glommio is Linux-only; the iouring engine is gated behind the
+# `iouring` feature so non-Linux builds stay green.
+glommio = { version = "0.9", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3.13"

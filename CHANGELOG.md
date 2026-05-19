@@ -15,6 +15,14 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(storage):** Define the engine-agnostic `KvStore` trait and
+  implement the `redb` engine. Concrete `WriteBatch` value type (no
+  trait-object downcast). Conformance test suite under
+  `crate::kvstore::conformance` runs against any engine; six tests pass
+  on the redb backend (put/get/delete, range scan, delete-range,
+  snapshot isolation, count, engine name). `iouring` engine module
+  ships as a feature-gated skeleton — calls return
+  `StorageError::Misuse` until task #15 lands.
 - **feat(proto):** Vendor etcd v3.6.11 .proto files (`rpc.proto`, `kv.proto`,
   `auth.proto`) and wire up `tonic-build` codegen. Reproducible
   re-vendoring via `crates/proto/vendor.sh` and `strip_annotations.py`,
