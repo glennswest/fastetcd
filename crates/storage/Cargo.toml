@@ -15,8 +15,14 @@ path = "src/lib.rs"
 # `redb` is default and cross-platform.
 default = ["redb-engine"]
 redb-engine = ["dep:redb"]
-# `iouring` is Linux-only; enable it explicitly on Linux builds.
-iouring = ["dep:glommio"]
+# `wal-engine` is the WAL + in-memory-index engine. Cross-platform
+# using tokio fs today; the production `iouring` backend swaps the
+# file I/O layer for glommio + O_DIRECT below this same engine.
+wal-engine = []
+# `iouring` is the Linux-only kernel-bypass file I/O backend. Adds
+# glommio as a dependency. Currently aspirational — implementation
+# is a follow-up that swaps the file-I/O layer below `wal-engine`.
+iouring = ["dep:glommio", "wal-engine"]
 # Expose the trait-level conformance test suite to downstream engines
 # (used by integration tests and any future engine crate).
 conformance = []

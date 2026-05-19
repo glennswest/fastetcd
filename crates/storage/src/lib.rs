@@ -21,6 +21,9 @@ pub mod mvcc;
 #[cfg(feature = "redb-engine")]
 pub mod redb_engine;
 
+#[cfg(feature = "wal-engine")]
+pub mod wal_engine;
+
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 pub mod iouring_engine;
 

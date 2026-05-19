@@ -37,6 +37,18 @@ fn shared_mvcc(rt: &Runtime) -> (tempfile::TempDir, MvccStore) {
     })
 }
 
+#[cfg(feature = "wal-engine")]
+fn shared_mvcc_wal(rt: &Runtime) -> (tempfile::TempDir, MvccStore) {
+    use fastetcd_storage::wal_engine::WalEngine;
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let engine: Arc<dyn fastetcd_storage::KvStore> =
+            Arc::new(WalEngine::open(dir.path().join("mvcc.wal")).await.unwrap());
+        let mvcc = MvccStore::open(engine).await.unwrap();
+        (dir, mvcc)
+    })
+}
+
 fn put_value(key: &[u8], value: &[u8]) -> Mutation {
     Mutation::Put {
         key: key.to_vec(),
@@ -50,10 +62,11 @@ fn put_value(key: &[u8], value: &[u8]) -> Mutation {
 
 fn bench_put_single(c: &mut Criterion) {
     let rt = rt();
-    let (_dir, mvcc) = shared_mvcc(&rt);
-    let counter = AtomicU64::new(0);
     let mut group = c.benchmark_group("mvcc_put_single");
     group.throughput(Throughput::Elements(1));
+
+    let (_dir, mvcc) = shared_mvcc(&rt);
+    let counter = AtomicU64::new(0);
     group.bench_function("redb", |b| {
         b.iter(|| {
             let n = counter.fetch_add(1, Ordering::Relaxed);
@@ -65,6 +78,24 @@ fn bench_put_single(c: &mut Criterion) {
             });
         });
     });
+
+    #[cfg(feature = "wal-engine")]
+    {
+        let (_dir2, mvcc2) = shared_mvcc_wal(&rt);
+        let counter2 = AtomicU64::new(0);
+        group.bench_function("wal", |b| {
+            b.iter(|| {
+                let n = counter2.fetch_add(1, Ordering::Relaxed);
+                let key = format!("k-{n}");
+                rt.block_on(async {
+                    mvcc2.apply(&[put_value(key.as_bytes(), b"v")])
+                        .await
+                        .unwrap();
+                });
+            });
+        });
+    }
+
     group.finish();
 }
 

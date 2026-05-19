@@ -15,6 +15,25 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(storage):** `WalEngine` — second first-class engine
+  delivered cross-platform via tokio fs, behind cargo feature
+  `wal-engine`. Architecture: append-only WAL (length-prefixed
+  bincode batches) + in-memory `BTreeMap<(table, user_key), value>`
+  index. Writes: append → fsync → mutate index. Reads: clone of the
+  index → snapshot. On open: WAL replay rebuilds index; truncated
+  trailing records (crash mid-write) are tolerated. Passes the same
+  conformance suite as redb (6 new tests) plus a
+  `wal_persists_across_reopen` integration. Engine selection at
+  runtime via the same `KvStore` trait dispatch — no caller changes.
+  Side-by-side bench addition: `mvcc_put_single/wal ~3.99 ms` vs
+  `redb ~4.07 ms` on macOS APFS.
+- **Note on the `iouring` feature:** the `iouring` cargo feature
+  (Linux-only) now depends on `wal-engine` and is positioned as a
+  drop-in swap of the file-I/O layer (open / append / fsync) under
+  `WalEngine` using `glommio` + `O_DIRECT`. The architectural shape
+  above this layer is the same; the kernel-bypass speedup is what
+  changes. Implementing the swap is its own multi-week effort and
+  remains a tracked follow-up.
 - **bench(storage):** Criterion microbenchmark harness in
   `crates/storage/benches/mvcc.rs`. Four groups against the redb
   engine: single-key put, single-key range, 100-key batched put,
