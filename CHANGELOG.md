@@ -15,6 +15,18 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(migrate):** `fastetcd-migrate` reads an etcd v3 BoltDB
+  snapshot (using `bbolt-rs` 1.3) and replays the latest record per
+  user-key into a fresh fastetcd data dir via a single `MvccStore::apply`.
+  Tombstones are detected by the trailing `b't'` on bolt keys and
+  cause the user key to be skipped. Logic lives in a library
+  `migrate_snapshot(from, to, force)` consumable from other binaries
+  / tests; the bin is a thin CLI wrapper. End-to-end test builds a
+  synthetic etcd snapshot using `bbolt-rs` in rw mode, runs the
+  migration, and verifies the data round-trips through `MvccStore`.
+  **Known gap:** revision history is not preserved — every imported
+  key has `create_revision = mod_revision = 1` after migration.
+  Phase 2 will add a revision-preserving bulk-load path.
 - **feat(raft):** **Multi-node operational** — gRPC peer transport
   for openraft `AppendEntries` / `Vote` / `InstallSnapshot`.
   New internal proto `fastetcd.raft.RaftPeer` with three RPCs each
