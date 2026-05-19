@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### 2026-05-19
+- **feat(server):** TLS support for the client and peer gRPC
+  listeners. New flags `--cert-file`, `--key-file`,
+  `--trusted-ca-file`, `--client-cert-auth` matching etcd's
+  shape. When `--cert-file` + `--key-file` are both set, the
+  server listens over TLS (via tonic's `rustls` backend);
+  `--client-cert-auth` additionally requires every client to
+  present a TLS certificate signed by `--trusted-ca-file`. The
+  same identity is used on both the client port and the peer
+  port. Flag-parsing rejects the asymmetric case
+  (`--cert-file` without `--key-file` etc.) with a clear error.
 - **feat(server):** Auth Phase 2 — per-request token enforcement.
   `AuthState` refactored to use std::sync primitives (`AtomicBool`
   for the enabled flag, `std::sync::Mutex` for the token registry)

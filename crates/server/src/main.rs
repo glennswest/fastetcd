@@ -5,7 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 use openraft::{Config, Raft};
 use tokio::sync::RwLock;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use fastetcd_proto::etcdserverpb::auth_server::AuthServer;
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
@@ -73,6 +73,54 @@ struct Args {
     /// that's already initialized (skip `raft.initialize`).
     #[arg(long, env = "FASTETCD_INITIAL_CLUSTER_STATE", default_value = "new")]
     initial_cluster_state: String,
+
+    /// PEM-encoded server certificate for client and peer gRPC.
+    /// When set together with `--key-file`, the server listens
+    /// over TLS. Match's etcd's flag name.
+    #[arg(long, env = "FASTETCD_CERT_FILE")]
+    cert_file: Option<PathBuf>,
+
+    /// PEM-encoded private key matching `--cert-file`.
+    #[arg(long, env = "FASTETCD_KEY_FILE")]
+    key_file: Option<PathBuf>,
+
+    /// PEM-encoded CA bundle used to verify peer / client certs.
+    /// Required when `--client-cert-auth` is set.
+    #[arg(long, env = "FASTETCD_TRUSTED_CA_FILE")]
+    trusted_ca_file: Option<PathBuf>,
+
+    /// Require clients to present a TLS certificate signed by
+    /// `--trusted-ca-file`. Matches etcd's flag.
+    #[arg(long, default_value_t = false)]
+    client_cert_auth: bool,
+}
+
+fn build_tls_config(
+    cert_file: &Option<PathBuf>,
+    key_file: &Option<PathBuf>,
+    trusted_ca_file: &Option<PathBuf>,
+    client_cert_auth: bool,
+) -> anyhow::Result<Option<ServerTlsConfig>> {
+    match (cert_file, key_file) {
+        (Some(c), Some(k)) => {
+            let cert = std::fs::read(c)?;
+            let key = std::fs::read(k)?;
+            let identity = Identity::from_pem(cert, key);
+            let mut cfg = ServerTlsConfig::new().identity(identity);
+            if client_cert_auth {
+                let ca = trusted_ca_file
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "--client-cert-auth requires --trusted-ca-file"
+                    ))?;
+                let ca_bytes = std::fs::read(ca)?;
+                cfg = cfg.client_ca_root(tonic::transport::Certificate::from_pem(ca_bytes));
+            }
+            Ok(Some(cfg))
+        }
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("--cert-file and --key-file must both be set or both unset"),
+    }
 }
 
 fn derive_node_id(name: &str) -> NodeId {
@@ -232,11 +280,27 @@ async fn main() -> anyhow::Result<()> {
     let client_listen: std::net::SocketAddr = args.listen_client_url.parse()?;
     let peer_listen: std::net::SocketAddr = args.listen_peer_url.parse()?;
 
+    // TLS config (client + peer share the same identity).
+    let tls = build_tls_config(
+        &args.cert_file,
+        &args.key_file,
+        &args.trusted_ca_file,
+        args.client_cert_auth,
+    )?;
+    if tls.is_some() {
+        tracing::info!("TLS enabled (client + peer)");
+    }
+
     // Spawn the peer server on its own port.
+    let tls_for_peer = tls.clone();
     let peer_handle = {
         tokio::spawn(async move {
             tracing::info!(%peer_listen, "serving RaftPeer gRPC");
-            Server::builder()
+            let mut builder = Server::builder();
+            if let Some(t) = tls_for_peer {
+                builder = builder.tls_config(t).expect("apply peer TLS config");
+            }
+            builder
                 .add_service(RaftPeerServer::new(peer_service))
                 .serve(peer_listen)
                 .await
@@ -247,13 +311,18 @@ async fn main() -> anyhow::Result<()> {
     // wrapped by AuthInterceptor; Auth stays open so clients can
     // call Authenticate without a pre-existing token.
     let interceptor = AuthInterceptor::new(auth_state.clone());
+    let tls_for_client = tls;
     let client_handle = {
         tokio::spawn(async move {
             tracing::info!(
                 %client_listen,
                 "serving KV / Cluster / Maintenance / Watch / Lease / Auth gRPC"
             );
-            Server::builder()
+            let mut builder = Server::builder();
+            if let Some(t) = tls_for_client {
+                builder = builder.tls_config(t).expect("apply client TLS config");
+            }
+            builder
                 .add_service(KvServer::with_interceptor(kv, interceptor.clone()))
                 .add_service(ClusterServer::with_interceptor(
                     cluster,

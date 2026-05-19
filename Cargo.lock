@@ -920,6 +920,7 @@ dependencies = [
  "openraft",
  "prost 0.13.5",
  "rand",
+ "rustls-pemfile",
  "serde",
  "sha2",
  "tempfile",
