@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: fastetcd
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  serviceName: {{ .Release.Name }}-headless
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastetcd
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastetcd
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: fastetcd
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FASTETCD_INITIAL_CLUSTER_STATE
+              value: {{ .Values.cluster.state | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              CLUSTER='{{ .Values.cluster.override }}'
+              if [ -z "$CLUSTER" ]; then
+                CLUSTER=""
+                for i in $(seq 0 $(({{ .Values.replicaCount }} - 1))); do
+                  n="{{ .Release.Name }}-$i"
+                  e="http://$n.{{ .Release.Name }}-headless.$POD_NAMESPACE.svc:{{ .Values.ports.peer }}"
+                  if [ -z "$CLUSTER" ]; then CLUSTER="$n=$e"; else CLUSTER="$CLUSTER,$n=$e"; fi
+                done
+              fi
+              exec /usr/local/bin/fastetcd \
+                --name="$POD_NAME" \
+                --data-dir=/var/lib/fastetcd \
+                --listen-client-url=0.0.0.0:{{ .Values.ports.client }} \
+                --listen-peer-url=0.0.0.0:{{ .Values.ports.peer }} \
+                --listen-metrics-url=0.0.0.0:{{ .Values.ports.metrics }} \
+                --initial-cluster="$CLUSTER" \
+                --initial-cluster-state="$FASTETCD_INITIAL_CLUSTER_STATE" \
+                {{- if .Values.tls.enabled }}
+                --cert-file=/etc/fastetcd/tls/{{ .Values.tls.certFile }} \
+                --key-file=/etc/fastetcd/tls/{{ .Values.tls.keyFile }} \
+                {{- if .Values.tls.caFile }}
+                --trusted-ca-file=/etc/fastetcd/tls/{{ .Values.tls.caFile }} \
+                {{- end }}
+                {{- if .Values.tls.clientCertAuth }}
+                --client-cert-auth \
+                {{- end }}
+                {{- end }}
+                {{- range .Values.extraArgs }}
+                {{ . }} \
+                {{- end }}
+          ports:
+            - name: client
+              containerPort: {{ .Values.ports.client }}
+            - name: peer
+              containerPort: {{ .Values.ports.peer }}
+            - name: metrics
+              containerPort: {{ .Values.ports.metrics }}
+          readinessProbe:
+            grpc:
+              port: {{ .Values.ports.client }}
+            periodSeconds: 5
+          livenessProbe:
+            grpc:
+              port: {{ .Values.ports.client }}
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fastetcd
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/fastetcd/tls
+              readOnly: true
+            {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName | required "tls.secretName required when tls.enabled" }}
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

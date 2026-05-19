@@ -331,17 +331,39 @@ async fn main() -> anyhow::Result<()> {
     // call Authenticate without a pre-existing token.
     let interceptor = AuthInterceptor::new(auth_state.clone());
     let tls_for_client = tls;
+
+    // Standard gRPC health service. Mark every service we serve as
+    // SERVING so service-mesh / k8s probes pass.
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    use fastetcd_proto::etcdserverpb::auth_server::AuthServer as PbAuthServer;
+    use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer as PbClusterServer;
+    use fastetcd_proto::etcdserverpb::kv_server::KvServer as PbKvServer;
+    use fastetcd_proto::etcdserverpb::lease_server::LeaseServer as PbLeaseServer;
+    use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer as PbMaintServer;
+    use fastetcd_proto::etcdserverpb::watch_server::WatchServer as PbWatchServer;
+    let r = health_reporter.clone();
+    tokio::spawn(async move {
+        let mut r = r;
+        r.set_serving::<PbKvServer<KvService>>().await;
+        r.set_serving::<PbClusterServer<ClusterService>>().await;
+        r.set_serving::<PbMaintServer<MaintenanceService>>().await;
+        r.set_serving::<PbWatchServer<WatchService>>().await;
+        r.set_serving::<PbLeaseServer<LeaseService>>().await;
+        r.set_serving::<PbAuthServer<AuthService>>().await;
+    });
+
     let client_handle = {
         tokio::spawn(async move {
             tracing::info!(
                 %client_listen,
-                "serving KV / Cluster / Maintenance / Watch / Lease / Auth gRPC"
+                "serving KV / Cluster / Maintenance / Watch / Lease / Auth / Health gRPC"
             );
             let mut builder = Server::builder();
             if let Some(t) = tls_for_client {
                 builder = builder.tls_config(t).expect("apply client TLS config");
             }
             builder
+                .add_service(health_service)
                 .add_service(KvServer::with_interceptor(kv, interceptor.clone()))
                 .add_service(ClusterServer::with_interceptor(
                     cluster,

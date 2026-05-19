@@ -2,7 +2,19 @@
 
 ## [Unreleased]
 
-<!-- New unreleased changes go here -->
+### 2026-05-19
+- **feat(server):** gRPC health service. Adds the standard
+  `grpc.health.v1.Health` to the client port so service meshes
+  and k8s gRPC probes work out of the box. All fastetcd services
+  (KV / Cluster / Maintenance / Watch / Lease / Auth) are
+  reported as `SERVING` at startup.
+- **chore(deploy):** Helm chart at `deploy/charts/fastetcd`.
+  StatefulSet of N replicas with stable peer DNS via a headless
+  Service; auto-generates `--initial-cluster` from the replica
+  set (override with `cluster.override`). Persistent
+  volumeClaimTemplates per replica. Optional TLS via a referenced
+  Secret. Optional `ServiceMonitor` for the Prometheus operator.
+  k8s-native readiness/liveness via the new gRPC health service.
 
 ## [v0.4.0] — 2026-05-19
 

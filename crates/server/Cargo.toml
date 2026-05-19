@@ -17,6 +17,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
 tonic.workspace = true
+tonic-health = "0.12"
 prost.workspace = true
 clap.workspace = true
 anyhow.workspace = true

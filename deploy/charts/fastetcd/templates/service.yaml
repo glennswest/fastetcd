@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: fastetcd
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: fastetcd
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: client
+      port: {{ .Values.ports.client }}
+      targetPort: client
+    - name: metrics
+      port: {{ .Values.ports.metrics }}
+      targetPort: metrics
+---
+# Headless service used by StatefulSet for stable peer DNS names.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-headless
+  labels:
+    app.kubernetes.io/name: fastetcd
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: fastetcd
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: peer
+      port: {{ .Values.ports.peer }}
+    - name: client
+      port: {{ .Values.ports.client }}

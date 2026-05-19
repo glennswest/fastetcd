@@ -1,0 +1,51 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/glennswest/fastetcd
+  tag: ""           # defaults to .Chart.appVersion if empty
+  pullPolicy: IfNotPresent
+
+# Cluster bootstrap. Each replica gets a stable name node-0/1/2 etc.
+# `--initial-cluster` is computed from these.
+cluster:
+  state: new        # new | existing
+  # Override the auto-generated --initial-cluster string by
+  # setting this to a non-empty value.
+  override: ""
+
+ports:
+  client: 2379
+  peer: 2380
+  metrics: 2381
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 10Gi
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+service:
+  type: ClusterIP
+
+serviceMonitor:
+  enabled: false   # set true if the Prometheus operator is installed
+
+tls:
+  enabled: false
+  # When enabled, a Secret with the keys below must already exist.
+  # Mounted into /etc/fastetcd/tls. clientCertAuth requires
+  # caFile to be set.
+  secretName: ""
+  certFile: tls.crt
+  keyFile: tls.key
+  caFile: ""
+  clientCertAuth: false
+
+extraArgs: []     # extra CLI flags passed verbatim to fastetcd

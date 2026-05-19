@@ -1,0 +1,11 @@
+apiVersion: v2
+name: fastetcd
+description: A Rust implementation of the etcd v3 wire protocol
+type: application
+version: 0.1.0
+appVersion: "0.4.0"
+home: https://github.com/glennswest/fastetcd
+sources:
+  - https://github.com/glennswest/fastetcd
+maintainers:
+  - name: fastetcd contributors
