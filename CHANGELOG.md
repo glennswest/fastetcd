@@ -15,6 +15,15 @@
   and binaries print a "skeleton" notice.
 
 ### 2026-05-19
+- **feat(storage):** MVCC `Compact(rev)`. Walks every `KeyIndex` and
+  prunes generations whose tombstone is `<= rev`; in surviving
+  generations drops all puts strictly older than the latest put
+  `<= rev` (preserving the floor so `Range` at `rev` still works).
+  Dropped `KvRecord`s removed atomically. Persists `compact_rev` so
+  the floor survives reopen. Range check is now strict: reads at
+  `target_rev < compact_rev` return `MvccError::Compacted`; reads at
+  `target_rev == compact_rev` succeed (off-by-one fix from previous
+  commit). 8 new tests (39 total pass).
 - **feat(storage):** MVCC state machine over `KvStore`. Per-key
   generation index (`KeyIndex` / `Generation`), revision-keyed values
   (`KvRecord`), and atomic multi-mutation `apply` that assigns one

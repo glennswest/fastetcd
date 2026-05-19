@@ -177,6 +177,97 @@ impl MvccStore {
         self.inner.write_state.lock().await.compact_rev
     }
 
+    /// Compact the MVCC history at `rev`. After this call:
+    ///
+    /// - `Range` with `target_rev < rev` returns
+    ///   [`MvccError::Compacted`].
+    /// - `Range` at `target_rev >= rev` continues to work; for each
+    ///   key the value at the largest `mod_revision <= rev` is
+    ///   preserved.
+    /// - Closed generations whose tombstone is `<= rev` are removed
+    ///   entirely.
+    ///
+    /// Compaction itself does NOT consume a `main` revision; the
+    /// current revision counter is unchanged.
+    ///
+    /// Errors if `rev` is `<= 0`, `> current_revision`, or
+    /// `< compact_revision` (etcd treats Compact at the current
+    /// compact rev as a no-op; we error to surface bugs — match
+    /// upstream's behavior in a follow-up if tests demand it).
+    pub async fn compact(&self, rev: i64) -> MvccResult<i64> {
+        if rev <= 0 {
+            return Err(MvccError::Internal(format!(
+                "compact rev must be > 0, got {rev}"
+            )));
+        }
+        let mut state = self.inner.write_state.lock().await;
+        if rev > state.current_rev {
+            return Err(MvccError::FutureRevision {
+                requested: rev,
+                current_rev: state.current_rev,
+            });
+        }
+        if rev < state.compact_rev {
+            return Err(MvccError::Internal(format!(
+                "compact rev {rev} is below current compact_rev {}",
+                state.compact_rev
+            )));
+        }
+        if rev == state.compact_rev {
+            return Ok(rev); // idempotent
+        }
+
+        let compact_rev_packed = Revision::new(rev, i64::MAX);
+
+        // Walk every KeyIndex in mvcc_idx and apply compact.
+        let snap = self.inner.engine.snapshot().await?;
+        let entries = snap
+            .range(TABLE_IDX, Bound::Unbounded, Bound::Unbounded, 0)
+            .await?;
+
+        let mut batch = WriteBatch::new();
+        let mut dropped_records: u64 = 0;
+        let mut dropped_indices: u64 = 0;
+        for (key, idx_bytes) in entries {
+            let mut idx: KeyIndex = bincode::deserialize(&idx_bytes)
+                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+            let dropped = idx.compact(compact_rev_packed);
+            if dropped.is_empty() && !idx.generations.is_empty() {
+                continue; // no change for this key
+            }
+            for r in dropped {
+                let kv_key = make_kv_key(&key, r);
+                batch.delete(TABLE_KV, &kv_key);
+                dropped_records += 1;
+            }
+            if idx.generations.is_empty() {
+                batch.delete(TABLE_IDX, &key);
+                dropped_indices += 1;
+            } else {
+                let bytes = bincode::serialize(&idx)
+                    .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
+                batch.put(TABLE_IDX, &key, &bytes);
+            }
+        }
+        write_i64(&mut batch, META_KEY_COMPACT_REV, rev);
+
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        state.compact_rev = rev;
+
+        tracing::info!(
+            target: "fastetcd::mvcc::compact",
+            compact_rev = rev,
+            dropped_records,
+            dropped_indices,
+            "compaction complete"
+        );
+
+        Ok(rev)
+    }
+
     /// Apply a batch of mutations atomically at one new `main` revision.
     /// Distinct sub-revisions are assigned to each mutation in order;
     /// every put/delete shares the same `main`. Returns one
@@ -408,7 +499,9 @@ impl MvccStore {
                     current_rev,
                 });
             }
-            if target_rev <= compact_rev && compact_rev > 0 {
+            // Compact(K) preserves rev K — reads at K must succeed. Only
+            // strictly older revisions are gone.
+            if target_rev < compact_rev {
                 return Err(MvccError::Compacted {
                     requested: target_rev,
                     compact_rev,
@@ -834,6 +927,87 @@ mod tests {
         let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
         assert_eq!(out.kvs[0].value, b"v1");
         assert_eq!(out.kvs[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn compact_makes_older_reads_error_but_preserves_floor() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        s.apply(&[put(b"k", b"v1")]).await.unwrap();
+        s.apply(&[put(b"k", b"v2")]).await.unwrap();
+
+        // Compact at rev 2: rev 1 history is gone; rev 2 is the floor.
+        s.compact(2).await.unwrap();
+        assert_eq!(s.compact_revision().await, 2);
+
+        // Reads strictly below compact_rev now error.
+        let err = s.range(b"k", b"", 0, 1, false, false).await.err().unwrap();
+        assert!(matches!(err, MvccError::Compacted { .. }));
+
+        // Reads at the compact rev still succeed and return the floor value.
+        let out = s.range(b"k", b"", 0, 2, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"v1");
+
+        // Reads at newer revs unaffected.
+        let out = s.range(b"k", b"", 0, 3, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"v2");
+
+        // Current reads unaffected.
+        let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"v2");
+    }
+
+    #[tokio::test]
+    async fn compact_drops_tombstoned_keys_entirely() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        s.apply(&[del_range(b"k", b"")]).await.unwrap();
+        // After compact at rev 2, the index entry for k is fully gone.
+        s.compact(2).await.unwrap();
+        let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert!(out.kvs.is_empty());
+        assert_eq!(out.count, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_at_future_rev_errors() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let err = s.compact(50).await.err().unwrap();
+        assert!(matches!(err, MvccError::FutureRevision { .. }));
+    }
+
+    #[tokio::test]
+    async fn compact_at_or_before_compact_rev_is_idempotent_or_errors() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        s.apply(&[put(b"k", b"v1")]).await.unwrap();
+        s.compact(2).await.unwrap();
+        // Same rev: no-op.
+        s.compact(2).await.unwrap();
+        // Older rev: error.
+        let err = s.compact(1).await.err().unwrap();
+        assert!(matches!(err, MvccError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn compact_persists_across_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("compact.redb");
+        {
+            let eng = RedbEngine::open(&path).unwrap();
+            let s = MvccStore::open(Arc::new(eng)).await.unwrap();
+            s.apply(&[put(b"k", b"v0"), put(b"k", b"v1")]).await.unwrap();
+            // rev = 1 after one apply (batched). Add more so we can compact.
+            s.apply(&[put(b"k", b"v2")]).await.unwrap();
+            s.compact(2).await.unwrap();
+        }
+        let eng = RedbEngine::open(&path).unwrap();
+        let s = MvccStore::open(Arc::new(eng)).await.unwrap();
+        assert_eq!(s.compact_revision().await, 2);
+        // Old revisions still gone after reopen.
+        let err = s.range(b"k", b"", 0, 1, false, false).await.err().unwrap();
+        assert!(matches!(err, MvccError::Compacted { .. }));
     }
 
     #[tokio::test]

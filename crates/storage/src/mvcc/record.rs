@@ -191,6 +191,76 @@ impl KeyIndex {
         }
         None
     }
+
+    /// Compact the index against `compact_rev`. Returns the set of
+    /// revisions whose `KvRecord`s in `mvcc_kv` are no longer
+    /// reachable and may be physically deleted. After compaction:
+    ///
+    /// - Each generation whose tombstone is `<= compact_rev` is
+    ///   entirely dropped (all its puts plus the tombstone).
+    /// - In the generation that contains `compact_rev` (or whose
+    ///   latest rev is `<= compact_rev`), all puts strictly older
+    ///   than the latest put `<= compact_rev` are dropped. The latest
+    ///   such put is kept so that `range_at(compact_rev)` for the key
+    ///   continues to return the right value.
+    /// - Puts whose revision is `> compact_rev` are untouched.
+    ///
+    /// If after compaction no generations remain, the caller should
+    /// also drop this `KeyIndex` from `mvcc_idx`.
+    pub fn compact(&mut self, compact_rev: Revision) -> Vec<Revision> {
+        let mut dropped: Vec<Revision> = Vec::new();
+        let mut keep: Vec<Generation> = Vec::with_capacity(self.generations.len());
+
+        for g in std::mem::take(&mut self.generations) {
+            match g.tombstone {
+                Some(t) if t <= compact_rev => {
+                    // Entire generation can go.
+                    for r in &g.revs {
+                        dropped.push(*r);
+                    }
+                    dropped.push(t);
+                }
+                _ => {
+                    // Find the latest put with revision <= compact_rev.
+                    let mut floor_idx: Option<usize> = None;
+                    for (i, r) in g.revs.iter().enumerate() {
+                        if *r <= compact_rev {
+                            floor_idx = Some(i);
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut new_revs: Vec<Revision> = Vec::with_capacity(g.revs.len());
+                    if let Some(fi) = floor_idx {
+                        // Drop revs[..fi], keep revs[fi..].
+                        for (i, r) in g.revs.iter().enumerate() {
+                            if i < fi {
+                                dropped.push(*r);
+                            } else {
+                                new_revs.push(*r);
+                            }
+                        }
+                    } else {
+                        // No revs at or before compact_rev — keep them all.
+                        new_revs.extend_from_slice(&g.revs);
+                    }
+                    if new_revs.is_empty() && g.tombstone.is_none() {
+                        // Live generation with no surviving revs is impossible —
+                        // an open generation always has at least one put. Defensive.
+                        continue;
+                    }
+                    keep.push(Generation {
+                        created: g.created,
+                        revs: new_revs,
+                        tombstone: g.tombstone,
+                    });
+                }
+            }
+        }
+
+        self.generations = keep;
+        dropped
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +320,51 @@ mod tests {
         assert_eq!(ver, 1);
         assert_eq!(created, Revision::new(10, 0));
         assert_eq!(idx.generations.len(), 2);
+    }
+
+    #[test]
+    fn compact_drops_closed_generation_entirely() {
+        let mut idx = KeyIndex::new(b"k".to_vec());
+        idx.record_put(Revision::new(5, 0));
+        idx.record_delete(Revision::new(6, 0));
+        idx.record_put(Revision::new(10, 0));
+
+        let dropped = idx.compact(Revision::new(7, 0));
+        // Old generation (puts at 5 + tombstone at 6) entirely gone.
+        let mut set: std::collections::HashSet<_> = dropped.into_iter().collect();
+        assert!(set.remove(&Revision::new(5, 0)));
+        assert!(set.remove(&Revision::new(6, 0)));
+        assert!(set.is_empty());
+        // Live generation preserved.
+        assert_eq!(idx.generations.len(), 1);
+        assert_eq!(idx.generations[0].revs, vec![Revision::new(10, 0)]);
+    }
+
+    #[test]
+    fn compact_keeps_floor_in_live_generation() {
+        let mut idx = KeyIndex::new(b"k".to_vec());
+        idx.record_put(Revision::new(2, 0));
+        idx.record_put(Revision::new(5, 0));
+        idx.record_put(Revision::new(8, 0));
+
+        let dropped = idx.compact(Revision::new(6, 0));
+        // rev 2 dropped (older than floor); rev 5 kept (latest <= compact_rev);
+        // rev 8 kept (newer).
+        assert_eq!(dropped, vec![Revision::new(2, 0)]);
+        assert_eq!(
+            idx.generations[0].revs,
+            vec![Revision::new(5, 0), Revision::new(8, 0)]
+        );
+    }
+
+    #[test]
+    fn compact_below_first_rev_is_noop() {
+        let mut idx = KeyIndex::new(b"k".to_vec());
+        idx.record_put(Revision::new(5, 0));
+        idx.record_put(Revision::new(7, 0));
+        let dropped = idx.compact(Revision::new(2, 0));
+        assert!(dropped.is_empty());
+        assert_eq!(idx.generations[0].revs.len(), 2);
     }
 
     #[test]
