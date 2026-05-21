@@ -27,6 +27,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
       - name: cargo test (workspace)
         if: matrix.features == ''
         run: cargo test --workspace --no-fail-fast
@@ -42,6 +48,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo build --release -p fastetcd-server
         run: cargo build --release -p fastetcd-server --bin fastetcd
       - name: upload binary
