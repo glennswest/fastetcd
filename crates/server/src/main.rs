@@ -407,8 +407,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build peer URLs / client URLs for Member representation.
-    let peer_urls = vec![format!("http://{}", peer_listen_url)];
-    let client_urls = vec![format!("http://{}", client_listen_url)];
+    // Cluster directory's peer/client URLs go into Member.peerURLs /
+    // clientURLs in MemberList responses. Honour the etcd-shaped
+    // `--initial-advertise-peer-urls` / `--advertise-client-urls`
+    // flags if set; otherwise reuse the raw listen URLs so the
+    // scheme (http vs https) is preserved.
+    fn split_list(s: &str) -> Vec<String> {
+        s.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+    let peer_urls = match &args.initial_advertise_peer_urls {
+        Some(s) => split_list(s),
+        None => split_list(&args.listen_peer_urls),
+    };
+    let client_urls = match &args.advertise_client_urls {
+        Some(s) => split_list(s),
+        None => split_list(&args.listen_client_urls),
+    };
 
     let kv = KvService::new(server_state.clone());
     ClusterService::seed_self(
