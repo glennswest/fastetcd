@@ -175,13 +175,11 @@ impl IouringEngine {
         thread::Builder::new()
             .name("fastetcd-iouring".into())
             .spawn(move || {
-                if let Err(e) = tokio_uring::start(worker(worker_path, initial_index, rx, started_signal))
-                {
-                    tracing::error!(
-                        target: "fastetcd::iouring",
-                        "tokio_uring runtime exited: {e}"
-                    );
-                }
+                // tokio_uring::start returns () — the worker future
+                // is what we await inside. The thread exits when
+                // worker returns (which happens when the inbound
+                // channel is closed and the engine is dropped).
+                tokio_uring::start(worker(worker_path, initial_index, rx, started_signal));
             })
             .map_err(StorageError::io)?;
         // Spin briefly for the worker to signal ready; tokio_uring::start
