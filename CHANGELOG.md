@@ -6,7 +6,9 @@
 - **chore:** Note that fastetcd is now mirrored on a local Forgejo
   instance (`forcicd.g8.lo:3000`) for faster CI feedback on the LAN.
   Github Actions remain authoritative; the mirror runs the same
-  `.github/workflows/ci.yml` unmodified.
+  `.github/workflows/ci.yml` unmodified. Local runner uses
+  forgejo/runner:7 (supports node24-based actions like
+  Swatinem/rust-cache@v2).
 
 ### 2026-05-19
 - **feat(server):** etcd-compat CLI flag aliases. fastetcd now
