@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-05-23
+- **chore:** Note that fastetcd is now mirrored on a local Forgejo
+  instance (`forcicd.g8.lo:3000`) for faster CI feedback on the LAN.
+  Github Actions remain authoritative; the mirror runs the same
+  `.github/workflows/ci.yml` unmodified.
+
 ### 2026-05-19
 - **feat(server):** etcd-compat CLI flag aliases. fastetcd now
   accepts etcd's plural URL forms (`--listen-client-urls`,
