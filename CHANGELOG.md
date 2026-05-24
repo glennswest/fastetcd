@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-05-24
+- **fix(storage):** iouring tests now skip gracefully when
+  io_uring is blocked in the test environment (most commonly
+  docker's default seccomp profile rejecting `io_uring_setup`
+  with EPERM) rather than panicking. Tests use a new
+  `iouring_available()` probe at entry. Closes #1.
+
 ### 2026-05-23
 - **chore:** Note that fastetcd is now mirrored on a local Forgejo
   instance (`forcicd.g8.lo:3000`) for faster CI feedback on the LAN.

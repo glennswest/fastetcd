@@ -474,8 +474,43 @@ mod tests {
         (dir, p)
     }
 
+    /// Probe whether io_uring is usable in this environment.
+    ///
+    /// `tokio_uring::start` panics if `io_uring_setup` returns
+    /// EPERM — most commonly because docker's default seccomp
+    /// profile blocks the syscall, but also possible if
+    /// `kernel.io_uring_disabled` is set. The probe runs on a
+    /// dedicated thread (tokio_uring uses thread-local state and
+    /// can only be started once per thread) and reports the
+    /// panic back via `JoinHandle::join`.
+    ///
+    /// See https://github.com/glennswest/fastetcd/issues/1.
+    fn iouring_available() -> bool {
+        std::thread::spawn(|| tokio_uring::start(async {}))
+            .join()
+            .is_ok()
+    }
+
+    /// Skip the body when io_uring isn't available (returns early
+    /// with an informational print). Use at the top of every
+    /// iouring test so container-CI runs without seccomp=unconfined
+    /// surface as informational skips rather than panics.
+    macro_rules! skip_if_no_iouring {
+        () => {
+            if !iouring_available() {
+                eprintln!(
+                    "io_uring unavailable (likely seccomp); \
+                     skipping. See fastetcd#1 for the \
+                     container-CI workaround."
+                );
+                return;
+            }
+        };
+    }
+
     #[tokio::test]
     async fn engine_name_is_iouring() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         assert_eq!(e.engine_name(), "iouring");
@@ -483,6 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn conformance_put_get_delete() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         conformance::put_get_delete(&e).await;
@@ -490,6 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn conformance_range_scan() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         conformance::range_scan_lex_order(&e).await;
@@ -497,6 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn conformance_delete_range() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         conformance::delete_range_is_atomic(&e).await;
@@ -504,6 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn conformance_snapshot_isolation() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         conformance::snapshot_is_consistent_under_writes(&e).await;
@@ -511,6 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn conformance_count() {
+        skip_if_no_iouring!();
         let (_d, p) = temp_path();
         let e = IouringEngine::open(p).unwrap();
         conformance::count_matches_range_len(&e).await;
