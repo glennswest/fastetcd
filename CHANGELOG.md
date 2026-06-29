@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-06-29
+- **docs:** Add a detailed "fastetcd vs etcd" comparison section to
+  `README.md` covering runtime (Go/GC vs Rust/no-GC), storage engines
+  (BoltDB vs pluggable redb/iouring), latency profile, the v3-only
+  compatibility boundary, migration, and a decision guide.
+
 ### 2026-05-24
 - **fix(storage):** iouring tests now skip gracefully when
   io_uring is blocked in the test environment (most commonly

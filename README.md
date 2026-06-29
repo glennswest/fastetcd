@@ -70,6 +70,92 @@ fastetcd-ctl snapshot-save /tmp/snapshot.db
                                           Linux-only feature)
 ```
 
+## fastetcd vs etcd
+
+fastetcd targets the same wire protocol and consensus semantics as
+upstream etcd, but the implementation differs in ways that affect
+resource use, latency predictability, and operational shape. The
+goal is a drop-in replacement, not a fork of behavior.
+
+### At a glance
+
+| Dimension | etcd (upstream) | fastetcd |
+|---|---|---|
+| Language / runtime | Go, garbage-collected | Rust, no GC |
+| Wire protocol | etcd v3 gRPC | etcd v3 gRPC (wire-compatible) |
+| v2 HTTP API | Present (deprecated) | Not implemented (out of scope) |
+| Consensus | Raft (etcd-io/raft) | Raft (`openraft`) |
+| Storage engine | BoltDB (bbolt), mmap B+tree | Pluggable `KvStore`: `redb` (default) or `iouring` |
+| Storage selection | Fixed | Runtime-selectable engine |
+| MVCC model | Revisions, generations, leases | Same model, reimplemented |
+| Watch / Lease / Txn | Full | Full, wire-compatible |
+| Auth | Token / per-key RBAC | Token / per-key RBAC |
+| TLS | Yes | Yes |
+| Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
+| Health | grpc.health.v1 | grpc.health.v1 |
+| Data import | n/a | `fastetcd-migrate` reads etcd BoltDB snapshots |
+
+### Storage
+
+etcd stores all data in a single mmap'd BoltDB (bbolt) file: an
+ACID B+tree with copy-on-write pages. It is robust and battle-tested
+but page-oriented and tied to mmap semantics.
+
+fastetcd abstracts storage behind a `KvStore` trait with two
+first-class engines selectable at runtime:
+
+- **`redb`** (default) — a pure-Rust embedded ACID B-tree in a
+  single file. Cross-platform, no unsafe mmap dependencies, easy to
+  reason about.
+- **`iouring`** (Linux-only, cargo feature) — a custom WAL plus
+  `tokio-uring` with `O_DIRECT`, bypassing the page cache for the
+  apply path. Aimed at predictable tail latency under sustained
+  write load.
+
+Because the engine is a trait, future backends (e.g. SPDK) can drop
+in without touching the MVCC or Raft layers.
+
+### Latency and resource profile
+
+The main motivation for a Rust reimplementation is the absence of a
+garbage collector on the hot path. etcd's apply and compaction paths
+can experience GC-induced jitter under load; fastetcd has
+deterministic, allocation-controlled apply with no stop-the-world
+pauses. Targets:
+
+- Smaller resident-memory (RSS) floor at idle.
+- p99 write latency at or below upstream under sustained load.
+- No GC-induced tail-latency spikes on the apply path.
+
+### Compatibility boundary
+
+fastetcd implements the etcd **v3 gRPC** surface — KV, Watch, Lease,
+Txn, Maintenance, Cluster, Auth, and grpc.health.v1 — and is
+exercised in CI by the third-party `etcd-client` Rust crate, which
+shares zero code with fastetcd. The deprecated **v2 HTTP API is not
+implemented** and is out of scope. Anything that speaks etcd v3
+(including `etcdctl` and Kubernetes' `kube-apiserver`) is the
+intended client.
+
+### Migration
+
+Existing etcd data moves over with `fastetcd-migrate`, which reads an
+etcd BoltDB snapshot and writes it into a fastetcd data directory,
+optionally preserving original revisions:
+
+```
+fastetcd-migrate --from snap.db --to data-dir --preserve-revisions
+```
+
+### When the difference matters
+
+- **Choose fastetcd** when you want lower idle footprint, predictable
+  tail latency without GC pauses, or a pluggable storage backend —
+  while keeping unmodified etcd v3 clients working.
+- **Stay on upstream etcd** when you depend on the deprecated v2 HTTP
+  API, or need the exact operational tooling and ecosystem maturity
+  of the reference implementation.
+
 ## Testing
 
 Three concentric rings — see `docs/02-testing.md` for the full
