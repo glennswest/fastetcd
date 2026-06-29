@@ -84,6 +84,7 @@ goal is a drop-in replacement, not a fork of behavior.
 | Language / runtime | Go, garbage-collected | Rust, no GC |
 | Wire protocol | etcd v3 gRPC | etcd v3 gRPC (wire-compatible) |
 | v2 HTTP API | Present (deprecated) | Not implemented (out of scope) |
+| v3 HTTP/JSON gateway | grpc-gateway | Planned (gRPC-gateway over the v3 API) |
 | Consensus | Raft (etcd-io/raft) | Raft (`openraft`) |
 | Storage engine | BoltDB (bbolt), mmap B+tree | Pluggable `KvStore`: `redb` (default) or `iouring` |
 | Storage selection | Fixed | Runtime-selectable engine |
@@ -132,10 +133,19 @@ pauses. Targets:
 fastetcd implements the etcd **v3 gRPC** surface — KV, Watch, Lease,
 Txn, Maintenance, Cluster, Auth, and grpc.health.v1 — and is
 exercised in CI by the third-party `etcd-client` Rust crate, which
-shares zero code with fastetcd. The deprecated **v2 HTTP API is not
-implemented** and is out of scope. Anything that speaks etcd v3
+shares zero code with fastetcd. Anything that speaks etcd v3
 (including `etcdctl` and Kubernetes' `kube-apiserver`) is the
 intended client.
+
+Two HTTP surfaces are worth distinguishing:
+
+- The deprecated **v2 HTTP API is not implemented** and is out of
+  scope — it is gone from upstream's roadmap too.
+- The **v3 HTTP/JSON gateway** (what etcd exposes via grpc-gateway,
+  letting plain `curl`/JSON tooling drive the v3 API) is **planned**.
+  It layers on top of the existing v3 gRPC services without changing
+  the data model, so HTTP-based tooling can target fastetcd without
+  reviving the v2 API.
 
 ### Migration
 

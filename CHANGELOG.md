@@ -6,7 +6,9 @@
 - **docs:** Add a detailed "fastetcd vs etcd" comparison section to
   `README.md` covering runtime (Go/GC vs Rust/no-GC), storage engines
   (BoltDB vs pluggable redb/iouring), latency profile, the v3-only
-  compatibility boundary, migration, and a decision guide.
+  compatibility boundary, migration, and a decision guide. Notes the
+  v3 HTTP/JSON gateway (grpc-gateway) as planned, distinct from the
+  out-of-scope deprecated v2 HTTP API.
 
 ### 2026-05-24
 - **fix(storage):** iouring tests now skip gracefully when
