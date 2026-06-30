@@ -89,9 +89,9 @@ priority = "optional"
 depends = ""
 maintainer-scripts = "../../deploy/packaging/debian"
 assets = [
-    ["../../target/x86_64-unknown-linux-musl/release/fastetcd", "usr/bin/", "755"],
-    ["../../target/x86_64-unknown-linux-musl/release/fastetcd-ctl", "usr/bin/", "755"],
-    ["../../target/x86_64-unknown-linux-musl/release/fastetcd-migrate", "usr/bin/", "755"],
+    ["target/release/fastetcd", "usr/bin/", "755"],
+    ["target/release/fastetcd-ctl", "usr/bin/", "755"],
+    ["target/release/fastetcd-migrate", "usr/bin/", "755"],
     ["../../deploy/systemd/fastetcd.service", "lib/systemd/system/fastetcd.service", "644"],
     ["../../deploy/systemd/fastetcd.conf.example", "usr/share/doc/fastetcd/fastetcd.conf.example", "644"],
     ["../../README.md", "usr/share/doc/fastetcd/README.md", "644"],
