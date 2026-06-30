@@ -52,11 +52,19 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # ---------------------------------------------------------------
 # Packaging (cargo-deb / cargo-generate-rpm). Built with:
-#   cargo build --release --workspace
-#   cargo deb -p fastetcd-server --no-build
-#   cargo generate-rpm -p crates/server
+#   cargo build --release --workspace --target x86_64-unknown-linux-musl
+#   cargo deb -p fastetcd-server --no-build --target x86_64-unknown-linux-musl
+#   cargo generate-rpm -p crates/server --target x86_64-unknown-linux-musl
 # Bundles all three binaries (server, ctl, migrate) plus the
 # systemd unit under the single "fastetcd" package name.
+#
+# Binaries are built against musl (static-pie, zero dynamic libs —
+# verified with `ldd`/`file`) rather than glibc specifically so the
+# same package installs on any x86_64 Linux regardless of the host
+# glibc version: a glibc-linked build on this box's Fedora 43 would
+# bake in symbol versions (e.g. recent GLIBC_2.4x) newer than what
+# ships on common Debian/Ubuntu LTS targets, breaking the .deb on
+# exactly the systems it's meant for.
 #
 # Asset/script paths differ between the two tools: cargo-deb
 # resolves them relative to this crate's manifest dir (hence the
@@ -75,12 +83,15 @@ Raft consensus (openraft) from the start, pluggable storage \
 engines (redb / io_uring), and predictable low-overhead latency."""
 section = "admin"
 priority = "optional"
-depends = "$auto"
+# Statically linked (musl) — no dynamic library dependencies to
+# auto-detect, and dpkg-shlibdeps isn't available when cross-
+# building on a non-Debian host anyway.
+depends = ""
 maintainer-scripts = "../../deploy/packaging/debian"
 assets = [
-    ["../../target/release/fastetcd", "usr/bin/", "755"],
-    ["../../target/release/fastetcd-ctl", "usr/bin/", "755"],
-    ["../../target/release/fastetcd-migrate", "usr/bin/", "755"],
+    ["../../target/x86_64-unknown-linux-musl/release/fastetcd", "usr/bin/", "755"],
+    ["../../target/x86_64-unknown-linux-musl/release/fastetcd-ctl", "usr/bin/", "755"],
+    ["../../target/x86_64-unknown-linux-musl/release/fastetcd-migrate", "usr/bin/", "755"],
     ["../../deploy/systemd/fastetcd.service", "lib/systemd/system/fastetcd.service", "644"],
     ["../../deploy/systemd/fastetcd.conf.example", "usr/share/doc/fastetcd/fastetcd.conf.example", "644"],
     ["../../README.md", "usr/share/doc/fastetcd/README.md", "644"],
@@ -90,10 +101,12 @@ assets = [
 name = "fastetcd"
 license = "Apache-2.0"
 summary = "Rust implementation of the etcd v3 wire protocol"
+# Statically linked (musl); nothing to auto-detect.
+auto-req = "disabled"
 assets = [
-    { source = "target/release/fastetcd", dest = "/usr/bin/fastetcd", mode = "755" },
-    { source = "target/release/fastetcd-ctl", dest = "/usr/bin/fastetcd-ctl", mode = "755" },
-    { source = "target/release/fastetcd-migrate", dest = "/usr/bin/fastetcd-migrate", mode = "755" },
+    { source = "target/x86_64-unknown-linux-musl/release/fastetcd", dest = "/usr/bin/fastetcd", mode = "755" },
+    { source = "target/x86_64-unknown-linux-musl/release/fastetcd-ctl", dest = "/usr/bin/fastetcd-ctl", mode = "755" },
+    { source = "target/x86_64-unknown-linux-musl/release/fastetcd-migrate", dest = "/usr/bin/fastetcd-migrate", mode = "755" },
     { source = "deploy/systemd/fastetcd.service", dest = "/usr/lib/systemd/system/fastetcd.service", mode = "644" },
     { source = "deploy/systemd/fastetcd.conf.example", dest = "/usr/share/doc/fastetcd/fastetcd.conf.example", mode = "644" },
     { source = "README.md", dest = "/usr/share/doc/fastetcd/README.md", mode = "644", doc = true },
