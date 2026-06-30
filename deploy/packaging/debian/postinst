@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent group fastetcd >/dev/null; then
+      addgroup --system fastetcd
+    fi
+    if ! getent passwd fastetcd >/dev/null; then
+      adduser --system --ingroup fastetcd --home /var/lib/fastetcd \
+        --no-create-home --shell /usr/sbin/nologin fastetcd
+    fi
+    mkdir -p /var/lib/fastetcd /etc/fastetcd
+    chown fastetcd:fastetcd /var/lib/fastetcd
+
+    if [ -d /run/systemd/system ]; then
+      systemctl --system daemon-reload >/dev/null 2>&1 || true
+      # Autostart now and on every future boot.
+      systemctl enable --now fastetcd.service >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0

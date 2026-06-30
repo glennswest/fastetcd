@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-06-30
+- **feat(deploy):** Add a systemd unit (`deploy/systemd/fastetcd.service`)
+  with `Restart=always` / unbounded restart limit for autostart-and-
+  auto-recover behavior, plus Debian (`cargo-deb`) and Fedora/RHEL
+  (`cargo-generate-rpm`) packaging metadata in
+  `crates/server/Cargo.toml`. Both package types create a system
+  `fastetcd` user/group, ship the unit to the platform's systemd
+  unit dir, and `enable --now` it on install. Tracked by #3.
 - **feat(server):** Read `ETCD_*` environment variables as a fallback
   for every `FASTETCD_*`-prefixed CLI arg (name, data-dir, listen/
   advertise URLs, initial-cluster*, TLS cert/key/CA paths, metrics

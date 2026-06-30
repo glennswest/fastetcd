@@ -1,0 +1,27 @@
+[Unit]
+Description=fastetcd - Rust etcd v3-compatible key-value store
+Documentation=https://github.com/glennswest/fastetcd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fastetcd
+Group=fastetcd
+EnvironmentFile=-/etc/fastetcd/fastetcd.conf
+WorkingDirectory=/var/lib/fastetcd
+ExecStart=/usr/bin/fastetcd
+Restart=always
+RestartSec=1s
+StartLimitIntervalSec=0
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fastetcd
+
+[Install]
+WantedBy=multi-user.target

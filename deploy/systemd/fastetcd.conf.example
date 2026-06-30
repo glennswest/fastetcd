@@ -1,0 +1,18 @@
+# Example /etc/fastetcd/fastetcd.conf for the fastetcd.service unit.
+# Loaded via systemd's EnvironmentFile=-, so a missing file is fine
+# (the leading '-' makes it optional) and fastetcd starts with its
+# built-in defaults (single-node, 127.0.0.1:2379/2380).
+#
+# fastetcd accepts both its own FASTETCD_* names and etcd's ETCD_*
+# names (FASTETCD_* wins if both are set) — an existing etcd
+# EnvironmentFile can be copied here unmodified.
+
+#ETCD_NAME=default
+#ETCD_DATA_DIR=/var/lib/fastetcd/data
+#ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+#ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+#ETCD_INITIAL_ADVERTISE_PEER_URLS=http://localhost:2380
+#ETCD_ADVERTISE_CLIENT_URLS=http://localhost:2379
+#ETCD_INITIAL_CLUSTER=default=http://localhost:2380
+#ETCD_INITIAL_CLUSTER_STATE=new
+#ETCD_INITIAL_CLUSTER_TOKEN=fastetcd-cluster

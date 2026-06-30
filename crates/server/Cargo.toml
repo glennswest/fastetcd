@@ -49,3 +49,70 @@ tempfile = "3.13"
 # real etcd consumers will too.
 etcd-client = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# ---------------------------------------------------------------
+# Packaging (cargo-deb / cargo-generate-rpm). Built with:
+#   cargo build --release --workspace
+#   cargo deb -p fastetcd-server --no-build
+#   cargo generate-rpm -p fastetcd-server
+# Bundles all three binaries (server, ctl, migrate) plus the
+# systemd unit under the single "fastetcd" package name.
+# ---------------------------------------------------------------
+
+[package.metadata.deb]
+name = "fastetcd"
+maintainer = "fastetcd contributors"
+copyright = "2026, fastetcd contributors"
+extended-description = """\
+fastetcd is a Rust implementation of the etcd v3 wire protocol, \
+wire-compatible with unmodified etcd v3 gRPC clients. Multi-node \
+Raft consensus (openraft) from the start, pluggable storage \
+engines (redb / io_uring), and predictable low-overhead latency."""
+section = "admin"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "deploy/packaging/debian"
+assets = [
+    ["target/release/fastetcd", "usr/bin/", "755"],
+    ["target/release/fastetcd-ctl", "usr/bin/", "755"],
+    ["target/release/fastetcd-migrate", "usr/bin/", "755"],
+    ["deploy/systemd/fastetcd.service", "lib/systemd/system/fastetcd.service", "644"],
+    ["deploy/systemd/fastetcd.conf.example", "usr/share/doc/fastetcd/fastetcd.conf.example", "644"],
+    ["README.md", "usr/share/doc/fastetcd/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "fastetcd"
+license = "Apache-2.0"
+summary = "Rust implementation of the etcd v3 wire protocol"
+assets = [
+    { source = "target/release/fastetcd", dest = "/usr/bin/fastetcd", mode = "755" },
+    { source = "target/release/fastetcd-ctl", dest = "/usr/bin/fastetcd-ctl", mode = "755" },
+    { source = "target/release/fastetcd-migrate", dest = "/usr/bin/fastetcd-migrate", mode = "755" },
+    { source = "deploy/systemd/fastetcd.service", dest = "/usr/lib/systemd/system/fastetcd.service", mode = "644" },
+    { source = "deploy/systemd/fastetcd.conf.example", dest = "/usr/share/doc/fastetcd/fastetcd.conf.example", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/fastetcd/README.md", mode = "644", doc = true },
+]
+# rpm scriptlets (cargo-generate-rpm builds the package directly, it
+# does not go through rpmbuild, so %systemd_post-style macros are
+# not available — the equivalent shell is inlined here instead).
+post_install_script = """
+getent group fastetcd >/dev/null || groupadd --system fastetcd
+getent passwd fastetcd >/dev/null || useradd --system --gid fastetcd \\
+  --home-dir /var/lib/fastetcd --no-create-home --shell /sbin/nologin fastetcd
+mkdir -p /var/lib/fastetcd /etc/fastetcd
+chown fastetcd:fastetcd /var/lib/fastetcd
+systemctl daemon-reload >/dev/null 2>&1 || :
+systemctl enable --now fastetcd.service >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """
+if [ $1 -eq 0 ]; then
+  systemctl --no-reload disable --now fastetcd.service >/dev/null 2>&1 || :
+fi
+"""
+post_uninstall_script = """
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ $1 -ge 1 ]; then
+  systemctl try-restart fastetcd.service >/dev/null 2>&1 || :
+fi
+"""
