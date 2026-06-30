@@ -54,9 +54,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Packaging (cargo-deb / cargo-generate-rpm). Built with:
 #   cargo build --release --workspace
 #   cargo deb -p fastetcd-server --no-build
-#   cargo generate-rpm -p fastetcd-server
+#   cargo generate-rpm -p crates/server
 # Bundles all three binaries (server, ctl, migrate) plus the
 # systemd unit under the single "fastetcd" package name.
+#
+# Asset/script paths differ between the two tools: cargo-deb
+# resolves them relative to this crate's manifest dir (hence the
+# `../../`), cargo-generate-rpm relative to the invocation cwd
+# (workspace root).
 # ---------------------------------------------------------------
 
 [package.metadata.deb]
@@ -71,14 +76,14 @@ engines (redb / io_uring), and predictable low-overhead latency."""
 section = "admin"
 priority = "optional"
 depends = "$auto"
-maintainer-scripts = "deploy/packaging/debian"
+maintainer-scripts = "../../deploy/packaging/debian"
 assets = [
-    ["target/release/fastetcd", "usr/bin/", "755"],
-    ["target/release/fastetcd-ctl", "usr/bin/", "755"],
-    ["target/release/fastetcd-migrate", "usr/bin/", "755"],
-    ["deploy/systemd/fastetcd.service", "lib/systemd/system/fastetcd.service", "644"],
-    ["deploy/systemd/fastetcd.conf.example", "usr/share/doc/fastetcd/fastetcd.conf.example", "644"],
-    ["README.md", "usr/share/doc/fastetcd/README.md", "644"],
+    ["../../target/release/fastetcd", "usr/bin/", "755"],
+    ["../../target/release/fastetcd-ctl", "usr/bin/", "755"],
+    ["../../target/release/fastetcd-migrate", "usr/bin/", "755"],
+    ["../../deploy/systemd/fastetcd.service", "lib/systemd/system/fastetcd.service", "644"],
+    ["../../deploy/systemd/fastetcd.conf.example", "usr/share/doc/fastetcd/fastetcd.conf.example", "644"],
+    ["../../README.md", "usr/share/doc/fastetcd/README.md", "644"],
 ]
 
 [package.metadata.generate-rpm]
