@@ -179,7 +179,13 @@ See `docs/03-deploy.md` for the full guide. Quick paths:
 - **Container**: `docker run -p 2379:2379 -p 2380:2380
   ghcr.io/glennswest/fastetcd:latest`
 - **Kubernetes**: `helm install fastetcd ./deploy/charts/fastetcd`
-- **systemd**: see the unit-file template in `docs/03-deploy.md`.
+- **Fedora/RHEL**: `dnf install` the `.rpm` from [GitHub
+  Releases](https://github.com/glennswest/fastetcd/releases)
+- **Debian/Ubuntu**: `dpkg -i` the `.deb` from [GitHub
+  Releases](https://github.com/glennswest/fastetcd/releases)
+- **systemd**: rpm/deb installs enable it automatically; for a
+  manual install see `deploy/systemd/fastetcd.service` and
+  `docs/03-deploy.md`.
 
 ## License
 

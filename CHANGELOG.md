@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 2026-06-30
+- **docs:** Replace the stale hand-written systemd unit template in
+  `docs/03-deploy.md` with the real `deploy/systemd/fastetcd.service`
+  shipped in the rpm/deb, document the rpm/deb/tarball install paths
+  released to GitHub Releases, and update the `README.md` deployment
+  quick-paths list to match.
+
 ## [v0.6.0] — 2026-06-30
 
 ### Added

@@ -20,29 +20,58 @@ docker run --rm -p 2379:2379 -p 2380:2380 \
 CI publishes tagged images to `ghcr.io/glennswest/fastetcd:vX.Y.Z`
 and `:latest`.
 
-## systemd unit
+## Linux packages (rpm / deb)
 
-```ini
-[Unit]
-Description=fastetcd
-After=network.target
+Tagged releases publish `fastetcd-vX.Y.Z-1.x86_64.rpm` and
+`fastetcd_vX.Y.Z-1_amd64.deb` to [GitHub
+Releases](https://github.com/glennswest/fastetcd/releases), plus a
+plain `fastetcd-vX.Y.Z-x86_64-linux-musl.tar.gz` for distros that
+use neither package manager. All three bundle `fastetcd` /
+`fastetcd-ctl` / `fastetcd-migrate`, built statically against
+`x86_64-unknown-linux-musl` — no glibc-version dependency on the
+install target.
 
-[Service]
-Type=simple
-User=fastetcd
-Group=fastetcd
-WorkingDirectory=/var/lib/fastetcd
-ExecStart=/usr/local/bin/fastetcd \
-    --name=node-a \
-    --data-dir=/var/lib/fastetcd \
-    --listen-client-url=0.0.0.0:2379 \
-    --listen-peer-url=0.0.0.0:2380 \
-    --initial-cluster=node-a=http://node-a.example.com:2380,node-b=http://node-b.example.com:2380,node-c=http://node-c.example.com:2380
-Restart=on-failure
-RestartSec=5
+```
+# Fedora / RHEL
+sudo dnf install ./fastetcd-vX.Y.Z-1.x86_64.rpm
 
-[Install]
-WantedBy=multi-user.target
+# Debian / Ubuntu
+sudo dpkg -i ./fastetcd_vX.Y.Z-1_amd64.deb
+```
+
+Either install creates a `fastetcd` system user, owns
+`/var/lib/fastetcd`, ships the systemd unit below to the platform's
+unit dir, and runs `systemctl enable --now fastetcd` automatically
+— no separate unit-file step needed. Multi-node and TLS flags go in
+`/etc/fastetcd/fastetcd.conf` (see
+`/usr/share/doc/fastetcd/fastetcd.conf.example`), loaded via the
+unit's `EnvironmentFile=`.
+
+Building the packages locally: see `[package.metadata.deb]` /
+`[package.metadata.generate-rpm]` in `crates/server/Cargo.toml` —
+`cargo build --release --workspace --target
+x86_64-unknown-linux-musl`, then `cargo deb -p fastetcd-server
+--no-build --target x86_64-unknown-linux-musl` / `cargo
+generate-rpm -p crates/server`.
+
+## systemd unit (manual install)
+
+The unit fastetcd ships is `deploy/systemd/fastetcd.service` — it
+autostarts (`WantedBy=multi-user.target`) and restarts
+unconditionally on any exit (`Restart=always`, unbounded
+restart-rate limit). To install it by hand instead of via the rpm/
+deb above:
+
+```
+sudo useradd --system --home-dir /var/lib/fastetcd \
+    --no-create-home --shell /sbin/nologin fastetcd
+sudo mkdir -p /var/lib/fastetcd /etc/fastetcd
+sudo chown fastetcd:fastetcd /var/lib/fastetcd
+sudo cp deploy/systemd/fastetcd.service /etc/systemd/system/
+sudo cp deploy/systemd/fastetcd.conf.example /etc/fastetcd/fastetcd.conf
+# edit /etc/fastetcd/fastetcd.conf with your --name / --initial-cluster / etc.
+sudo systemctl daemon-reload
+sudo systemctl enable --now fastetcd
 ```
 
 ## TLS
