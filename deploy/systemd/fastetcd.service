@@ -3,6 +3,7 @@ Description=fastetcd - Rust etcd v3-compatible key-value store
 Documentation=https://github.com/glennswest/fastetcd
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,7 +14,6 @@ WorkingDirectory=/var/lib/fastetcd
 ExecStart=/usr/bin/fastetcd
 Restart=always
 RestartSec=1s
-StartLimitIntervalSec=0
 LimitNOFILE=65536
 
 # Hardening
