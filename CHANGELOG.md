@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 2026-06-30
+- **feat(server):** Read `ETCD_*` environment variables as a fallback
+  for every `FASTETCD_*`-prefixed CLI arg (name, data-dir, listen/
+  advertise URLs, initial-cluster*, TLS cert/key/CA paths, metrics
+  URL, snapshot-count, quota-backend-bytes, max-request-bytes,
+  log-level). An unmodified etcd `EnvironmentFile` (systemd,
+  container, Kubernetes) now boots a fastetcd cluster identically —
+  `FASTETCD_*` still takes precedence when both are set. Closes #2.
+
 ### 2026-06-29
 - **docs:** Add a detailed "fastetcd vs etcd" comparison section to
   `README.md` covering runtime (Go/GC vs Rust/no-GC), storage engines

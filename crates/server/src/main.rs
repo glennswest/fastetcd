@@ -233,6 +233,61 @@ fn first_url(list: &str) -> anyhow::Result<String> {
     Ok(bare)
 }
 
+/// (etcd-compat shim) For each fastetcd `FASTETCD_*` env var that
+/// `Args` reads, fall back to etcd's corresponding `ETCD_*` var when
+/// the `FASTETCD_*` one is unset. This lets an unmodified etcd
+/// `EnvironmentFile` (systemd, container, Kubernetes) boot a
+/// fastetcd cluster identically — `FASTETCD_*` still wins if both
+/// are set. clap's `env` attribute only takes one key, so we resolve
+/// the fallback into the process env before `Args::parse()` runs.
+fn apply_etcd_env_compat() {
+    const PAIRS: &[(&str, &str)] = &[
+        ("FASTETCD_NAME", "ETCD_NAME"),
+        ("FASTETCD_DATA_DIR", "ETCD_DATA_DIR"),
+        ("FASTETCD_LISTEN_CLIENT_URLS", "ETCD_LISTEN_CLIENT_URLS"),
+        ("FASTETCD_LISTEN_PEER_URLS", "ETCD_LISTEN_PEER_URLS"),
+        (
+            "FASTETCD_INITIAL_ADVERTISE_PEER_URLS",
+            "ETCD_INITIAL_ADVERTISE_PEER_URLS",
+        ),
+        (
+            "FASTETCD_ADVERTISE_CLIENT_URLS",
+            "ETCD_ADVERTISE_CLIENT_URLS",
+        ),
+        ("FASTETCD_INITIAL_CLUSTER", "ETCD_INITIAL_CLUSTER"),
+        (
+            "FASTETCD_INITIAL_CLUSTER_STATE",
+            "ETCD_INITIAL_CLUSTER_STATE",
+        ),
+        (
+            "FASTETCD_INITIAL_CLUSTER_TOKEN",
+            "ETCD_INITIAL_CLUSTER_TOKEN",
+        ),
+        ("FASTETCD_CERT_FILE", "ETCD_CERT_FILE"),
+        ("FASTETCD_KEY_FILE", "ETCD_KEY_FILE"),
+        ("FASTETCD_TRUSTED_CA_FILE", "ETCD_TRUSTED_CA_FILE"),
+        ("FASTETCD_PEER_CERT_FILE", "ETCD_PEER_CERT_FILE"),
+        ("FASTETCD_PEER_KEY_FILE", "ETCD_PEER_KEY_FILE"),
+        ("FASTETCD_PEER_TRUSTED_CA_FILE", "ETCD_PEER_TRUSTED_CA_FILE"),
+        // etcd's flag is `--listen-metrics-urls` (plural); fastetcd's
+        // is singular, but the env var fallback still maps across.
+        ("FASTETCD_LISTEN_METRICS_URL", "ETCD_LISTEN_METRICS_URLS"),
+        ("FASTETCD_SNAPSHOT_COUNT", "ETCD_SNAPSHOT_COUNT"),
+        ("FASTETCD_QUOTA_BACKEND_BYTES", "ETCD_QUOTA_BACKEND_BYTES"),
+        ("FASTETCD_MAX_REQUEST_BYTES", "ETCD_MAX_REQUEST_BYTES"),
+        ("FASTETCD_LOG_LEVEL", "ETCD_LOG_LEVEL"),
+    ];
+    for (fastetcd_key, etcd_key) in PAIRS {
+        if std::env::var_os(fastetcd_key).is_none() {
+            if let Some(v) = std::env::var_os(etcd_key) {
+                // SAFETY: called once, single-threaded, before any
+                // other thread is spawned (start of `main`).
+                unsafe { std::env::set_var(fastetcd_key, v) };
+            }
+        }
+    }
+}
+
 fn derive_node_id(name: &str) -> NodeId {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in name.as_bytes() {
@@ -271,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    apply_etcd_env_compat();
     let args = Args::parse();
     let node_id = args.node_id.unwrap_or_else(|| derive_node_id(&args.name));
 
