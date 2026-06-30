@@ -76,7 +76,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 name = "fastetcd"
 maintainer = "fastetcd contributors"
 copyright = "2026, fastetcd contributors"
-description = "Rust implementation of the etcd v3 wire protocol"
 extended-description = """\
 fastetcd is a Rust implementation of the etcd v3 wire protocol, \
 wire-compatible with unmodified etcd v3 gRPC clients. Multi-node \
