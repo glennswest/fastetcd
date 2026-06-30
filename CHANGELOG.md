@@ -2,14 +2,9 @@
 
 ## [Unreleased]
 
-### 2026-06-30
-- **feat(deploy):** Add a systemd unit (`deploy/systemd/fastetcd.service`)
-  with `Restart=always` / unbounded restart limit for autostart-and-
-  auto-recover behavior, plus Debian (`cargo-deb`) and Fedora/RHEL
-  (`cargo-generate-rpm`) packaging metadata in
-  `crates/server/Cargo.toml`. Both package types create a system
-  `fastetcd` user/group, ship the unit to the platform's systemd
-  unit dir, and `enable --now` it on install. Tracked by #3.
+## [v0.6.0] — 2026-06-30
+
+### Added
 - **feat(server):** Read `ETCD_*` environment variables as a fallback
   for every `FASTETCD_*`-prefixed CLI arg (name, data-dir, listen/
   advertise URLs, initial-cluster*, TLS cert/key/CA paths, metrics
@@ -17,6 +12,24 @@
   log-level). An unmodified etcd `EnvironmentFile` (systemd,
   container, Kubernetes) now boots a fastetcd cluster identically —
   `FASTETCD_*` still takes precedence when both are set. Closes #2.
+- **feat(deploy):** Add a systemd unit (`deploy/systemd/fastetcd.service`)
+  with `Restart=always` and an unbounded restart-rate limit
+  (`StartLimitIntervalSec=0` in `[Unit]`) so the service both
+  autostarts (`WantedBy=multi-user.target`) and keeps retrying after
+  any exit, plus an example `EnvironmentFile` at
+  `deploy/systemd/fastetcd.conf.example`. Closes #3.
+- **feat(deploy):** rpm (`cargo-generate-rpm`) and deb (`cargo-deb`)
+  packaging metadata in `crates/server/Cargo.toml`, bundling
+  `fastetcd` / `fastetcd-ctl` / `fastetcd-migrate` into a single
+  `fastetcd` package built statically against
+  `x86_64-unknown-linux-musl` — avoids baking in a glibc-version
+  requirement tied to whichever host built the package. Maintainer/
+  post-install scripts (`deploy/packaging/debian/`, inline rpm
+  scriptlets) create the `fastetcd` system user, own
+  `/var/lib/fastetcd`, and `enable --now` the unit on install.
+  Verified end to end on dev.g8.lo (Fedora 43): both `dnf install`
+  and `dpkg -i` bring up a working single-node server with
+  `fastetcd-ctl put`/`get` round-tripping through it.
 
 ### 2026-06-29
 - **docs:** Add a detailed "fastetcd vs etcd" comparison section to

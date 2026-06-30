@@ -10,7 +10,18 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
+**`0.6.0`** — `ETCD_*` env var drop-in compat (falls back to etcd's
+env names when `FASTETCD_*` is unset), a systemd unit
+(`deploy/systemd/fastetcd.service`, autostart + unconditional
+auto-restart) and rpm/deb packaging (`crates/server/Cargo.toml`
+`[package.metadata.deb]` / `[package.metadata.generate-rpm]`) that
+bundle all three binaries as static `x86_64-unknown-linux-musl`
+builds — avoids baking in a glibc-version requirement from the
+packaging host. Verified end to end on dev.g8.lo (Fedora 43):
+`dnf install` / `dpkg -i` both create the `fastetcd` system user,
+enable, and start the service automatically.
+
+Previous: **`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
 service-mesh probes, a Helm chart at `deploy/charts/fastetcd`,
 real `fastetcd-ctl` client (put/get/del/snapshot-save), README
 rewrite. Only remaining gap from the v0.1.0 era is the openraft
