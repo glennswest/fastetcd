@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 2026-07-01
+- **ci:** Add a `build-packages` job that builds the rpm/deb/tarball
+  (static `x86_64-unknown-linux-musl`) on every `v*` tag push and
+  publishes them straight to the GitHub Release via
+  `softprops/action-gh-release`, mirroring the manual v0.6.0 release
+  process. Future tags no longer need a manual build-and-upload
+  pass.
+
 ### 2026-06-30
 - **docs:** Replace the stale hand-written systemd unit template in
   `docs/03-deploy.md` with the real `deploy/systemd/fastetcd.service`
