@@ -17,12 +17,20 @@ docker run --rm -p 2379:2379 -p 2380:2380 \
     fastetcd:dev
 ```
 
-CI publishes tagged images to `ghcr.io/glennswest/fastetcd:vX.Y.Z`
-and `:latest`.
+GitHub Actions only runs `cargo test` (see
+`.github/workflows/ci.yml`) — it does not build or publish
+anything. Container images and rpm/deb/tarball packages are built
+by hand on a Linux box with the musl target and packaging tools
+installed (e.g. `dev.g8.lo`) and published from there.
+
+```
+podman build -t ghcr.io/glennswest/fastetcd:vX.Y.Z -f Dockerfile.ci .
+podman push ghcr.io/glennswest/fastetcd:vX.Y.Z
+```
 
 ## Linux packages (rpm / deb)
 
-Tagged releases publish `fastetcd-vX.Y.Z-1.x86_64.rpm` and
+Releases publish `fastetcd-vX.Y.Z-1.x86_64.rpm` and
 `fastetcd_vX.Y.Z-1_amd64.deb` to [GitHub
 Releases](https://github.com/glennswest/fastetcd/releases), plus a
 plain `fastetcd-vX.Y.Z-x86_64-linux-musl.tar.gz` for distros that
@@ -47,12 +55,13 @@ unit dir, and runs `systemctl enable --now fastetcd` automatically
 `/usr/share/doc/fastetcd/fastetcd.conf.example`), loaded via the
 unit's `EnvironmentFile=`.
 
-Building the packages locally: see `[package.metadata.deb]` /
-`[package.metadata.generate-rpm]` in `crates/server/Cargo.toml` —
-`cargo build --release --workspace --target
-x86_64-unknown-linux-musl`, then `cargo deb -p fastetcd-server
---no-build --target x86_64-unknown-linux-musl` / `cargo
-generate-rpm -p crates/server`.
+Building the packages: `deploy/packaging/build-release.sh vX.Y.Z`
+on a host with rustup (`x86_64-unknown-linux-musl` target),
+`cargo-deb`, `cargo-generate-rpm`, `protoc`, and `musl-gcc`
+installed. It builds the workspace, runs `cargo deb` / `cargo
+generate-rpm`, bundles the tarball, and writes everything plus
+`SHA256SUMS.txt` to `dist/`. Publish with `gh release create vX.Y.Z
+dist/* --generate-notes`.
 
 ## systemd unit (manual install)
 

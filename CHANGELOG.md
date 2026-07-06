@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 2026-07-06
+- **ci:** GitHub Actions had silently stopped triggering on this repo
+  since 2026-05-24 — the `v0.6.0` and `v0.7.0` tag pushes never ran
+  the `build-packages`/`build-container` jobs, so `v0.7.0` had no
+  GitHub Release at all. Removed those jobs (and `build-linux-binary`)
+  from `.github/workflows/ci.yml`; Actions now only runs `cargo test`.
+  Packaging/publishing moves to a manual step on a real Linux box
+  (`dev.g8.lo`) via the new `deploy/packaging/build-release.sh`.
+
 ## [v0.7.0] — 2026-07-01
 
 ### Fixed
