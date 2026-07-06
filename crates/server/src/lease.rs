@@ -35,10 +35,7 @@ impl LeaseService {
     }
 
     async fn propose(&self, entry: FastetcdLogEntry) -> Result<FastetcdLogResponse, Status> {
-        match self.state.raft.client_write(entry).await {
-            Ok(w) => Ok(w.data),
-            Err(e) => Err(Status::unavailable(format!("raft client_write: {e}"))),
-        }
+        self.state.propose(entry).await
     }
 }
 
@@ -111,20 +108,15 @@ impl Lease for LeaseService {
                     break;
                 };
                 let res = match state
-                    .raft
-                    .client_write(FastetcdLogEntry::LeaseKeepAlive {
+                    .propose(FastetcdLogEntry::LeaseKeepAlive {
                         id: req.id,
                         now_unix: now_unix(),
                     })
                     .await
                 {
-                    Ok(w) => w.data,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(Status::unavailable(format!(
-                                "raft client_write: {e}"
-                            ))))
-                            .await;
+                    Ok(data) => data,
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
                         continue;
                     }
                 };

@@ -10,7 +10,18 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.6.0`** — `ETCD_*` env var drop-in compat (falls back to etcd's
+**`0.7.0`** — Fixed a multi-node blocker (#4): client writes sent to
+a non-leader now actually forward to the leader over the existing
+peer channel (new `RaftPeer.ForwardWrite` RPC / `WriteForwarder` in
+`crates/raft/src/network.rs`), instead of relaying openraft's
+`ForwardToLeader` error straight to the client with an empty
+address. `raft.initialize()` also now carries real peer-URL
+`BasicNode` addresses. Added etcd-compat `GET /health` (+ `/livez`,
+`/readyz`) on the client gRPC port itself via tonic 0.12's
+`Routes`↔`axum::Router` interop (#5), so LB/k8s health probes work
+without a second port.
+
+Previous: **`0.6.0`** — `ETCD_*` env var drop-in compat (falls back to etcd's
 env names when `FASTETCD_*` is unset), a systemd unit
 (`deploy/systemd/fastetcd.service`, autostart + unconditional
 auto-restart) and rpm/deb packaging (`crates/server/Cargo.toml`
@@ -21,7 +32,7 @@ packaging host. Verified end to end on dev.g8.lo (Fedora 43):
 `dnf install` / `dpkg -i` both create the `fastetcd` system user,
 enable, and start the service automatically.
 
-Previous: **`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
+Earlier: **`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
 service-mesh probes, a Helm chart at `deploy/charts/fastetcd`,
 real `fastetcd-ctl` client (put/get/del/snapshot-save), README
 rewrite. Only remaining gap from the v0.1.0 era is the openraft

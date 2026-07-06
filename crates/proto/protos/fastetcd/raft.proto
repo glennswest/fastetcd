@@ -14,6 +14,13 @@ service RaftPeer {
     rpc AppendEntries(RaftPayload) returns (RaftPayload);
     rpc Vote(RaftPayload) returns (RaftPayload);
     rpc InstallSnapshot(RaftPayload) returns (RaftPayload);
+
+    // A node that isn't the leader hands a client write off to
+    // whichever node is, over this same peer channel — reusing the
+    // address fastetcd already resolves correctly for AppendEntries
+    // (see network.rs) rather than needing a separate client-URL
+    // exchange between members.
+    rpc ForwardWrite(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

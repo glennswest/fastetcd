@@ -40,6 +40,10 @@ prometheus-client = "0.22"
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
+# Must track the axum version tonic 0.12 embeds internally
+# (tonic::service::Routes converts to/from axum::Router) so the
+# client-port /health route below shares its type.
+axum = "0.7"
 
 [dev-dependencies]
 tempfile = "3.13"

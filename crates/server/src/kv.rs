@@ -38,10 +38,7 @@ impl KvService {
         &self,
         entry: FastetcdLogEntry,
     ) -> Result<FastetcdLogResponse, Status> {
-        match self.state.raft.client_write(entry).await {
-            Ok(write) => Ok(write.data),
-            Err(e) => Err(client_write_error_to_status(&e)),
-        }
+        self.state.propose(entry).await
     }
 }
 
@@ -312,9 +309,3 @@ fn mvcc_error_to_status(e: fastetcd_storage::mvcc::MvccError) -> Status {
     }
 }
 
-fn client_write_error_to_status<E: std::fmt::Display>(e: &E) -> Status {
-    // openraft client_write errors include ForwardToLeader, etc.;
-    // map them through to Unavailable so clients retry against a
-    // different endpoint.
-    Status::unavailable(format!("raft client_write: {e}"))
-}

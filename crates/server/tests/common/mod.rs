@@ -147,11 +147,12 @@ pub async fn start_test_server_full() -> TestServerHandles {
     wait_for_leader(&raft).await;
 
     let auth_state = AuthState::default();
-    let state = Arc::new(ServerState::new(raft, sm, 7, 1, auth_state.clone()));
+    let peers = fastetcd_raft::network::empty_peers();
+    let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
+    let state = Arc::new(ServerState::new(raft, sm, 7, 1, auth_state.clone(), forwarder));
     let _ = log;
 
     let kv = KvService::new(state.clone());
-    let peers = fastetcd_raft::network::empty_peers();
     let directory: fastetcd_server::cluster::MemberDirectory =
         std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
     ClusterService::seed_self(

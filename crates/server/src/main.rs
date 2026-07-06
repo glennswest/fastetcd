@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -288,6 +288,23 @@ fn apply_etcd_env_compat() {
     }
 }
 
+/// etcd-compat plain-HTTP health probe on the client port. Matches
+/// etcd's `GET /health` response shape so existing load-balancer /
+/// k8s httpGet probes pointed at etcd work unchanged against
+/// fastetcd. https://etcd.io/docs/latest/op-guide/monitoring/#health-check
+async fn health_http_handler() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"health":"true"}"#,
+    )
+}
+
+/// etcd-compat `/livez` and `/readyz` — plain-text "ok" on success,
+/// matching etcd's Kubernetes-style probe endpoints.
+async fn livez_http_handler() -> &'static str {
+    "ok"
+}
+
 fn derive_node_id(name: &str) -> NodeId {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in name.as_bytes() {
@@ -397,13 +414,33 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("raft config validate: {e}"))?,
     );
 
-    // Build a NodeId map for the initial cluster (excluding self).
+    // Build a NodeId -> BasicNode map for the initial cluster,
+    // addressed by peer URL (matching the convention `ClusterService`
+    // already uses for dynamically added members — see
+    // `cluster.rs`'s `add_learner` call). openraft's `initialize()`
+    // otherwise defaults every member's `Node` to `BasicNode::default()`
+    // (empty `addr`), which is the root cause of #4: a follower that
+    // needs to forward a client write has no address for the leader
+    // in its raft membership. fastetcd's own peer transport
+    // (`GrpcNetworkFactory`) doesn't actually dial through this addr
+    // — it resolves peers via the separate `peers` map below — but
+    // openraft's own `ForwardToLeader` error surfaces this addr to
+    // operators/logs, so it should be real regardless.
+    let own_peer_url = split_list(
+        args.initial_advertise_peer_urls
+            .as_deref()
+            .unwrap_or(&args.listen_peer_urls),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| peer_listen_url.clone());
+
     let mut peers_map: BTreeMap<NodeId, String> = BTreeMap::new();
-    let mut all_members: BTreeSet<NodeId> = BTreeSet::new();
-    all_members.insert(node_id);
+    let mut all_members: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    all_members.insert(node_id, openraft::BasicNode::new(own_peer_url));
     for (name, url) in &initial_cluster {
         let nid = derive_node_id(name);
-        all_members.insert(nid);
+        all_members.insert(nid, openraft::BasicNode::new(url.clone()));
         if nid != node_id {
             peers_map.insert(nid, url.clone());
         }
@@ -444,12 +481,14 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_state = AuthState::default();
     AuthService::load_persisted(sm.mvcc().engine(), &auth_state).await?;
+    let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
     let server_state = Arc::new(ServerState::new(
         raft.clone(),
         sm,
         args.cluster_id,
         node_id,
         auth_state.clone(),
+        forwarder,
     ));
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
@@ -566,26 +605,42 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             tracing::info!(
                 %client_listen,
-                "serving KV / Cluster / Maintenance / Watch / Lease / Auth / Health gRPC"
+                "serving KV / Cluster / Maintenance / Watch / Lease / Auth / Health gRPC + HTTP /health"
             );
-            let mut builder = Server::builder();
+            let mut grpc_routes = tonic::service::Routes::builder();
+            grpc_routes.add_service(health_service);
+            grpc_routes.add_service(KvServer::with_interceptor(kv, interceptor.clone()));
+            grpc_routes.add_service(ClusterServer::with_interceptor(
+                cluster,
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(MaintenanceServer::with_interceptor(
+                maintenance,
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(WatchServer::with_interceptor(watch, interceptor.clone()));
+            grpc_routes.add_service(LeaseServer::with_interceptor(lease, interceptor));
+            grpc_routes.add_service(AuthServer::new(auth));
+
+            // Same port also answers etcd's plain-HTTP health probes
+            // (load balancers / k8s httpGet probes already pointed
+            // at :2379 for etcd don't need a second port for this).
+            // tonic 0.12 routes are convertible to/from axum::Router,
+            // so the gRPC routes and the HTTP routes below share one
+            // `Service` served on the same listener.
+            let app: axum::Router = grpc_routes
+                .routes()
+                .into_axum_router()
+                .route("/health", axum::routing::get(health_http_handler))
+                .route("/livez", axum::routing::get(livez_http_handler))
+                .route("/readyz", axum::routing::get(livez_http_handler));
+
+            let mut builder = Server::builder().accept_http1(true);
             if let Some(t) = tls_for_client {
                 builder = builder.tls_config(t).expect("apply client TLS config");
             }
             builder
-                .add_service(health_service)
-                .add_service(KvServer::with_interceptor(kv, interceptor.clone()))
-                .add_service(ClusterServer::with_interceptor(
-                    cluster,
-                    interceptor.clone(),
-                ))
-                .add_service(MaintenanceServer::with_interceptor(
-                    maintenance,
-                    interceptor.clone(),
-                ))
-                .add_service(WatchServer::with_interceptor(watch, interceptor.clone()))
-                .add_service(LeaseServer::with_interceptor(lease, interceptor))
-                .add_service(AuthServer::new(auth))
+                .add_routes(tonic::service::Routes::from(app))
                 .serve(client_listen)
                 .await
         })

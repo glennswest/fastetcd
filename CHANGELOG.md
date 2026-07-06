@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [v0.7.0] — 2026-07-01
+
+### Fixed
+- **fix(raft):** Multi-node client writes sent to a non-leader no
+  longer fail. `raft.initialize()` was defaulting every member's
+  `BasicNode.addr` to empty (a bare `BTreeSet<NodeId>` instead of a
+  `BTreeMap<NodeId, BasicNode>`), and — more fundamentally — fastetcd
+  never actually forwarded a write to the leader; it just relayed
+  openraft's `ForwardToLeader` error (with that empty address baked
+  in) straight to the client. Added a `RaftPeer.ForwardWrite` RPC
+  (`crates/raft/src/network.rs`'s new `WriteForwarder`) that hands
+  the write off to the leader over the same peer channel already
+  used for AppendEntries/Vote/InstallSnapshot, and a single shared
+  `ServerState::propose()` that every write path (KV, Lease grant/
+  revoke/keepalive) now goes through. Regression test: a `PUT` sent
+  to a follower in the 3-node integration test now succeeds and
+  replicates. Closes #4.
+
+### Added
+- **feat(server):** Serve etcd's plain-HTTP `GET /health` (and
+  `/livez`, `/readyz`) on the client gRPC port itself, so load
+  balancers and Kubernetes httpGet probes already pointed at etcd's
+  client port work unchanged against fastetcd — no second port
+  needed. Built on tonic 0.12's `Routes`↔`axum::Router` interop
+  (`tonic::service::Routes::builder()...routes().into_axum_router()`),
+  preserving TLS. Closes #5.
+
 ### 2026-07-01
 - **ci:** Add a `build-packages` job that builds the rpm/deb/tarball
   (static `x86_64-unknown-linux-musl`) on every `v*` tag push and

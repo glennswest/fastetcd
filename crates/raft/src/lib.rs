@@ -12,7 +12,9 @@ pub mod network;
 pub mod state_machine;
 pub mod types;
 
-pub use network::{empty_peers, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, RaftPeerService};
+pub use network::{
+    empty_peers, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, RaftPeerService, WriteForwarder,
+};
 
 pub use state_machine::{FastetcdSnapshotBuilder, FastetcdStateMachine};
 pub use types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};

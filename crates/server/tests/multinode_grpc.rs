@@ -3,7 +3,7 @@
 //! and they discover each other via `--initial-cluster`-style
 //! configuration.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,13 +66,14 @@ async fn start_node(
     peers.remove(&id);
     let peers = Arc::new(RwLock::new(peers.into_iter().collect()));
 
-    let factory = GrpcNetworkFactory::new(peers);
+    let factory = GrpcNetworkFactory::new(peers.clone());
     let raft = Raft::<TypeConfig>::new(id, config, factory, log, sm.clone())
         .await
         .unwrap();
 
     let auth_state = fastetcd_server::auth::AuthState::default();
-    let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id, auth_state));
+    let forwarder = fastetcd_raft::WriteForwarder::new(peers);
+    let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id, auth_state, forwarder));
     let kv = KvService::new(state.clone());
     let test_peers = fastetcd_raft::network::empty_peers();
     let test_dir: fastetcd_server::cluster::MemberDirectory =
@@ -164,11 +165,13 @@ async fn three_node_cluster_replicates_via_grpc_transport() {
     sleep(Duration::from_millis(150)).await;
 
     // Only node 1 calls initialize; openraft will replicate the
-    // membership to the others.
-    let mut all: BTreeSet<NodeId> = BTreeSet::new();
-    all.insert(1);
-    all.insert(2);
-    all.insert(3);
+    // membership to the others. Address by peer URL, matching
+    // main.rs's bootstrap — a bare `BTreeSet<NodeId>` defaults every
+    // member's `BasicNode.addr` to empty (see #4).
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
     n1.raft.initialize(all).await.unwrap();
 
     // Wait for a leader to emerge.
@@ -224,5 +227,48 @@ async fn three_node_cluster_replicates_via_grpc_transport() {
             .into_inner();
         assert_eq!(r.kvs.len(), 1, "node {} did not see the value", n.client_endpoint);
         assert_eq!(r.kvs[0].value, b"replicated-value");
+    }
+
+    // Regression test for #4: a write sent to a FOLLOWER must still
+    // succeed — fastetcd forwards it to the leader over the peer
+    // channel rather than erroring with "has to forward request to:
+    // ... BasicNode { addr: "" }".
+    let follower = [&n1, &n2, &n3]
+        .into_iter()
+        .find(|n| n.client_endpoint != leader_node.client_endpoint)
+        .unwrap();
+    let mut kv_follower = KvClient::connect(follower.client_endpoint.clone())
+        .await
+        .unwrap();
+    let put = kv_follower
+        .put(pb::PutRequest {
+            key: b"forwarded-key".to_vec(),
+            value: b"forwarded-value".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .expect("PUT on a follower must be forwarded to the leader, not fail")
+        .into_inner();
+    assert!(put.header.unwrap().revision > put_rev);
+
+    sleep(Duration::from_millis(300)).await;
+    for n in [&n1, &n2, &n3] {
+        let mut kv = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
+        let r = kv
+            .range(pb::RangeRequest {
+                key: b"forwarded-key".to_vec(),
+                serializable: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            r.kvs.len(),
+            1,
+            "node {} did not see the forwarded write",
+            n.client_endpoint
+        );
+        assert_eq!(r.kvs[0].value, b"forwarded-value");
     }
 }

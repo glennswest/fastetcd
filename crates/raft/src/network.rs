@@ -172,6 +172,82 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
     }
 }
 
+/// Client for `RaftPeer.ForwardWrite` — hands a client write off to
+/// another node over the same peer-address map `GrpcNetworkFactory`
+/// already resolves correctly for AppendEntries/Vote/InstallSnapshot.
+/// Used when a node isn't the raft leader: rather than requiring a
+/// separate exchange of client URLs between members, it forwards the
+/// write over the peer (raft) connection that's already known to work.
+#[derive(Clone)]
+pub struct WriteForwarder {
+    peers: PeerEndpoints,
+    clients: Arc<RwLock<HashMap<NodeId, pb::raft_peer_client::RaftPeerClient<Channel>>>>,
+}
+
+impl WriteForwarder {
+    pub fn new(peers: PeerEndpoints) -> Self {
+        Self {
+            peers,
+            clients: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn client(
+        &self,
+        target: NodeId,
+    ) -> Result<pb::raft_peer_client::RaftPeerClient<Channel>, String> {
+        if let Some(c) = self.clients.read().await.get(&target) {
+            return Ok(c.clone());
+        }
+        let url = self
+            .peers
+            .read()
+            .await
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| format!("no peer URL for node {target}"))?;
+        let chan = Channel::from_shared(url)
+            .map_err(|e| e.to_string())?
+            .connect()
+            .await
+            .map_err(|e| e.to_string())?;
+        let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
+        self.clients.write().await.insert(target, cli.clone());
+        Ok(cli)
+    }
+
+    /// Forward `entry` to `target`'s `ForwardWrite` RPC and return its
+    /// decoded response. The `Err` string covers both local failure to
+    /// reach `target` and a `client_write` error the remote node hit
+    /// applying the entry (e.g. it lost leadership mid-flight).
+    pub async fn forward(
+        &self,
+        target: NodeId,
+        entry: &crate::types::FastetcdLogEntry,
+    ) -> Result<crate::types::FastetcdLogResponse, String> {
+        let data = bincode::serialize(entry).map_err(|e| e.to_string())?;
+        let cli_result = async {
+            let mut cli = self.client(target).await?;
+            cli.forward_write(Request::new(pb::RaftPayload { data }))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        let resp = match cli_result {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                // Drop the cached channel so the next attempt redials
+                // instead of reusing a possibly-dead connection.
+                self.clients.write().await.remove(&target);
+                return Err(e);
+            }
+        };
+        let result: Result<crate::types::FastetcdLogResponse, String> =
+            bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
+        result
+    }
+}
+
 /// Server-side handler for inbound peer RPCs. Holds a clone of the
 /// local `Raft<TypeConfig>` and dispatches each bincode-decoded
 /// request into the appropriate openraft method.
@@ -234,6 +310,28 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
             .await
             .map_err(|e| Status::internal(format!("raft.vote: {e}")))?;
         let data = bincode::serialize(&resp)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn forward_write(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let entry: crate::types::FastetcdLogEntry =
+            bincode::deserialize(&request.into_inner().data)
+                .map_err(|e| Status::invalid_argument(format!("decode ForwardWrite: {e}")))?;
+        let result: Result<crate::types::FastetcdLogResponse, String> =
+            match self.raft.client_write(entry).await {
+                Ok(resp) => Ok(resp.data),
+                // Stringify rather than propagate ForwardToLeader
+                // further — a forwarding hop that itself needs
+                // forwarding means leadership just changed again;
+                // the original caller gets a plain error and, same
+                // as any raft client, retries.
+                Err(e) => Err(e.to_string()),
+            };
+        let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
     }
