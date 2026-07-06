@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-### 2026-07-06
+## [v0.8.0] — 2026-07-06
+
+### Changed
 - **ci:** Root cause of the stalled release pipeline found: GitHub
   Actions is disabled at the repo-settings level
   (`repos/.../actions/permissions` → `enabled: false`), not broken —
@@ -14,6 +16,8 @@
   `iouring` feature tests) and `deploy/packaging/build-release.sh`
   (rpm/deb/tarball) to script that path. Published the missing
   `v0.7.0` GitHub Release from `dev.g8.lo`.
+
+### Documentation
 - **test:** Verified the v0.7.0 rpm and deb end-to-end on
   `dev.g8.lo`: both create the `fastetcd` system user, enable, and
   start the service; `fastetcd-ctl put`/`get` round-trips through

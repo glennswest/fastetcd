@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.7.0`** — Fixed a multi-node blocker (#4): client writes sent to
+**`0.8.0`** — Found and fixed the real reason releases had stalled:
+GitHub Actions is disabled at the repo-settings level (confirmed off
+since 2026-05-24, not a workflow bug or billing issue) — every push
+and tag since then, including `v0.6.0`/`v0.7.0`, silently ran
+nothing. Decision: leave Actions off; `dev.g8.lo` is now the sole
+build+test path, scripted via `deploy/packaging/run-tests.sh` and
+`deploy/packaging/build-release.sh` (the now-dead
+`.github/workflows/ci.yml` was deleted). Published the missing
+`v0.7.0` GitHub Release from `dev.g8.lo`, and verified its rpm/deb
+end to end there (systemd unit, `fastetcd-ctl put`/`get` through
+Raft) — noting a Fedora + SELinux `Enforcing` quirk with foreign
+`dpkg` maintainer scripts that isn't a package defect.
+
+Previous: **`0.7.0`** — Fixed a multi-node blocker (#4): client writes sent to
 a non-leader now actually forward to the leader over the existing
 peer channel (new `RaftPeer.ForwardWrite` RPC / `WriteForwarder` in
 `crates/raft/src/network.rs`), instead of relaying openraft's
@@ -21,7 +34,7 @@ address. `raft.initialize()` also now carries real peer-URL
 `Routes`↔`axum::Router` interop (#5), so LB/k8s health probes work
 without a second port.
 
-Previous: **`0.6.0`** — `ETCD_*` env var drop-in compat (falls back to etcd's
+Earlier: **`0.6.0`** — `ETCD_*` env var drop-in compat (falls back to etcd's
 env names when `FASTETCD_*` is unset), a systemd unit
 (`deploy/systemd/fastetcd.service`, autostart + unconditional
 auto-restart) and rpm/deb packaging (`crates/server/Cargo.toml`
@@ -32,7 +45,7 @@ packaging host. Verified end to end on dev.g8.lo (Fedora 43):
 `dnf install` / `dpkg -i` both create the `fastetcd` system user,
 enable, and start the service automatically.
 
-Earlier: **`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
+Older: **`0.5.0`** — Kubernetes-ready: grpc.health.v1.Health for
 service-mesh probes, a Helm chart at `deploy/charts/fastetcd`,
 real `fastetcd-ctl` client (put/get/del/snapshot-save), README
 rewrite. Only remaining gap from the v0.1.0 era is the openraft
