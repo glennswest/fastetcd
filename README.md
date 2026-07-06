@@ -3,16 +3,19 @@
 A Rust implementation of the **etcd v3 wire protocol**, focused on
 low resource overhead and predictable latency. Wire-compatible with
 unmodified etcd v3 clients (third-party `etcd-client` Rust crate
-exercises the full surface in CI). Multi-node Raft via `openraft`.
+exercises the full surface in the integration tests). Multi-node
+Raft via `openraft`.
 Two storage engines: cross-platform `redb` (default) and Linux-only
 `iouring` (via `tokio-uring`).
 
 ## Status
 
-`v0.4.0` — production-shaped: TLS, Auth (token + per-key
-permissions), Prometheus `/metrics`, gRPC health, GitHub Actions CI,
-distroless container, Helm chart. See `CHANGELOG.md` for the full
-release history.
+`v0.7.0` — production-shaped: TLS, Auth (token + per-key
+permissions), Prometheus `/metrics`, gRPC health, distroless
+container, Helm chart, rpm/deb/tarball packaging. Multi-node client
+write forwarding to the leader. Built and tested by hand on
+`dev.g8.lo` (see `docs/03-deploy.md`) — GitHub Actions is disabled
+for this repo. See `CHANGELOG.md` for the full release history.
 
 ## Quick start
 

@@ -17,11 +17,12 @@ docker run --rm -p 2379:2379 -p 2380:2380 \
     fastetcd:dev
 ```
 
-GitHub Actions only runs `cargo test` (see
-`.github/workflows/ci.yml`) — it does not build or publish
-anything. Container images and rpm/deb/tarball packages are built
+GitHub Actions is disabled for this repo (repo-level setting,
+confirmed off since 2026-05-24 — not a workflow or billing issue,
+just switched off). All testing, building, and packaging happens
 by hand on a Linux box with the musl target and packaging tools
-installed (e.g. `dev.g8.lo`) and published from there.
+installed — `dev.g8.lo` — via `deploy/packaging/run-tests.sh` and
+`deploy/packaging/build-release.sh`.
 
 ```
 podman build -t ghcr.io/glennswest/fastetcd:vX.Y.Z -f Dockerfile.ci .

@@ -3,13 +3,16 @@
 ## [Unreleased]
 
 ### 2026-07-06
-- **ci:** GitHub Actions had silently stopped triggering on this repo
-  since 2026-05-24 — the `v0.6.0` and `v0.7.0` tag pushes never ran
-  the `build-packages`/`build-container` jobs, so `v0.7.0` had no
-  GitHub Release at all. Removed those jobs (and `build-linux-binary`)
-  from `.github/workflows/ci.yml`; Actions now only runs `cargo test`.
-  Packaging/publishing moves to a manual step on a real Linux box
-  (`dev.g8.lo`) via the new `deploy/packaging/build-release.sh`.
+- **ci:** Root cause of the stalled release pipeline found: GitHub
+  Actions is disabled at the repo-settings level
+  (`repos/.../actions/permissions` → `enabled: false`), not broken —
+  confirmed off since 2026-05-24, so the `v0.6.0`/`v0.7.0` tag
+  pushes never ran anything and `v0.7.0` shipped no GitHub Release.
+  Decision: leave Actions disabled; `dev.g8.lo` is now the sole
+  build+test path. Deleted `.github/workflows/ci.yml`. Added
+  `deploy/packaging/run-tests.sh` (workspace + `wal-engine` +
+  `iouring` feature tests) and `deploy/packaging/build-release.sh`
+  (rpm/deb/tarball) to script that path.
 
 ## [v0.7.0] — 2026-07-01
 
