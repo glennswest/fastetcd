@@ -56,6 +56,19 @@ unit dir, and runs `systemctl enable --now fastetcd` automatically
 `/usr/share/doc/fastetcd/fastetcd.conf.example`), loaded via the
 unit's `EnvironmentFile=`.
 
+Verified end-to-end on `dev.g8.lo` (Fedora 43) for v0.7.0: both the
+rpm and the deb create the system user, enable, and start the
+service, and a `put`/`get` through `fastetcd-ctl` round-trips. The
+one caveat is testing the **deb on Fedora specifically**: Fedora's
+`dpkg` build calls `setexeccon()` before running maintainer
+scripts, and Fedora's SELinux policy has no context for dpkg's
+scripts (only rpm's), so `postinst`/`prerm` fail under `Enforcing`
+with "cannot set security execution context for maintainer script:
+Invalid argument". This is a Fedora+foreign-`dpkg` limitation, not
+a defect in the package — it installs and runs cleanly under
+`setenforce 0`, and is a non-issue on real Debian/Ubuntu, where
+`dpkg` is native.
+
 Building the packages: `deploy/packaging/build-release.sh vX.Y.Z`
 on a host with rustup (`x86_64-unknown-linux-musl` target),
 `cargo-deb`, `cargo-generate-rpm`, `protoc`, and `musl-gcc`
