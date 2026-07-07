@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [v0.8.1] — 2026-07-06
+
+### Fixed
+- **security (#6):** `--client-cert-auth` is now actually enforced.
+  The flag had no `env` binding, and the `ETCD_*`→`FASTETCD_*` compat
+  shim had no entry for it, so `ETCD_CLIENT_CERT_AUTH=true` (and
+  `FASTETCD_CLIENT_CERT_AUTH`) were silently ignored — the flag stayed
+  `false`, TLS was built with no client-CA verifier, and any client
+  could complete the handshake and read/write anonymously. Wired
+  `env = "FASTETCD_CLIENT_CERT_AUTH"` onto the flag, added the
+  `ETCD_CLIENT_CERT_AUTH` compat pair (same fix for
+  `peer-client-cert-auth`), and set `client_auth_optional(false)`
+  explicitly so mandatory client auth doesn't depend on a tonic
+  default. Verified: certless TLS clients are now rejected at the
+  handshake on both the gRPC port and the `/health` route; clients
+  presenting a CA-signed cert still succeed.
+
 ## [v0.8.0] — 2026-07-06
 
 ### Changed

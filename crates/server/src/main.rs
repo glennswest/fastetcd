@@ -113,7 +113,7 @@ struct Args {
 
     /// Require clients to present a TLS certificate signed by
     /// `--trusted-ca-file`.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "FASTETCD_CLIENT_CERT_AUTH", default_value_t = false)]
     client_cert_auth: bool,
 
     /// PEM-encoded server certificate for peer gRPC. Defaults to
@@ -131,7 +131,7 @@ struct Args {
     peer_trusted_ca_file: Option<PathBuf>,
 
     /// Require peer certs.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "FASTETCD_PEER_CLIENT_CERT_AUTH", default_value_t = false)]
     peer_client_cert_auth: bool,
 
     /// Address to serve Prometheus `/metrics` on. Empty disables.
@@ -206,7 +206,14 @@ fn build_tls_config(
                         "--client-cert-auth requires --trusted-ca-file"
                     ))?;
                 let ca_bytes = std::fs::read(ca)?;
-                cfg = cfg.client_ca_root(tonic::transport::Certificate::from_pem(ca_bytes));
+                cfg = cfg
+                    .client_ca_root(tonic::transport::Certificate::from_pem(ca_bytes))
+                    // Mandatory, not optional: a client that presents no
+                    // certificate must fail the handshake. tonic 0.12
+                    // already defaults `client_auth_optional` to false
+                    // (mandatory), but set it explicitly so the security
+                    // guarantee doesn't silently depend on that default.
+                    .client_auth_optional(false);
             }
             Ok(Some(cfg))
         }
@@ -266,9 +273,14 @@ fn apply_etcd_env_compat() {
         ("FASTETCD_CERT_FILE", "ETCD_CERT_FILE"),
         ("FASTETCD_KEY_FILE", "ETCD_KEY_FILE"),
         ("FASTETCD_TRUSTED_CA_FILE", "ETCD_TRUSTED_CA_FILE"),
+        ("FASTETCD_CLIENT_CERT_AUTH", "ETCD_CLIENT_CERT_AUTH"),
         ("FASTETCD_PEER_CERT_FILE", "ETCD_PEER_CERT_FILE"),
         ("FASTETCD_PEER_KEY_FILE", "ETCD_PEER_KEY_FILE"),
         ("FASTETCD_PEER_TRUSTED_CA_FILE", "ETCD_PEER_TRUSTED_CA_FILE"),
+        (
+            "FASTETCD_PEER_CLIENT_CERT_AUTH",
+            "ETCD_PEER_CLIENT_CERT_AUTH",
+        ),
         // etcd's flag is `--listen-metrics-urls` (plural); fastetcd's
         // is singular, but the env var fallback still maps across.
         ("FASTETCD_LISTEN_METRICS_URL", "ETCD_LISTEN_METRICS_URLS"),

@@ -113,6 +113,14 @@ ports listen over TLS using the same identity. Operators that need
 separate identities for client vs. peer should run two fastetcd
 processes — multi-identity is not currently supported.
 
+Every flag above is also settable via its env var — `FASTETCD_*` or,
+as a drop-in for existing etcd config, `ETCD_*` (e.g.
+`ETCD_CLIENT_CERT_AUTH=true`, `ETCD_TRUSTED_CA_FILE=...`). With
+`--client-cert-auth` (or `ETCD_CLIENT_CERT_AUTH=true`) set, client
+authentication is **mandatory**: a client that presents no certificate
+signed by `--trusted-ca-file` fails the TLS handshake outright, on both
+the gRPC surface and the `/health` HTTP route.
+
 ## Auth
 
 ```

@@ -10,7 +10,19 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.8.0`** — Found and fixed the real reason releases had stalled:
+**`0.8.1`** — Security fix (#6): `--client-cert-auth` was never
+actually enforced. The flag had no `env` binding and no entry in the
+`ETCD_*`→`FASTETCD_*` compat shim, so `ETCD_CLIENT_CERT_AUTH=true`
+(the documented drop-in config) was silently ignored — the flag
+stayed `false`, TLS was built with no client-CA verifier, and any
+client could complete the handshake and read/write anonymously on
+both the gRPC port and the `/health` route. Wired the `env` binding +
+compat pair (same for `peer-client-cert-auth`) and set
+`client_auth_optional(false)` explicitly. Verified end to end:
+certless TLS clients are now rejected at the handshake; CA-signed
+clients still succeed.
+
+Previous: **`0.8.0`** — Found and fixed the real reason releases had stalled:
 GitHub Actions is disabled at the repo-settings level (confirmed off
 since 2026-05-24, not a workflow bug or billing issue) — every push
 and tag since then, including `v0.6.0`/`v0.7.0`, silently ran
