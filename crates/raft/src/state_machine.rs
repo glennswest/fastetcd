@@ -292,8 +292,20 @@ async fn apply_data(
 
 async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotPayload, anyhow::Error> {
     use std::ops::Bound;
-    let engine = sm.mvcc.engine().clone();
-    let snap = engine.snapshot().await?;
+    // Capture the consistent MVCC snapshot handle AND last_applied atomically
+    // under the state-machine lock. `apply()` mutates the MVCC store and
+    // last_applied together under this lock; if we took the snapshot outside it,
+    // an apply could interleave and the snapshot would carry data from an
+    // earlier revision than its last_applied_log_id. A learner installing that
+    // mismatch is marked caught-up at a log id ahead of its data and never
+    // receives the gap, so it stays stuck at the old revision (fastetcd#8).
+    // The frozen snapshot handle is then scanned WITHOUT the lock so builds
+    // don't block writes.
+    let (snap, last_applied_log_id, last_membership) = {
+        let g = sm.inner.lock().await;
+        let snap = sm.mvcc.engine().snapshot().await?;
+        (snap, g.last_applied_log_id, g.last_membership.clone())
+    };
 
     let kv_table = snap
         .range("mvcc_kv", Bound::Unbounded, Bound::Unbounded, 0)
@@ -305,10 +317,9 @@ async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotPayload, any
         .range("mvcc_meta", Bound::Unbounded, Bound::Unbounded, 0)
         .await?;
 
-    let g = sm.inner.lock().await;
     Ok(SnapshotPayload {
-        last_applied_log_id: g.last_applied_log_id,
-        last_membership: g.last_membership.clone(),
+        last_applied_log_id,
+        last_membership,
         kv_table,
         idx_table,
         meta_table,
