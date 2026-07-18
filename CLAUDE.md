@@ -10,7 +10,57 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.8.1`** — Security fix (#6): `--client-cert-auth` was never
+**`0.8.3`** — Three durability/compat fixes found by the rustkube
+cluster tests.
+
+`#9` — a single node couldn't survive a reboot. `FastetcdStateMachine`
+rebuilt `last_applied_log_id`/`last_membership` as `None` on *every*
+open (`main.rs` called `new(mvcc)`, which had no restore path), so
+openraft saw an empty state machine next to a populated MVCC store and
+replayed the log from index 0. That crash-looped once a snapshot had
+purged the early entries ("expected index [0, N), got [None, None)")
+and, when the log happened to be intact, silently double-applied every
+mutation — the second failure mode wasn't in the report. Both fields
+now persist into `mvcc_meta`, staged before an entry is dispatched and
+folded into that entry's own `WriteBatch`, so the mutation and the log
+id describing it commit in one fsync. Note this was never log
+corruption: the raft log was fine, the state machine just didn't know
+where it was.
+
+Data dirs already in the bad state have no applied position, so
+startup adopts the log's `last_purged_log_id` as a floor (openraft
+only purges what it has applied *and* snapshotted). **This re-applies
+a bounded tail and can advance the revision past what clients
+previously observed** — logged loudly at `warn`. Strictly better than
+the old workaround (wiping the data dir), but not lossless.
+
+`#8` — a rejoined member stayed at an old MVCC revision. Not a
+snapshot-transfer problem: `rebuild_mvcc` replaces every MVCC table by
+writing straight through the engine, but `MvccStore` caches
+`current_rev`/`compact_rev`/`next_lease_id` from open. The snapshot
+landed on disk while the handle served the stale counters — reads
+clamp to `current_rev` (hiding every key above it, the reported "504
+of 1004") and new writes allocate from `current_rev + 1`, colliding
+with the snapshot's revisions. Added `MvccStore::reload_write_state`.
+v0.8.2 fixed the *leader* side of this path (torn snapshot build);
+this is the follower side, which is why #8 stayed open.
+
+`#7` — `etcdctl member add/remove` against a follower returned
+openraft's raw `ForwardToLeader` error. Membership changes go through
+openraft's own APIs rather than the replicated log, so they can't ride
+on the `ForwardWrite` RPC added for #4; added a sibling
+`RaftPeer.ForwardMembership` over the same peer channel plus
+`ServerState::propose_add_learner`/`propose_set_voters`.
+
+Each regression test was confirmed to fail without its fix, not merely
+pass with it.
+
+Previous: **`0.8.2`** — Atomic snapshot build: capture the MVCC handle
+and `last_applied` together under the state-machine lock, so a
+concurrent apply can't produce a snapshot whose data predates its own
+`last_applied_log_id`.
+
+Previous: **`0.8.1`** — Security fix (#6): `--client-cert-auth` was never
 actually enforced. The flag had no `env` binding and no entry in the
 `ETCD_*`→`FASTETCD_*` compat shim, so `ETCD_CLIENT_CERT_AUTH=true`
 (the documented drop-in config) was silently ignored — the flag

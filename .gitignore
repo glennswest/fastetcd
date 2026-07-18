@@ -1,6 +1,8 @@
 # Rust build artifacts
 target/
 **/target/
+# Release artifacts from deploy/packaging/build-release.sh
+dist/
 Cargo.lock.bak
 *.rs.bk
 
