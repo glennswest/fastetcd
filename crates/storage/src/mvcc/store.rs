@@ -398,6 +398,30 @@ impl MvccStore {
         self.inner.write_state.lock().await.current_rev
     }
 
+    /// Reload the cached write-side counters from `mvcc_meta`.
+    ///
+    /// `current_rev` / `compact_rev` / `next_lease_id` are read once at
+    /// open and then kept in memory, so anything that rewrites those
+    /// keys through the engine directly leaves this handle serving
+    /// stale values. Raft snapshot installation does exactly that: it
+    /// replaces every MVCC table wholesale. Without this call the
+    /// installed data is on disk but invisible — reads clamp to the old
+    /// revision and new writes allocate revisions that collide with
+    /// what the snapshot brought in (fastetcd#8).
+    pub async fn reload_write_state(&self) -> MvccResult<()> {
+        let snap = self.inner.engine.snapshot().await?;
+        let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
+        let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
+        let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
+        drop(snap);
+
+        let mut state = self.inner.write_state.lock().await;
+        state.current_rev = current;
+        state.compact_rev = compact;
+        state.next_lease_id = next_lease;
+        Ok(())
+    }
+
     pub async fn compact_revision(&self) -> i64 {
         self.inner.write_state.lock().await.compact_rev
     }

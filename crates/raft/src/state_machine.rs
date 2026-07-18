@@ -458,5 +458,10 @@ async fn rebuild_mvcc(
         &bincode::serialize(&payload.last_membership)?,
     );
     engine.commit(batch, WriteOptions::default()).await?;
+
+    // The batch above went straight to the engine, so the MvccStore
+    // handle is still serving the counters it cached at open. Pick up
+    // the snapshot's revision before anyone reads or writes through it.
+    mvcc.reload_write_state().await?;
     Ok(())
 }
