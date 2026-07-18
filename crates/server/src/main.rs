@@ -412,8 +412,24 @@ async fn main() -> anyhow::Result<()> {
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
     let mvcc = MvccStore::open(engine.clone()).await?;
-    let sm = FastetcdStateMachine::new(mvcc);
-    let log = KvLogStore::new(engine);
+    let sm = FastetcdStateMachine::open(mvcc).await?;
+    let mut log = KvLogStore::new(engine);
+
+    // Recover data directories written before last_applied_log_id was
+    // persisted (#9), which would otherwise crash-loop on startup.
+    {
+        use openraft::storage::RaftLogStorage;
+        let floor = log.get_log_state().await?.last_purged_log_id;
+        if let Some(adopted) = sm.recover_applied_floor(floor).await? {
+            tracing::warn!(
+                last_applied = ?adopted,
+                "recovered a data directory with no persisted applied position \
+                 (pre-0.8.3 format); adopting the log's last purged id. Log entries \
+                 after this point will be re-applied, which may advance the revision \
+                 beyond what clients previously observed."
+            );
+        }
+    }
 
     let config = Arc::new(
         Config {

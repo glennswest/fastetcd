@@ -109,7 +109,7 @@ async fn one_node_cluster_applies_entries_to_mvcc() {
     let path = dir.path().join("raft.redb");
     let engine = Arc::new(RedbEngine::open(&path).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
-    let sm = FastetcdStateMachine::new(mvcc.clone());
+    let sm = FastetcdStateMachine::open(mvcc.clone()).await.unwrap();
     let log = MemLogStore::new();
 
     let config = Arc::new(

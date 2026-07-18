@@ -52,6 +52,11 @@ const TABLE_META: &str = "mvcc_meta";
 const META_KEY_CURRENT_REV: &[u8] = b"current_rev";
 const META_KEY_COMPACT_REV: &[u8] = b"compact_rev";
 const META_KEY_NEXT_LEASE_ID: &[u8] = b"next_lease_id";
+/// Raft's `last_applied_log_id` / `last_membership`, stored as opaque
+/// bytes so this crate stays free of an openraft dependency. The raft
+/// crate encodes and decodes them; see [`MvccStore::stage_raft_meta`].
+pub const META_KEY_RAFT_APPLIED: &[u8] = b"raft_applied";
+pub const META_KEY_RAFT_MEMBERSHIP: &[u8] = b"raft_membership";
 
 /// Errors specific to the MVCC layer (atop [`StorageError`]).
 #[derive(Debug, Error)]
@@ -262,6 +267,13 @@ struct Inner {
     /// subscribers may receive `Lagged`; they should treat that as a
     /// "force re-establish from a fresh start_revision" signal.
     event_tx: broadcast::Sender<EventBatch>,
+    /// Raft metadata staged by the state machine before it invokes an
+    /// `apply_*` call, folded into that call's `WriteBatch` so the
+    /// mutation and the `last_applied_log_id` that describes it commit
+    /// in a single atomic fsync. Anything still staged after the call
+    /// (membership and blank entries mutate no MVCC state) is committed
+    /// on its own by `flush_raft_meta`.
+    pending_raft_meta: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,8 +315,71 @@ impl MvccStore {
                     next_lease_id: next_lease,
                 }),
                 event_tx,
+                pending_raft_meta: Mutex::new(Vec::new()),
             }),
         })
+    }
+
+    /// Stage raft metadata to be written by the next `apply_*` commit.
+    ///
+    /// The state machine calls this immediately before dispatching an
+    /// entry. Persisting `last_applied_log_id` in the *same* batch as
+    /// the mutation it describes is what makes restart safe: a crash
+    /// can leave both written or neither, never the mutation alone
+    /// (which would replay it and double-apply) and never the log id
+    /// alone (which would silently drop the mutation) — see fastetcd#9.
+    ///
+    /// `membership` is `None` for entries that don't change membership.
+    pub async fn stage_raft_meta(&self, applied: Vec<u8>, membership: Option<Vec<u8>>) {
+        let mut pending = self.inner.pending_raft_meta.lock().await;
+        pending.retain(|(k, _)| {
+            k.as_slice() != META_KEY_RAFT_APPLIED
+                && (membership.is_none() || k.as_slice() != META_KEY_RAFT_MEMBERSHIP)
+        });
+        pending.push((META_KEY_RAFT_APPLIED.to_vec(), applied));
+        if let Some(m) = membership {
+            pending.push((META_KEY_RAFT_MEMBERSHIP.to_vec(), m));
+        }
+    }
+
+    /// Commit any staged raft metadata that no `apply_*` call picked up.
+    /// Membership and blank log entries touch no MVCC state, so without
+    /// this their log ids would never reach disk and a restart would
+    /// re-apply them.
+    pub async fn flush_raft_meta(&self) -> MvccResult<()> {
+        let mut batch = WriteBatch::new();
+        if !self.fold_raft_meta(&mut batch).await {
+            return Ok(());
+        }
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(())
+    }
+
+    /// Read back the persisted raft metadata. Returns
+    /// `(last_applied, last_membership)` as the opaque bytes that were
+    /// staged. Called once at open to restore the state machine.
+    pub async fn read_raft_meta(&self) -> MvccResult<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        let snap = self.inner.engine.snapshot().await?;
+        let applied = snap.get(TABLE_META, META_KEY_RAFT_APPLIED).await?;
+        let membership = snap.get(TABLE_META, META_KEY_RAFT_MEMBERSHIP).await?;
+        Ok((applied, membership))
+    }
+
+    /// Drain staged raft metadata into `batch`. Returns true if
+    /// anything was added. Callers must hold no other MVCC lock that
+    /// could be taken while `pending_raft_meta` is held.
+    async fn fold_raft_meta(&self, batch: &mut WriteBatch) -> bool {
+        let mut pending = self.inner.pending_raft_meta.lock().await;
+        if pending.is_empty() {
+            return false;
+        }
+        for (k, v) in pending.drain(..) {
+            batch.put(TABLE_META, &k, &v);
+        }
+        true
     }
 
     /// Subscribe to the post-commit event stream. Each `EventBatch`
@@ -551,6 +626,7 @@ impl MvccStore {
         let bytes = bincode::serialize(&rec)
             .map_err(|e| MvccError::Internal(format!("serialize LeaseRecord: {e}")))?;
         batch.put(TABLE_LEASE, &lease_id_key(final_id), &bytes);
+        self.fold_raft_meta(&mut batch).await;
         self.inner
             .engine
             .commit(batch, WriteOptions::default())
@@ -585,6 +661,7 @@ impl MvccStore {
             .map_err(|e| MvccError::Internal(format!("serialize LeaseRecord: {e}")))?;
         let mut batch = WriteBatch::new();
         batch.put(TABLE_LEASE, &lease_id_key(id), &bytes);
+        self.fold_raft_meta(&mut batch).await;
         self.inner
             .engine
             .commit(batch, WriteOptions::default())
@@ -697,9 +774,11 @@ impl MvccStore {
             self.commit_ctx(&mut state, revision, ctx).await?;
         } else {
             // No cascade — just drop the lease record / index entries.
+            let mut batch = ctx.batch;
+            self.fold_raft_meta(&mut batch).await;
             self.inner
                 .engine
-                .commit(ctx.batch, WriteOptions::default())
+                .commit(batch, WriteOptions::default())
                 .await?;
         }
 
@@ -782,6 +861,7 @@ impl MvccStore {
             }
         }
         write_i64(&mut batch, META_KEY_COMPACT_REV, rev);
+        self.fold_raft_meta(&mut batch).await;
 
         self.inner
             .engine
@@ -1155,6 +1235,7 @@ impl MvccStore {
         mut ctx: ApplyContext,
     ) -> MvccResult<()> {
         write_i64(&mut ctx.batch, META_KEY_CURRENT_REV, new_rev);
+        self.fold_raft_meta(&mut ctx.batch).await;
         self.inner
             .engine
             .commit(ctx.batch, WriteOptions::default())

@@ -126,7 +126,7 @@ pub async fn start_test_server_full() -> TestServerHandles {
     let path = dir.path().join("kv.redb");
     let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
-    let sm = FastetcdStateMachine::new(mvcc);
+    let sm = FastetcdStateMachine::open(mvcc).await.unwrap();
     let log = KvLogStore::new(engine);
     let config = Arc::new(
         Config {

@@ -75,20 +75,81 @@ struct SnapshotPayload {
 }
 
 impl FastetcdStateMachine {
-    pub fn new(mvcc: MvccStore) -> Self {
-        Self {
+    /// Open the state machine over a persistent `MvccStore`, restoring
+    /// `last_applied_log_id` and `last_membership` from disk.
+    ///
+    /// Restoring these is what makes restart safe. They used to reset
+    /// to `None` on every boot, so openraft saw an empty state machine
+    /// sitting next to a populated MVCC store and replayed the log from
+    /// index 0 — which either crash-looped, because a snapshot had
+    /// already purged the early entries ("expected index [0, N), got
+    /// [None, None)"), or silently double-applied every mutation when
+    /// the log happened to be intact (fastetcd#9).
+    pub async fn open(mvcc: MvccStore) -> Result<Self, anyhow::Error> {
+        let (applied_bytes, membership_bytes) = mvcc.read_raft_meta().await?;
+        // Encoded as `Option<LogId>`, matching what `apply` stages and
+        // what `install_snapshot` writes — decoding it as a bare
+        // `LogId` would silently skip bincode's one-byte Option tag and
+        // shift every field.
+        let last_applied_log_id: Option<LogId<NodeId>> = match applied_bytes {
+            Some(b) => bincode::deserialize(&b)?,
+            None => None,
+        };
+        let last_membership: StoredMembership<NodeId, openraft::BasicNode> =
+            match membership_bytes {
+                Some(b) => bincode::deserialize(&b)?,
+                None => StoredMembership::default(),
+            };
+
+        Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
-                last_applied_log_id: None,
-                last_membership: StoredMembership::default(),
+                last_applied_log_id,
+                last_membership,
                 current_snapshot: None,
                 snapshot_idx: 0,
             })),
             mvcc,
-        }
+        })
     }
 
     pub fn mvcc(&self) -> &MvccStore {
         &self.mvcc
+    }
+
+    /// Recover a data directory written before `last_applied_log_id`
+    /// was persisted (fastetcd#9).
+    ///
+    /// Such a directory has MVCC data but no record of how far the log
+    /// was applied, so openraft replays from index 0 and fails the
+    /// moment it hits entries a snapshot already purged. `floor` is the
+    /// log store's `last_purged_log_id`, which is a safe lower bound:
+    /// openraft only purges entries it has both applied and captured in
+    /// a snapshot, so the state machine is at least that far along.
+    ///
+    /// Adopting the floor means entries between it and the true applied
+    /// position replay, which re-applies a bounded tail of mutations and
+    /// can inflate the revision. That is a real cost, but the
+    /// alternative for these directories is the documented workaround —
+    /// deleting the data entirely — so this recovers strictly more.
+    ///
+    /// No-op unless the store holds data and has no applied position:
+    /// a healthy or genuinely empty node is left alone.
+    pub async fn recover_applied_floor(
+        &self,
+        floor: Option<LogId<NodeId>>,
+    ) -> Result<Option<LogId<NodeId>>, anyhow::Error> {
+        let Some(floor) = floor else {
+            return Ok(None);
+        };
+        let mut g = self.inner.lock().await;
+        if g.last_applied_log_id.is_some() || self.mvcc.current_revision().await == 0 {
+            return Ok(None);
+        }
+        let bytes = bincode::serialize(&Some(floor))?;
+        self.mvcc.stage_raft_meta(bytes, None).await;
+        self.mvcc.flush_raft_meta().await?;
+        g.last_applied_log_id = Some(floor);
+        Ok(Some(floor))
     }
 }
 
@@ -118,17 +179,39 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
 
         for entry in entries {
             let log_id = entry.log_id;
+            let applied_bytes = bincode::serialize(&Some(log_id)).map_err(|e| {
+                StorageIOError::new(
+                    ErrorSubject::StateMachine,
+                    ErrorVerb::Write,
+                    AnyError::error(format!("serialize last_applied: {e}")),
+                )
+            })?;
 
             // Membership-change entries are recorded but produce no
             // application-level mutation.
             if let openraft::EntryPayload::Membership(m) = &entry.payload {
-                g.last_membership = StoredMembership::new(Some(log_id), m.clone());
+                let membership = StoredMembership::new(Some(log_id), m.clone());
+                let membership_bytes = bincode::serialize(&membership).map_err(|e| {
+                    StorageIOError::new(
+                        ErrorSubject::StateMachine,
+                        ErrorVerb::Write,
+                        AnyError::error(format!("serialize last_membership: {e}")),
+                    )
+                })?;
+                self.mvcc
+                    .stage_raft_meta(applied_bytes, Some(membership_bytes))
+                    .await;
+                g.last_membership = membership;
                 // Match openraft's contract — every entry produces one response.
                 let rev = self.mvcc.current_revision().await;
                 responses.push(FastetcdLogResponse::Noop { revision: rev });
                 g.last_applied_log_id = Some(log_id);
                 continue;
             }
+
+            // Staged before dispatch so the MVCC write below folds it
+            // into the same atomic batch.
+            self.mvcc.stage_raft_meta(applied_bytes, None).await;
 
             // Normal or Blank entry. Decode the AppData if present.
             let response = match &entry.payload {
@@ -152,6 +235,17 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
             responses.push(response);
             g.last_applied_log_id = Some(log_id);
         }
+
+        // Membership and blank entries mutate no MVCC state, so nothing
+        // folded their staged log id into a batch. Commit it here or a
+        // restart would replay them.
+        self.mvcc.flush_raft_meta().await.map_err(|e| {
+            StorageIOError::new(
+                ErrorSubject::StateMachine,
+                ErrorVerb::Write,
+                AnyError::error(format!("persist last_applied: {e}")),
+            )
+        })?;
 
         Ok(responses)
     }
@@ -330,6 +424,7 @@ async fn rebuild_mvcc(
     mvcc: &MvccStore,
     payload: &SnapshotPayload,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use fastetcd_storage::mvcc::store::{META_KEY_RAFT_APPLIED, META_KEY_RAFT_MEMBERSHIP};
     use fastetcd_storage::{WriteBatch, WriteOptions};
 
     let engine = mvcc.engine().clone();
@@ -348,6 +443,20 @@ async fn rebuild_mvcc(
     for (k, v) in &payload.meta_table {
         batch.put("mvcc_meta", k, v);
     }
+    // The installed data and the log id it corresponds to must land in
+    // one batch. Otherwise a crash mid-install leaves a follower whose
+    // MVCC state is the leader's but whose last_applied is its own old
+    // one — it then replays already-applied entries over the snapshot.
+    batch.put(
+        "mvcc_meta",
+        META_KEY_RAFT_APPLIED,
+        &bincode::serialize(&payload.last_applied_log_id)?,
+    );
+    batch.put(
+        "mvcc_meta",
+        META_KEY_RAFT_MEMBERSHIP,
+        &bincode::serialize(&payload.last_membership)?,
+    );
     engine.commit(batch, WriteOptions::default()).await?;
     Ok(())
 }
