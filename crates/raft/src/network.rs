@@ -246,6 +246,35 @@ impl WriteForwarder {
             bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
         result
     }
+
+    /// Forward a cluster-membership change to `target`'s
+    /// `ForwardMembership` RPC. Same transport and failure handling as
+    /// [`forward`](Self::forward); only a leader can apply one, so a
+    /// follower handling `MemberAdd`/`MemberRemove` sends it here (#7).
+    pub async fn forward_membership(
+        &self,
+        target: NodeId,
+        change: &crate::types::MembershipChange,
+    ) -> Result<(), String> {
+        let data = bincode::serialize(change).map_err(|e| e.to_string())?;
+        let cli_result = async {
+            let mut cli = self.client(target).await?;
+            cli.forward_membership(Request::new(pb::RaftPayload { data }))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        let resp = match cli_result {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                self.clients.write().await.remove(&target);
+                return Err(e);
+            }
+        };
+        let result: Result<(), String> =
+            bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
+        result
+    }
 }
 
 /// Server-side handler for inbound peer RPCs. Holds a clone of the
@@ -331,6 +360,36 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 // as any raft client, retries.
                 Err(e) => Err(e.to_string()),
             };
+        let data = bincode::serialize(&result)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn forward_membership(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let change: crate::types::MembershipChange =
+            bincode::deserialize(&request.into_inner().data)
+                .map_err(|e| Status::invalid_argument(format!("decode ForwardMembership: {e}")))?;
+
+        // As in forward_write: a hop that itself needs forwarding means
+        // leadership changed again, so stringify rather than propagate
+        // ForwardToLeader and let the caller retry.
+        let result: Result<(), String> = match change {
+            crate::types::MembershipChange::AddLearner { node_id, addr } => self
+                .raft
+                .add_learner(node_id, openraft::BasicNode::new(&addr), false)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            crate::types::MembershipChange::SetVoters { voters } => self
+                .raft
+                .change_membership(voters.into_iter().collect::<std::collections::BTreeSet<_>>(), false)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        };
         let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))

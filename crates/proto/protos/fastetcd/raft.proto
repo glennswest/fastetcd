@@ -21,6 +21,12 @@ service RaftPeer {
     // (see network.rs) rather than needing a separate client-URL
     // exchange between members.
     rpc ForwardWrite(RaftPayload) returns (RaftPayload);
+
+    // Same hand-off for cluster membership changes. etcd forwards
+    // MemberAdd/MemberRemove to the leader transparently, so etcdctl
+    // and friends work against any endpoint; fastetcd used to surface
+    // openraft's ForwardToLeader error to the caller instead (#7).
+    rpc ForwardMembership(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

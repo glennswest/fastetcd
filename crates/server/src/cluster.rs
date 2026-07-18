@@ -139,22 +139,15 @@ impl Cluster for ClusterService {
         }
 
         // add_learner; non-blocking so we don't wait for catch-up.
-        self.state
-            .raft
-            .add_learner(new_id, openraft::BasicNode::new(&first_url), false)
-            .await
-            .map_err(|e| Status::unavailable(format!("raft add_learner: {e}")))?;
+        // Forwards to the leader if this node isn't it (#7).
+        self.state.propose_add_learner(new_id, &first_url).await?;
 
         if !req.is_learner {
             // Promote to voter via change_membership.
             let current_voters = current_voter_set(&self.state.raft).await;
             let mut new_voters: BTreeSet<NodeId> = current_voters;
             new_voters.insert(new_id);
-            self.state
-                .raft
-                .change_membership(new_voters, false)
-                .await
-                .map_err(|e| Status::unavailable(format!("raft change_membership: {e}")))?;
+            self.state.propose_set_voters(new_voters).await?;
         }
 
         // Update the directory.
@@ -199,11 +192,7 @@ impl Cluster for ClusterService {
         let mut voters = current_voter_set(&self.state.raft).await;
         let was_present = voters.remove(&req.id);
         if was_present {
-            self.state
-                .raft
-                .change_membership(voters, false)
-                .await
-                .map_err(|e| Status::unavailable(format!("raft change_membership: {e}")))?;
+            self.state.propose_set_voters(voters).await?;
         }
         // Drop peer + directory entries.
         {
@@ -265,11 +254,7 @@ impl Cluster for ClusterService {
                 req.id
             )));
         }
-        self.state
-            .raft
-            .change_membership(voters, false)
-            .await
-            .map_err(|e| Status::unavailable(format!("raft change_membership: {e}")))?;
+        self.state.propose_set_voters(voters).await?;
         {
             let mut dir = self.directory.write().await;
             if let Some(info) = dir.get_mut(&req.id) {

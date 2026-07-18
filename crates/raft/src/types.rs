@@ -39,6 +39,22 @@ impl openraft::RaftTypeConfig for TypeConfig {
     type Responder = openraft::impls::OneshotResponder<Self>;
 }
 
+/// A cluster-membership change forwarded to the leader.
+///
+/// Membership changes go through openraft's own APIs rather than the
+/// replicated log, so they can't ride on [`FastetcdLogEntry`] — this is
+/// the payload of the `RaftPeer.ForwardMembership` RPC instead. Only a
+/// leader may apply one; a follower that receives `MemberAdd` /
+/// `MemberRemove` forwards it here (#7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MembershipChange {
+    /// Add `node_id` as a learner reachable at `addr`.
+    AddLearner { node_id: NodeId, addr: String },
+    /// Replace the voter set wholesale. Used for promotion (MemberAdd
+    /// of a voter, MemberPromote) and removal (MemberRemove).
+    SetVoters { voters: Vec<NodeId> },
+}
+
 /// The application-level log entry. Every committed Raft entry decodes
 /// to one of these variants and is dispatched to [`MvccStore`].
 ///

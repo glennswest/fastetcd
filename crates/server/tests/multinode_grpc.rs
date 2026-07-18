@@ -272,3 +272,118 @@ async fn three_node_cluster_replicates_via_grpc_transport() {
         assert_eq!(r.kvs[0].value, b"forwarded-value");
     }
 }
+
+/// fastetcd#7 — etcd forwards cluster-membership changes to the leader,
+/// so `etcdctl member add/remove` works against any endpoint. fastetcd
+/// used to surface openraft's ForwardToLeader error instead ("raft
+/// change_membership: has to forward request to: Some(...)"), which
+/// broke etcdctl, kubeadm, and the rustkube master-replacement runbook.
+#[tokio::test]
+async fn membership_changes_forward_from_a_follower() {
+    use fastetcd_proto::etcdserverpb::cluster_client::ClusterClient;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let leader_id = loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("no leader elected in 10s");
+        }
+        if let Some(l) = n1.raft.metrics().borrow().current_leader {
+            break l;
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+
+    // Target a node that is definitely NOT the leader.
+    let by_id = |id: NodeId| match id {
+        1 => &n1,
+        2 => &n2,
+        3 => &n3,
+        other => panic!("unexpected node id {other}"),
+    };
+    let follower_id = (1..=3u64).find(|id| *id != leader_id).unwrap();
+    let follower = by_id(follower_id);
+    let mut cluster = ClusterClient::connect(follower.client_endpoint.clone())
+        .await
+        .unwrap();
+
+    // MemberAdd against the follower. Before the fix this failed with
+    // "has to forward request to: Some(...)".
+    let added = cluster
+        .member_add(pb::MemberAddRequest {
+            peer_ur_ls: vec!["http://127.0.0.1:59999".to_string()],
+            is_learner: true,
+        })
+        .await
+        .expect("MemberAdd on a follower must forward to the leader, not fail")
+        .into_inner();
+    let new_id = added.member.expect("MemberAddResponse.member").id;
+    assert_ne!(new_id, 0);
+
+    // The leader must actually have the learner, proving the change was
+    // applied there rather than only recorded in the follower's local
+    // directory.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let m = by_id(leader_id).raft.metrics().borrow().clone();
+        if m.membership_config.membership().nodes().any(|(id, _)| *id == new_id) {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("leader never saw the forwarded add_learner for {new_id}");
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // MemberRemove of a real voter, also via the follower — the exact
+    // shape of the replace-master runbook. Remove a node that is
+    // neither the leader nor the one serving this RPC.
+    let victim = (1..=3u64)
+        .find(|id| *id != leader_id && *id != follower_id)
+        .unwrap();
+    cluster
+        .member_remove(pb::MemberRemoveRequest { id: victim })
+        .await
+        .expect("MemberRemove on a follower must forward to the leader, not fail");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let voters: Vec<NodeId> = by_id(leader_id)
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .voter_ids()
+            .collect();
+        if !voters.contains(&victim) {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("leader still lists {victim} as a voter after forwarded remove");
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    let _ = n2;
+    let _ = n3;
+}

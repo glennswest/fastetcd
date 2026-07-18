@@ -4,6 +4,7 @@ use openraft::Raft;
 use tonic::Status;
 
 use crate::auth::AuthState;
+use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
     FastetcdLogEntry, FastetcdLogResponse, FastetcdStateMachine, TypeConfig, WriteForwarder,
 };
@@ -71,6 +72,90 @@ impl ServerState {
                 Err(Status::unavailable(format!("raft client_write: {e}")))
             }
         }
+    }
+
+    /// Add a learner, forwarding to the leader if this node isn't it.
+    pub async fn propose_add_learner(
+        &self,
+        node_id: fastetcd_raft::NodeId,
+        addr: &str,
+    ) -> Result<(), Status> {
+        match self
+            .raft
+            .add_learner(node_id, openraft::BasicNode::new(addr), false)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.forward_membership(
+                    &e,
+                    MembershipChange::AddLearner {
+                        node_id,
+                        addr: addr.to_string(),
+                    },
+                )
+                .await
+                .unwrap_or_else(|| {
+                    Err(Status::unavailable(format!("raft add_learner: {e}")))
+                })
+            }
+        }
+    }
+
+    /// Replace the voter set, forwarding to the leader if this node
+    /// isn't it.
+    pub async fn propose_set_voters(
+        &self,
+        voters: std::collections::BTreeSet<fastetcd_raft::NodeId>,
+    ) -> Result<(), Status> {
+        match self.raft.change_membership(voters.clone(), false).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.forward_membership(
+                    &e,
+                    MembershipChange::SetVoters {
+                        voters: voters.into_iter().collect(),
+                    },
+                )
+                .await
+                .unwrap_or_else(|| {
+                    Err(Status::unavailable(format!("raft change_membership: {e}")))
+                })
+            }
+        }
+    }
+
+    /// If `err` is a `ForwardToLeader` naming a leader, send `change`
+    /// there and return the outcome. `None` means the error wasn't a
+    /// forwardable one (or no leader is known yet), so the caller
+    /// should surface its own error.
+    ///
+    /// etcd forwards membership changes transparently, so `etcdctl
+    /// member remove` works against any endpoint; returning
+    /// ForwardToLeader to the client instead is the #7 compat gap.
+    async fn forward_membership<E>(
+        &self,
+        err: &openraft::error::RaftError<fastetcd_raft::NodeId, E>,
+        change: MembershipChange,
+    ) -> Option<Result<(), Status>>
+    where
+        E: std::error::Error
+            + openraft::TryAsRef<
+                openraft::error::ForwardToLeader<fastetcd_raft::NodeId, openraft::BasicNode>,
+            >,
+    {
+        let fwd = err.forward_to_leader::<openraft::BasicNode>()?;
+        let leader_id = fwd.leader_id?;
+        Some(
+            self.forwarder
+                .forward_membership(leader_id, &change)
+                .await
+                .map_err(|msg| {
+                    Status::unavailable(format!(
+                        "forwarded membership change to leader {leader_id}: {msg}"
+                    ))
+                }),
+        )
     }
 }
 
