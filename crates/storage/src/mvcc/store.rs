@@ -57,6 +57,13 @@ const META_KEY_NEXT_LEASE_ID: &[u8] = b"next_lease_id";
 /// crate encodes and decodes them; see [`MvccStore::stage_raft_meta`].
 pub const META_KEY_RAFT_APPLIED: &[u8] = b"raft_applied";
 pub const META_KEY_RAFT_MEMBERSHIP: &[u8] = b"raft_membership";
+/// On-disk data-format version. Absent on data directories written
+/// before v1.0.1 (which never persisted raft membership durably, so an
+/// upgrade could strand the cluster — see fastetcd#11). Its absence is
+/// the signal to run the in-place membership recovery on open.
+pub const META_KEY_FORMAT_VERSION: &[u8] = b"format_version";
+/// Current on-disk format. Bump only for changes that need migration.
+pub const FORMAT_VERSION: u32 = 1;
 
 /// Errors specific to the MVCC layer (atop [`StorageError`]).
 #[derive(Debug, Error)]
@@ -366,6 +373,44 @@ impl MvccStore {
         let applied = snap.get(TABLE_META, META_KEY_RAFT_APPLIED).await?;
         let membership = snap.get(TABLE_META, META_KEY_RAFT_MEMBERSHIP).await?;
         Ok((applied, membership))
+    }
+
+    /// Durably persist the raft `last_membership` bytes on their own,
+    /// outside the staged-apply path. Used by upgrade recovery to write
+    /// a membership reconstructed from config (fastetcd#11).
+    pub async fn persist_membership(&self, membership: &[u8]) -> MvccResult<()> {
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_META, META_KEY_RAFT_MEMBERSHIP, membership);
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(())
+    }
+
+    /// Read the on-disk format version. `None` means a directory written
+    /// before v1.0.1 (or a freshly created one that hasn't been stamped
+    /// yet) — the trigger for in-place upgrade recovery.
+    pub async fn read_format_version(&self) -> MvccResult<Option<u32>> {
+        let snap = self.inner.engine.snapshot().await?;
+        match snap.get(TABLE_META, META_KEY_FORMAT_VERSION).await? {
+            Some(b) if b.len() == 4 => {
+                Ok(Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Stamp the current on-disk format version. Called once recovery
+    /// (if any) has run, so subsequent opens skip it.
+    pub async fn write_format_version(&self, version: u32) -> MvccResult<()> {
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_META, META_KEY_FORMAT_VERSION, &version.to_be_bytes());
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(())
     }
 
     /// Drain staged raft metadata into `batch`. Returns true if

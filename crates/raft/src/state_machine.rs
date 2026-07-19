@@ -151,6 +151,31 @@ impl FastetcdStateMachine {
         g.last_applied_log_id = Some(floor);
         Ok(Some(floor))
     }
+
+    /// True if the restored state machine has no voters — i.e. openraft
+    /// would come up with an empty voter set and never elect a leader.
+    /// A directory written before v1.0.1 never persisted membership, so
+    /// once its log has been purged this is the state a restart lands in
+    /// (fastetcd#11).
+    pub async fn membership_is_empty(&self) -> bool {
+        let g = self.inner.lock().await;
+        g.last_membership.membership().voter_ids().next().is_none()
+    }
+
+    /// Install a `last_membership` reconstructed during upgrade recovery
+    /// (from `--initial-cluster`, or a single-node set under
+    /// `--force-new-cluster`) and persist it durably, so openraft loads
+    /// the correct voter set at startup instead of an empty one.
+    pub async fn recover_membership(
+        &self,
+        membership: StoredMembership<NodeId, openraft::BasicNode>,
+    ) -> Result<(), anyhow::Error> {
+        let bytes = bincode::serialize(&membership)?;
+        self.mvcc.persist_membership(&bytes).await?;
+        let mut g = self.inner.lock().await;
+        g.last_membership = membership;
+        Ok(())
+    }
 }
 
 impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {

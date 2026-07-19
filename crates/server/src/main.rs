@@ -92,6 +92,14 @@ struct Args {
     #[arg(long, env = "FASTETCD_INITIAL_CLUSTER_STATE", default_value = "new")]
     initial_cluster_state: String,
 
+    /// Recovery: rebuild raft membership as a single-node cluster of
+    /// this member, preserving the existing MVCC data, then continue.
+    /// The etcd-parity escape hatch for a data directory whose
+    /// membership is lost or wrong (e.g. fastetcd#11). Use on exactly
+    /// one surviving member, then re-add the others with `member add`.
+    #[arg(long, env = "FASTETCD_FORCE_NEW_CLUSTER", default_value = "false")]
+    force_new_cluster: bool,
+
     /// Cluster ID token (etcd compatibility — used by etcd to
     /// detect cross-cluster member confusion). Accepted; fastetcd's
     /// cluster_id flag takes precedence if both are set.
@@ -415,22 +423,6 @@ async fn main() -> anyhow::Result<()> {
     let sm = FastetcdStateMachine::open(mvcc).await?;
     let mut log = KvLogStore::new(engine);
 
-    // Recover data directories written before last_applied_log_id was
-    // persisted (#9), which would otherwise crash-loop on startup.
-    {
-        use openraft::storage::RaftLogStorage;
-        let floor = log.get_log_state().await?.last_purged_log_id;
-        if let Some(adopted) = sm.recover_applied_floor(floor).await? {
-            tracing::warn!(
-                last_applied = ?adopted,
-                "recovered a data directory with no persisted applied position \
-                 (pre-0.8.3 format); adopting the log's last purged id. Log entries \
-                 after this point will be re-applied, which may advance the revision \
-                 beyond what clients previously observed."
-            );
-        }
-    }
-
     let config = Arc::new(
         Config {
             heartbeat_interval: 250,
@@ -491,6 +483,76 @@ async fn main() -> anyhow::Result<()> {
                     is_learner: false,
                 },
             );
+        }
+    }
+
+    // ---- On-disk format recovery (must run before Raft::new) ----
+    //
+    // Directories written before v1.0.1 never persisted raft membership
+    // durably, and (pre-0.8.3) never persisted last_applied either. Once
+    // such a cluster's log has been purged, a restart comes up with an
+    // empty voter set and no leader, or crash-loops replaying purged
+    // entries (fastetcd#9, #11). Detect the legacy format and repair it
+    // in place, keeping the MVCC data.
+    {
+        use openraft::storage::RaftLogStorage;
+        let format = sm.mvcc().read_format_version().await?;
+        let log_state = log.get_log_state().await?;
+        let has_data = sm.mvcc().current_revision().await > 0;
+
+        // (#9) Adopt the log's purge floor as last_applied when it was
+        // never persisted, so we don't replay purged entries. Self-guards
+        // to legacy dirs with data.
+        if let Some(adopted) = sm.recover_applied_floor(log_state.last_purged_log_id).await? {
+            tracing::warn!(
+                last_applied = ?adopted,
+                "recovered a data directory with no persisted applied position \
+                 (pre-0.8.3 format); adopting the log's last purged id. Log entries \
+                 after this point are re-applied, which may advance the revision."
+            );
+        }
+
+        let recovery_log_id = log_state.last_purged_log_id.or(log_state.last_log_id);
+        if args.force_new_cluster {
+            // Escape hatch: rebuild membership as a cluster of one (self),
+            // preserving MVCC data. Operator re-adds peers afterwards.
+            let node = all_members.get(&node_id).cloned().unwrap_or_default();
+            let members: std::collections::BTreeSet<NodeId> = std::iter::once(node_id).collect();
+            let nodes: BTreeMap<NodeId, openraft::BasicNode> =
+                std::iter::once((node_id, node)).collect();
+            let stored = openraft::StoredMembership::new(
+                recovery_log_id,
+                openraft::Membership::new(vec![members], nodes),
+            );
+            sm.recover_membership(stored).await?;
+            tracing::warn!(
+                %node_id,
+                "--force-new-cluster: rebuilt single-node membership; MVCC data \
+                 preserved. Re-add the other members with `member add` once up."
+            );
+        } else if has_data && sm.membership_is_empty().await {
+            // (#11) A legacy dir whose membership was purged from the log
+            // and never persisted. Rebuild it from --initial-cluster, the
+            // authoritative record of the intended voter set.
+            let members: std::collections::BTreeSet<NodeId> = all_members.keys().copied().collect();
+            let stored = openraft::StoredMembership::new(
+                recovery_log_id,
+                openraft::Membership::new(vec![members], all_members.clone()),
+            );
+            sm.recover_membership(stored).await?;
+            tracing::warn!(
+                voters = ?all_members.keys().collect::<Vec<_>>(),
+                "recovered raft membership from --initial-cluster for a data directory \
+                 that predates durable membership (fastetcd#11 upgrade). If the cluster's \
+                 membership had diverged from --initial-cluster, reconcile with \
+                 `member add`/`member remove` after startup, or use --force-new-cluster."
+            );
+        }
+
+        if format != Some(fastetcd_storage::mvcc::store::FORMAT_VERSION) {
+            sm.mvcc()
+                .write_format_version(fastetcd_storage::mvcc::store::FORMAT_VERSION)
+                .await?;
         }
     }
 

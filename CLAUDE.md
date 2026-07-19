@@ -10,7 +10,29 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.0`** — First stable release. The wire-compat bar is met end to
+**`1.0.1`** — Critical upgrade fix (#11). A rolling upgrade of a
+long-running cluster from v0.8.2 → v1.0.0 could strand it: every member
+came up with an empty voter set and never elected a leader (MVCC data
+survived; only membership/leadership was lost). Root cause was the #9
+recovery path: v0.8.2 never persisted raft membership, so once its log
+had been purged the membership entry (at the head of the log) was gone
+from everywhere, and `recover_applied_floor` adopted the purge floor as
+`last_applied` — telling openraft not to replay — without recovering
+the membership. (v0.8.2 was itself already latently crash-looping on
+any restart-after-purge, the #9 bug; the upgrade just forced the
+restart.) Fix: detect the pre-v1.0.1 on-disk format (no `format_version`
+marker in `mvcc_meta`) and, when the restored membership is empty but
+data is present, rebuild the voter set from `--initial-cluster` and
+persist it durably before Raft starts — an in-place upgrade. Added a
+`--force-new-cluster` escape hatch (etcd parity) that rebuilds
+single-node membership from self while preserving the redb data, for
+arbitrarily stranded dirs. New `mvcc_meta` `format_version` marker
+(FORMAT_VERSION = 1) suppresses re-recovery. Note: downgrading below
+v1.0.1 after it (or v0.8.2 after v1.0.0) is unsafe — the old binary
+crash-loops on the purged log; treat 1.0.1 as a one-way upgrade from
+0.8.x.
+
+Previous: **`1.0.0`** — First stable release. The wire-compat bar is met end to
 end: unmodified etcd v3 clients (etcdctl, client-go, kubeadm) drive
 KV/Watch/Lease/Cluster/Maintenance/Auth through Raft, single- and
 multi-node, with linearizable reads by default. Shipped as the #10 fix
