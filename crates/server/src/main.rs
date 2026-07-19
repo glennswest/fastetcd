@@ -29,9 +29,16 @@ use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
 
 /// fastetcd — a Rust implementation of the etcd v3 wire protocol.
+///
+/// With no subcommand, runs the server. Subcommands operate on the data
+/// directory offline (the server must be stopped): `backup`, `restore`,
+/// `fsck`.
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd", version, about)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(long, env = "FASTETCD_NAME", default_value = "default")]
     name: String,
 
@@ -99,6 +106,18 @@ struct Args {
     /// one surviving member, then re-add the others with `member add`.
     #[arg(long, env = "FASTETCD_FORCE_NEW_CLUSTER", default_value = "false")]
     force_new_cluster: bool,
+
+    /// Take a safety backup of the data directory before starting a
+    /// newer fastetcd version against it (and before any in-place
+    /// format conversion). On by default; disable if you manage your
+    /// own backups.
+    #[arg(long, env = "FASTETCD_UPGRADE_BACKUP", default_value_t = true)]
+    upgrade_backup: bool,
+
+    /// Where startup safety backups are written. Defaults to
+    /// `<data-dir>/backups`.
+    #[arg(long, env = "FASTETCD_UPGRADE_BACKUP_DIR")]
+    upgrade_backup_dir: Option<PathBuf>,
 
     /// Cluster ID token (etcd compatibility — used by etcd to
     /// detect cross-cluster member confusion). Accepted; fastetcd's
@@ -193,6 +212,35 @@ struct Args {
     /// (etcd compat) Enable Go pprof. Ignored.
     #[arg(long, default_value_t = false)]
     enable_pprof: bool,
+}
+
+/// Offline data-directory operations. The server must be stopped (each
+/// opens the redb file exclusively and refuses if it is locked).
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Copy the data directory to a single-file backup.
+    Backup {
+        /// Destination file for the backup.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Restore a backup over the data directory. Refuses to overwrite a
+    /// directory whose revision is newer than the backup unless --force;
+    /// the pre-restore data file is kept as `fastetcd.redb.replaced-*`.
+    Restore {
+        /// Backup file to restore from.
+        backup: PathBuf,
+        /// Overwrite even if the current data directory is newer.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Check the data directory for consistency, and with --repair fix
+    /// the raft/format metadata that can strand a cluster.
+    Fsck {
+        /// Apply repairs instead of only reporting.
+        #[arg(long, default_value_t = false)]
+        repair: bool,
+    },
 }
 
 fn build_tls_config(
@@ -354,6 +402,37 @@ fn parse_initial_cluster(s: &str) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// Dispatch an offline data-directory subcommand and exit.
+async fn run_subcommand(
+    args: &Args,
+    node_id: NodeId,
+    command: &Command,
+) -> anyhow::Result<()> {
+    use fastetcd_server::admin;
+    match command {
+        Command::Backup { out } => admin::cmd_backup(&args.data_dir, out).await,
+        Command::Restore { backup, force } => {
+            admin::cmd_restore(&args.data_dir, backup, *force).await
+        }
+        Command::Fsck { repair } => {
+            // Build the configured voter set for the recovery fallback,
+            // the same way server startup does.
+            let own_peer_url = first_url(
+                args.initial_advertise_peer_urls
+                    .as_deref()
+                    .unwrap_or(&args.listen_peer_urls),
+            )?;
+            let mut all_members: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+            all_members.insert(node_id, openraft::BasicNode::new(own_peer_url));
+            for (name, url) in parse_initial_cluster(&args.initial_cluster)? {
+                all_members.insert(derive_node_id(&name), openraft::BasicNode::new(url));
+            }
+            let code = admin::cmd_fsck(&args.data_dir, &all_members, node_id, *repair).await?;
+            std::process::exit(code);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -366,6 +445,12 @@ async fn main() -> anyhow::Result<()> {
     apply_etcd_env_compat();
     let args = Args::parse();
     let node_id = args.node_id.unwrap_or_else(|| derive_node_id(&args.name));
+
+    // Offline data-directory subcommands. These run and exit; the server
+    // must be stopped (each opens the redb file exclusively).
+    if let Some(command) = &args.command {
+        return run_subcommand(&args, node_id, command).await;
+    }
 
     let initial_cluster = parse_initial_cluster(&args.initial_cluster)?;
     let is_bootstrap = args.initial_cluster_state.eq_ignore_ascii_case("new");
@@ -495,102 +580,37 @@ async fn main() -> anyhow::Result<()> {
     // entries (fastetcd#9, #11). Detect the legacy format and repair it
     // in place, keeping the MVCC data.
     {
-        use openraft::storage::RaftLogStorage;
-        let format = sm.mvcc().read_format_version().await?;
-        let log_state = log.get_log_state().await?;
-        let has_data = sm.mvcc().current_revision().await > 0;
-
-        // (#9) Adopt the log's purge floor as last_applied when it was
-        // never persisted, so we don't replay purged entries. Self-guards
-        // to legacy dirs with data.
-        if let Some(adopted) = sm.recover_applied_floor(log_state.last_purged_log_id).await? {
-            tracing::warn!(
-                last_applied = ?adopted,
-                "recovered a data directory with no persisted applied position \
-                 (pre-0.8.3 format); adopting the log's last purged id. Log entries \
-                 after this point are re-applied, which may advance the revision."
-            );
+        // Safety backup before a newer version touches the data (#backup):
+        // take it before recovery writes anything, while we hold the lock.
+        if args.upgrade_backup {
+            let backup_dir = args
+                .upgrade_backup_dir
+                .clone()
+                .unwrap_or_else(|| args.data_dir.join("backups"));
+            fastetcd_server::admin::backup_before_version(
+                sm.mvcc(),
+                &args.data_dir,
+                &backup_dir,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await?;
         }
 
-        let recovery_log_id = log_state.last_purged_log_id.or(log_state.last_log_id);
+        // In-place upgrade / recovery (#9, #11), shared with `fsck --repair`.
+        fastetcd_server::admin::recover_data_dir(
+            &sm,
+            &mut log,
+            &all_members,
+            node_id,
+            args.force_new_cluster,
+        )
+        .await?;
 
-        // A faithful conversion recovers the *actual* membership from the
-        // on-disk raft state. Scan the retained log for the newest
-        // Membership entry — that is the true voter set as of the last
-        // membership change still on disk. Only if the log has been purged
-        // clean of them do we fall back to --initial-cluster.
-        let membership_from_log: Option<
-            openraft::StoredMembership<NodeId, openraft::BasicNode>,
-        > = {
-            use openraft::RaftLogReader;
-            let lo = log_state.last_purged_log_id.map(|l| l.index + 1).unwrap_or(0);
-            let hi = log_state.last_log_id.map(|l| l.index + 1).unwrap_or(0);
-            let mut latest = None;
-            if hi > lo {
-                for entry in log.try_get_log_entries(lo..hi).await? {
-                    if let openraft::EntryPayload::Membership(m) = entry.payload {
-                        latest =
-                            Some(openraft::StoredMembership::new(Some(entry.log_id), m));
-                    }
-                }
-            }
-            latest
-        };
-
-        if args.force_new_cluster {
-            // Escape hatch: rebuild membership as a cluster of one (self),
-            // preserving MVCC data. Operator re-adds peers afterwards.
-            let node = all_members.get(&node_id).cloned().unwrap_or_default();
-            let members: std::collections::BTreeSet<NodeId> = std::iter::once(node_id).collect();
-            let nodes: BTreeMap<NodeId, openraft::BasicNode> =
-                std::iter::once((node_id, node)).collect();
-            let stored = openraft::StoredMembership::new(
-                recovery_log_id,
-                openraft::Membership::new(vec![members], nodes),
-            );
-            sm.recover_membership(stored).await?;
-            tracing::warn!(
-                %node_id,
-                "--force-new-cluster: rebuilt single-node membership; MVCC data \
-                 preserved. Re-add the other members with `member add` once up."
-            );
-        } else if has_data && sm.membership_is_empty().await {
-            // (#11) Auto-upgrade a pre-v1.0.1 directory in place: recover
-            // the voter set and persist it durably in the new format,
-            // losing no data. Prefer the real membership from the retained
-            // log; fall back to config only when it is genuinely gone.
-            let (stored, source) = match membership_from_log {
-                Some(m) => (m, "retained raft log (exact)"),
-                None => {
-                    let members: std::collections::BTreeSet<NodeId> =
-                        all_members.keys().copied().collect();
-                    (
-                        openraft::StoredMembership::new(
-                            recovery_log_id,
-                            openraft::Membership::new(vec![members], all_members.clone()),
-                        ),
-                        "--initial-cluster (log purged clean of membership; best effort)",
-                    )
-                }
-            };
-            let voters: Vec<NodeId> = stored.membership().voter_ids().collect();
-            sm.recover_membership(stored).await?;
-            tracing::warn!(
-                source,
-                ?voters,
-                "upgraded a pre-v1.0.1 data directory in place: recovered raft \
-                 membership and persisted it durably (fastetcd#11). MVCC data preserved. \
-                 If recovery used --initial-cluster and the live membership had since \
-                 diverged, reconcile with `member add`/`member remove`, or restart one \
-                 surviving member with --force-new-cluster."
-            );
-        }
-
-        if format != Some(fastetcd_storage::mvcc::store::FORMAT_VERSION) {
-            sm.mvcc()
-                .write_format_version(fastetcd_storage::mvcc::store::FORMAT_VERSION)
-                .await?;
-        }
+        // Record the version now running so the next start's backup check
+        // fires only on an actual version change.
+        sm.mvcc()
+            .write_open_version(env!("CARGO_PKG_VERSION"))
+            .await?;
     }
 
     // Clone the MVCC handle before `sm` is moved into ServerState; the

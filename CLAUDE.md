@@ -10,7 +10,27 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.2`** — Makes the #11 upgrade a faithful in-place conversion. The
+**`1.0.3`** — Data-directory safety toolkit, so an upgrade can never
+be a one-way door. (1) **Automatic pre-version backup**: the fastetcd
+version that last opened a data dir is recorded in `mvcc_meta`; on
+startup, if the running binary is a different version and there is data,
+a full copy of `fastetcd.redb` is written to `<data-dir>/backups/`
+*before* any recovery/conversion writes (on by default;
+`--upgrade-backup`/`--upgrade-backup-dir`). (2) New offline
+subcommands (server must be stopped; each opens the redb file
+exclusively and refuses if it's locked): `fastetcd backup --out <path>`
+(consistent single-file copy), `fastetcd restore <backup> [--force]`
+(refuses to overwrite a newer dir without `--force`, keeps the
+pre-restore file as `fastetcd.redb.replaced-*`), and `fastetcd fsck
+[--repair]` (checks structural integrity, `format_version`, raft
+membership / `last_applied`, and MVCC counter sanity; `--repair` reuses
+the #11 recovery path — deep MVCC key-index damage is reported, not
+auto-fixed, so restore from a backup). The #9/#11 recovery logic is now
+shared between server startup and `fsck --repair`. Restoring a backup
+onto a *new* node identity needs `--force-new-cluster` on first start,
+as with etcd.
+
+Previous: **`1.0.2`** — Makes the #11 upgrade a faithful in-place conversion. The
 v1.0.1 recovery rebuilt the voter set from `--initial-cluster`, which is
 only a guess if the live membership had diverged from bootstrap. v1.0.2
 first recovers the *actual* membership from the retained raft log (scans

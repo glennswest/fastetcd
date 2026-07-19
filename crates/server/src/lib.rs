@@ -14,6 +14,7 @@
 //!   MVCC types.
 //! - [`kv`] — `KvService` implementing the etcd v3 KV gRPC service.
 
+pub mod admin;
 pub mod auth;
 pub mod authz;
 pub mod cluster;

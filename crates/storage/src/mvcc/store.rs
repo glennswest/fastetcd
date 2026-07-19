@@ -64,6 +64,11 @@ pub const META_KEY_RAFT_MEMBERSHIP: &[u8] = b"raft_membership";
 pub const META_KEY_FORMAT_VERSION: &[u8] = b"format_version";
 /// Current on-disk format. Bump only for changes that need migration.
 pub const FORMAT_VERSION: u32 = 1;
+/// The fastetcd semver string that last opened this directory. Compared
+/// against the running binary's version on startup to take a safety
+/// backup before a new version touches the data (independent of whether
+/// the on-disk *format* changed).
+pub const META_KEY_FASTETCD_VERSION: &[u8] = b"fastetcd_version";
 
 /// Errors specific to the MVCC layer (atop [`StorageError`]).
 #[derive(Debug, Error)]
@@ -406,6 +411,29 @@ impl MvccStore {
     pub async fn write_format_version(&self, version: u32) -> MvccResult<()> {
         let mut batch = WriteBatch::new();
         batch.put(TABLE_META, META_KEY_FORMAT_VERSION, &version.to_be_bytes());
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        Ok(())
+    }
+
+    /// Read the fastetcd version string that last opened this directory,
+    /// or `None` on a directory written before version stamping existed.
+    pub async fn read_open_version(&self) -> MvccResult<Option<String>> {
+        let snap = self.inner.engine.snapshot().await?;
+        match snap.get(TABLE_META, META_KEY_FASTETCD_VERSION).await? {
+            Some(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    /// Record the fastetcd version now opening this directory. Written
+    /// after any startup backup + recovery, so the next start compares
+    /// against it.
+    pub async fn write_open_version(&self, version: &str) -> MvccResult<()> {
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_META, META_KEY_FASTETCD_VERSION, version.as_bytes());
         self.inner
             .engine
             .commit(batch, WriteOptions::default())
