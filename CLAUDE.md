@@ -10,7 +10,34 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`0.8.3`** — Three durability/compat fixes found by the rustkube
+**`1.0.0`** — First stable release. The wire-compat bar is met end to
+end: unmodified etcd v3 clients (etcdctl, client-go, kubeadm) drive
+KV/Watch/Lease/Cluster/Maintenance/Auth through Raft, single- and
+multi-node, with linearizable reads by default. Shipped as the #10 fix
+below closes the last known correctness gap surfaced by the rustkube
+soak tests.
+
+Headline fix — linearizable reads (#10). A single-client
+read-modify-write loop (GET `mod_revision` → txn
+`Compare::mod_revision(Equal)` + put) saw ~25% spurious CAS failures on
+a cluster with no concurrent writer. Root cause: fastetcd never
+implemented linearizable reads — `serve_range` ignored `serializable`
+(`let _ = req.serializable;`) and always read local state, so a
+follower whose state machine lags, or a leader that has silently lost
+leadership, answered a default read with stale data; the client's next
+GET then returned a `mod_revision` older than committed, and the
+following CAS compared against it and failed. Fix: a default
+(non-serializable) Range now runs a read barrier first — on the leader
+`Raft::ensure_linearizable` (ReadIndex + wait-for-apply), on a follower
+forward the whole Range to the leader over a new `RaftPeer.ForwardRead`
+RPC. Cluster-of-one satisfies the barrier trivially, so single-node
+reads stay a direct local read; `serializable=true` still opts out.
+The single-machine test harness applies too fast to show the
+staleness, so the regression test asserts the barrier itself: a node
+that can't confirm leadership must *fail* a linearizable read rather
+than serve stale local state (verified it fails without the fix).
+
+Previous: **`0.8.3`** — Three durability/compat fixes found by the rustkube
 cluster tests.
 
 `#9` — a single node couldn't survive a reboot. `FastetcdStateMachine`
