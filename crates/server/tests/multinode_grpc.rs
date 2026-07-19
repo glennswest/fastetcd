@@ -89,8 +89,9 @@ async fn start_node(
     let cluster_svc = ClusterService::new(state.clone(), id, test_peers, test_dir);
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
+    let peer_mvcc = state.sm.mvcc().clone();
     let lease = LeaseService::new(state);
-    let peer_service = RaftPeerService::new(raft.clone());
+    let peer_service = RaftPeerService::new(raft.clone(), peer_mvcc);
 
     // Listen on the URL the peers were told about.
     let peer_url = &members[&id];
@@ -386,4 +387,170 @@ async fn membership_changes_forward_from_a_follower() {
 
     let _ = n2;
     let _ = n3;
+}
+
+/// Reproduction for #10: a single client doing sequential
+/// read-modify-write with a `Compare::mod_revision(Equal)` guard and no
+/// concurrent writer should never see a spurious CAS failure. Runs the
+/// loop against every member (leader and followers) using the default
+/// linearizable read.
+#[tokio::test]
+async fn rmw_cas_loop_has_no_spurious_conflicts() {
+    use fastetcd_proto::etcdserverpb::compare::{CompareResult, CompareTarget, TargetUnion};
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let leader_id = loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("no leader in 10s");
+        }
+        if let Some(l) = n1.raft.metrics().borrow().current_leader {
+            break l;
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+    let by_id = |id: NodeId| match id {
+        1 => &n1,
+        2 => &n2,
+        3 => &n3,
+        o => panic!("bad id {o}"),
+    };
+
+    // Seed the key once via the leader.
+    let key = b"rmw".to_vec();
+    let mut seed = KvClient::connect(by_id(leader_id).client_endpoint.clone())
+        .await
+        .unwrap();
+    seed.put(pb::PutRequest {
+        key: key.clone(),
+        value: b"seed".to_vec(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // Let every follower apply the seed before we start reading locally.
+    sleep(Duration::from_millis(300)).await;
+
+    for target in [leader_id, (1..=3).find(|i| *i != leader_id).unwrap()] {
+        let endpoint = by_id(target).client_endpoint.clone();
+        let mut kv = KvClient::connect(endpoint.clone()).await.unwrap();
+        let iters = 30;
+        let mut ok = 0;
+        for i in 0..iters {
+            // Linearizable GET (serializable = false, etcd default).
+            let g = kv
+                .range(pb::RangeRequest {
+                    key: key.clone(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            let rv = g.kvs.first().map(|k| k.mod_revision).unwrap_or(0);
+
+            let txn = kv
+                .txn(pb::TxnRequest {
+                    compare: vec![pb::Compare {
+                        result: CompareResult::Equal as i32,
+                        target: CompareTarget::Mod as i32,
+                        key: key.clone(),
+                        target_union: Some(TargetUnion::ModRevision(rv)),
+                        range_end: Vec::new(),
+                    }],
+                    success: vec![pb::RequestOp {
+                        request: Some(pb::request_op::Request::RequestPut(pb::PutRequest {
+                            key: key.clone(),
+                            value: format!("v{i}").into_bytes(),
+                            ..Default::default()
+                        })),
+                    }],
+                    failure: Vec::new(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            if txn.succeeded {
+                ok += 1;
+            }
+        }
+        let role = if target == leader_id { "leader" } else { "follower" };
+        assert_eq!(
+            ok, iters,
+            "{role} ({endpoint}): {ok}/{iters} CAS succeeded — spurious conflicts (#10)"
+        );
+    }
+    let _ = (&n1, &n2, &n3);
+}
+
+
+/// Deterministic guard for the #10 barrier: a node that cannot confirm
+/// leadership must not serve a default (linearizable) read from local
+/// state — it must fail. A lone, uninitialized node has no leader, so
+/// `ensure_linearizable` cannot pass and there is nobody to forward to.
+///
+/// Without the barrier this returns an empty result with `Ok` (stale
+/// local read); with it, the linearizable read errors while an explicit
+/// `serializable` read still returns local state. This is the leader
+/// side of the report ("~25% even on the leader"): a deposed or
+/// unconfirmed leader answering reads from stale local state.
+#[tokio::test]
+async fn linearizable_read_without_a_leader_fails_instead_of_serving_stale() {
+    // Two-member config, but only node 1 is started and it is never
+    // initialized — so it stays a follower with no elected leader.
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    let n1 = start_node(1, &members).await;
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        n1.raft.metrics().borrow().current_leader.is_none(),
+        "precondition: node has no leader"
+    );
+
+    let mut kv = KvClient::connect(n1.client_endpoint.clone()).await.unwrap();
+
+    // Serializable (explicit opt-in to a possibly-stale local read):
+    // succeeds, returns empty local state.
+    let serial = kv
+        .range(pb::RangeRequest {
+            key: b"k".to_vec(),
+            serializable: true,
+            ..Default::default()
+        })
+        .await;
+    assert!(serial.is_ok(), "serializable read should still serve local state");
+
+    // Linearizable (default): must fail rather than return stale/empty
+    // local state, because leadership can't be confirmed.
+    let lin = kv
+        .range(pb::RangeRequest {
+            key: b"k".to_vec(),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        lin.is_err(),
+        "linearizable read with no confirmable leader must fail, got {lin:?}"
+    );
 }

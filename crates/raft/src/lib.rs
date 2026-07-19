@@ -21,4 +21,4 @@ pub use network::{
 };
 
 pub use state_machine::{FastetcdSnapshotBuilder, FastetcdStateMachine};
-pub use types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
+pub use types::{FastetcdLogEntry, FastetcdLogResponse, ForwardedRead, NodeId, TypeConfig};

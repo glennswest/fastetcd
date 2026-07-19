@@ -27,6 +27,13 @@ service RaftPeer {
     // and friends work against any endpoint; fastetcd used to surface
     // openraft's ForwardToLeader error to the caller instead (#7).
     rpc ForwardMembership(RaftPayload) returns (RaftPayload);
+
+    // Linearizable read served on the leader. A follower can't
+    // establish a read-index by itself, so a default (non-serializable)
+    // Range it receives is forwarded here; the leader confirms
+    // leadership (ReadIndex), waits for its state machine to catch up,
+    // and reads — so the result never lags a completed write (#10).
+    rpc ForwardRead(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

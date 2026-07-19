@@ -1,11 +1,15 @@
 //! Implementation of the etcd `KV` gRPC service.
 //!
 //! Range:
-//!   - `serializable=true` (or single-node) → direct read from MvccStore
-//!   - `serializable=false` on a cluster → SHOULD use a read-index
-//!     round trip before reading. For single-node fastetcd this is
-//!     equivalent to a serializable read, so we serve directly. A
-//!     real read-index path lands with the peer transport (task #13).
+//!   - `serializable=true` → direct read from the local MvccStore
+//!     (may be stale on a follower; the client opted into that).
+//!   - `serializable=false` (etcd default, linearizable) → a read
+//!     barrier first: on the leader, `Raft::ensure_linearizable`
+//!     (ReadIndex + wait for apply); on a follower, forward the range
+//!     to the leader (see `ServerState::linearize_read`). This is what
+//!     stops a lagging follower or unconfirmed leader from returning
+//!     stale data (#10). On a cluster-of-one the barrier is trivially
+//!     satisfied, so single-node reads stay a direct local read.
 //!
 //! Put / DeleteRange / Compact / Txn:
 //!   - Built into a `FastetcdLogEntry`, proposed through
@@ -195,10 +199,26 @@ async fn serve_range(
     state: &ServerState,
     req: &pb::RangeRequest,
 ) -> Result<RangeResult, Status> {
-    // For single-node clusters, serializable == linearizable.
-    // Multi-node linearizable reads will pipeline a Noop through Raft
-    // before reading; that lands with task #13 / read-index work.
-    let _ = req.serializable;
+    // A default (linearizable) read must not return state older than a
+    // completed write. On a cluster, reading local state without a
+    // barrier lets a lagging follower — or a leader that has silently
+    // lost leadership — return stale data, which shows up as spurious
+    // CAS failures in read-modify-write loops (#10). `serializable=true`
+    // opts out and reads local state directly, matching etcd.
+    if !req.serializable {
+        let read = fastetcd_raft::ForwardedRead {
+            key: req.key.clone(),
+            range_end: req.range_end.clone(),
+            limit: req.limit.max(0) as u64,
+            revision: req.revision,
+            keys_only: req.keys_only,
+            count_only: req.count_only,
+        };
+        // On a follower this returns the leader's result directly.
+        if let Some(result) = state.linearize_read(&read).await? {
+            return Ok(result);
+        }
+    }
     state
         .sm
         .mvcc()

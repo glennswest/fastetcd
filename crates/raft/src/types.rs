@@ -55,6 +55,20 @@ pub enum MembershipChange {
     SetVoters { voters: Vec<NodeId> },
 }
 
+/// A linearizable Range forwarded to the leader (#10). Carries the
+/// `MvccStore::range` parameters; the leader replies with a
+/// [`RangeResult`]. Kept separate from `FastetcdLogEntry` because a
+/// read is never written to the raft log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardedRead {
+    pub key: Vec<u8>,
+    pub range_end: Vec<u8>,
+    pub limit: u64,
+    pub revision: i64,
+    pub keys_only: bool,
+    pub count_only: bool,
+}
+
 /// The application-level log entry. Every committed Raft entry decodes
 /// to one of these variants and is dispatched to [`MvccStore`].
 ///

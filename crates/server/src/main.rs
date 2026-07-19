@@ -494,6 +494,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Clone the MVCC handle before `sm` is moved into ServerState; the
+    // peer service uses it to serve forwarded linearizable reads (#10).
+    let peer_mvcc = sm.mvcc().clone();
     let factory = GrpcNetworkFactory::new(peers.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
 
@@ -571,7 +574,7 @@ async fn main() -> anyhow::Result<()> {
     let lease = LeaseService::new(server_state.clone());
     let auth = AuthService::new(server_state, auth_state.clone());
 
-    let peer_service = RaftPeerService::new(raft);
+    let peer_service = RaftPeerService::new(raft, peer_mvcc);
 
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;

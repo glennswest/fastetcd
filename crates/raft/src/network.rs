@@ -247,6 +247,34 @@ impl WriteForwarder {
         result
     }
 
+    /// Forward a linearizable Range to `target`'s `ForwardRead` RPC and
+    /// return the leader's `RangeResult` (#10). Same transport and
+    /// failure handling as [`forward`](Self::forward).
+    pub async fn forward_read(
+        &self,
+        target: NodeId,
+        read: &crate::types::ForwardedRead,
+    ) -> Result<fastetcd_storage::mvcc::RangeResult, String> {
+        let data = bincode::serialize(read).map_err(|e| e.to_string())?;
+        let cli_result = async {
+            let mut cli = self.client(target).await?;
+            cli.forward_read(Request::new(pb::RaftPayload { data }))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        let resp = match cli_result {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                self.clients.write().await.remove(&target);
+                return Err(e);
+            }
+        };
+        let result: Result<fastetcd_storage::mvcc::RangeResult, String> =
+            bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
+        result
+    }
+
     /// Forward a cluster-membership change to `target`'s
     /// `ForwardMembership` RPC. Same transport and failure handling as
     /// [`forward`](Self::forward); only a leader can apply one, so a
@@ -279,15 +307,18 @@ impl WriteForwarder {
 
 /// Server-side handler for inbound peer RPCs. Holds a clone of the
 /// local `Raft<TypeConfig>` and dispatches each bincode-decoded
-/// request into the appropriate openraft method.
+/// request into the appropriate openraft method. Also holds the
+/// `MvccStore` so it can serve a forwarded linearizable read (#10)
+/// against the leader's own state machine.
 #[derive(Clone)]
 pub struct RaftPeerService {
     raft: Raft<TypeConfig>,
+    mvcc: fastetcd_storage::mvcc::MvccStore,
 }
 
 impl RaftPeerService {
-    pub fn new(raft: Raft<TypeConfig>) -> Self {
-        Self { raft }
+    pub fn new(raft: Raft<TypeConfig>, mvcc: fastetcd_storage::mvcc::MvccStore) -> Self {
+        Self { raft, mvcc }
     }
 }
 
@@ -360,6 +391,41 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 // as any raft client, retries.
                 Err(e) => Err(e.to_string()),
             };
+        let data = bincode::serialize(&result)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn forward_read(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let read: crate::types::ForwardedRead =
+            bincode::deserialize(&request.into_inner().data)
+                .map_err(|e| Status::invalid_argument(format!("decode ForwardRead: {e}")))?;
+
+        // Confirm leadership + wait for the state machine to reach the
+        // read index, so the read is linearizable. If leadership moved
+        // on, stringify the error (as forward_write does) and let the
+        // original caller retry against the new leader.
+        let result: Result<fastetcd_storage::mvcc::RangeResult, String> = async {
+            self.raft
+                .ensure_linearizable()
+                .await
+                .map_err(|e| e.to_string())?;
+            self.mvcc
+                .range(
+                    &read.key,
+                    &read.range_end,
+                    read.limit as usize,
+                    read.revision,
+                    read.keys_only,
+                    read.count_only,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
         let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))

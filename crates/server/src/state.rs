@@ -74,6 +74,47 @@ impl ServerState {
         }
     }
 
+    /// Perform a linearizable read barrier before a local range read.
+    ///
+    /// etcd's default read is linearizable: it must never return state
+    /// older than a write that completed before the read began. On the
+    /// leader, `ensure_linearizable` confirms leadership via a heartbeat
+    /// quorum and waits for the state machine to catch up to the read
+    /// index. On a follower it returns `ForwardToLeader`, so we hand the
+    /// whole range to the leader, which does the barrier and reads its
+    /// own state machine (#10).
+    ///
+    /// Returns `Ok(None)` when the caller should read locally (this node
+    /// is the leader and the barrier passed), or `Ok(Some(result))` when
+    /// the leader already produced the result via forwarding.
+    pub async fn linearize_read(
+        &self,
+        read: &fastetcd_raft::ForwardedRead,
+    ) -> Result<Option<fastetcd_storage::mvcc::RangeResult>, Status> {
+        match self.raft.ensure_linearizable().await {
+            Ok(_) => Ok(None),
+            Err(e) => {
+                if let Some(fwd) = e.forward_to_leader::<openraft::BasicNode>() {
+                    if let Some(leader_id) = fwd.leader_id {
+                        return self
+                            .forwarder
+                            .forward_read(leader_id, read)
+                            .await
+                            .map(Some)
+                            .map_err(|msg| {
+                                Status::unavailable(format!(
+                                    "forwarded linearizable read to leader {leader_id}: {msg}"
+                                ))
+                            });
+                    }
+                }
+                Err(Status::unavailable(format!(
+                    "linearizable read barrier: {e}"
+                )))
+            }
+        }
+    }
+
     /// Add a learner, forwarding to the leader if this node isn't it.
     pub async fn propose_add_learner(
         &self,
