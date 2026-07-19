@@ -68,8 +68,7 @@ async fn put_without_token_rejected_when_auth_enabled() {
             ..Default::default()
         })
         .await
-        .err()
-        .expect("should be rejected without a token");
+        .expect_err("should be rejected without a token");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -114,7 +113,7 @@ async fn invalid_token_rejected_when_auth_enabled() {
     });
     req.metadata_mut()
         .insert("token", MetadataValue::from_static("this-is-not-a-real-token"));
-    let err = kv.range(req).await.err().expect("invalid token rejected");
+    let err = kv.range(req).await.expect_err("invalid token rejected");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 

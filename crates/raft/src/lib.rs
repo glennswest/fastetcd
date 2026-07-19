@@ -1,3 +1,7 @@
+// openraft::StorageError is large, and these signatures are fixed by
+// the RaftLogStorage / RaftStateMachine traits — we cannot box it.
+#![allow(clippy::result_large_err)]
+
 //! openraft glue for fastetcd.
 //!
 //! Modules:

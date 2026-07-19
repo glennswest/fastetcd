@@ -397,7 +397,7 @@ async fn forward_events(
                 let header = response_header(&state, batch.revision).await;
                 for (watch_id, events) in deliveries {
                     let resp = pb::WatchResponse {
-                        header: Some(header.clone()),
+                        header: Some(header),
                         watch_id,
                         created: false,
                         canceled: false,

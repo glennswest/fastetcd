@@ -149,7 +149,6 @@ pub async fn migrate_snapshot_with_mode(
             Ok(())
         })
         .map_err(|e| anyhow::anyhow!("bolt for_each: {e}"))?;
-    drop(bucket);
     drop(tx);
     drop(bolt);
 

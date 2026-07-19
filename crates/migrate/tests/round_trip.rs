@@ -75,11 +75,11 @@ async fn migrates_latest_value_per_key_and_skips_tombstones() {
         Arc::new(RedbEngine::open(target.join("fastetcd.redb")).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
     let snap = engine_snapshot(&mvcc).await;
-    assert!(snap.contains_key(&b"alpha".to_vec()));
-    assert!(snap.contains_key(&b"charlie".to_vec()));
-    assert!(!snap.contains_key(&b"bravo".to_vec()));
-    assert_eq!(snap.get(&b"alpha".to_vec()).unwrap(), &b"v1".to_vec()); // latest version
-    assert_eq!(snap.get(&b"charlie".to_vec()).unwrap(), &b"cv0".to_vec());
+    assert!(snap.contains_key(b"alpha".as_slice()));
+    assert!(snap.contains_key(b"charlie".as_slice()));
+    assert!(!snap.contains_key(b"bravo".as_slice()));
+    assert_eq!(snap.get(b"alpha".as_slice()).unwrap(), &b"v1".to_vec()); // latest version
+    assert_eq!(snap.get(b"charlie".as_slice()).unwrap(), &b"cv0".to_vec());
 }
 
 async fn engine_snapshot(mvcc: &MvccStore) -> std::collections::HashMap<Vec<u8>, Vec<u8>> {

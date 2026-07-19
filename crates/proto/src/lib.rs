@@ -1,3 +1,8 @@
+// The doc comments in the generated stubs are etcd's own, copied
+// verbatim from the upstream .proto files; their list formatting trips
+// this lint and isn't ours to reformat.
+#![allow(clippy::doc_lazy_continuation)]
+
 //! Generated etcd v3 gRPC stubs.
 //!
 //! Protos are vendored under `crates/proto/protos/etcd/api/` and generated

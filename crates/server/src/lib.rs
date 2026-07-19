@@ -1,3 +1,8 @@
+// Nearly every fn here returns tonic::Status, which is large by
+// design; boxing it would churn every gRPC handler signature for no
+// real gain.
+#![allow(clippy::result_large_err)]
+
 //! fastetcd server library.
 //!
 //! The binary in `bin/fastetcd` is a thin shell around this crate.

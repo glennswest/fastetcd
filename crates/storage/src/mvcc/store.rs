@@ -495,7 +495,6 @@ impl MvccStore {
                     revs: std::mem::take(&mut current_gen_revs),
                     tombstone: Some(rev),
                 });
-                current_gen_created = None;
                 let kv_key = make_kv_key(&key, rev);
                 let bytes = bincode::serialize(tomb).map_err(|e| {
                     MvccError::Internal(format!("serialize tombstone: {e}"))
@@ -1026,11 +1025,9 @@ impl MvccStore {
             }
             // Restore back into op order.
             results.reverse();
-            for slot in write_slots {
-                if let Some(idx) = slot {
-                    if let Some(res) = results.pop() {
-                        op_results[idx] = TxnOpResult::Mutation(res);
-                    }
+            for idx in write_slots.into_iter().flatten() {
+                if let Some(res) = results.pop() {
+                    op_results[idx] = TxnOpResult::Mutation(res);
                 }
             }
         }
@@ -1880,8 +1877,7 @@ mod tests {
         let err = s
             .range(b"k", b"", 0, 999, false, false)
             .await
-            .err()
-            .expect("future rev errors");
+            .expect_err("future rev errors");
         assert!(matches!(err, MvccError::FutureRevision { .. }));
     }
 

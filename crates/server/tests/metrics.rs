@@ -16,7 +16,7 @@ async fn metrics_endpoint_exposes_etcd_compatible_names() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let bound = listener.local_addr().unwrap();
     drop(listener);
-    fastetcd_server::metrics::spawn_server(bound, m, Arc::new(reconstruct(&h)).into());
+    fastetcd_server::metrics::spawn_server(bound, m, Arc::new(reconstruct(&h)));
 
     // Wait briefly for the server to come up.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

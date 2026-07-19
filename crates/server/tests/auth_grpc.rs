@@ -141,8 +141,7 @@ async fn authenticate_rejects_wrong_password() {
             password: "wrong-pass".to_string(),
         })
         .await
-        .err()
-        .expect("should fail");
+        .expect_err("should fail");
     assert_eq!(err.code(), tonic::Code::Unauthenticated);
 }
 
@@ -153,8 +152,7 @@ async fn auth_enable_requires_root_user() {
     let err = c
         .auth_enable(pb::AuthEnableRequest {})
         .await
-        .err()
-        .expect("AuthEnable should fail without root user");
+        .expect_err("AuthEnable should fail without root user");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 
     // Add root and try again — should succeed.

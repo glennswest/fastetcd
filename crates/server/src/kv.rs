@@ -243,7 +243,7 @@ async fn txn_result_to_response(
                 // Construct an inner RangeResponse with the same header.
                 let header = pb::ResponseHeader {
                     revision: txn.revision,
-                    ..header.clone()
+                    ..header
                 };
                 pb::ResponseOp {
                     response: Some(pb::response_op::Response::ResponseRange(
@@ -280,7 +280,7 @@ fn mutation_result_to_response_op(
     if looks_like_put {
         pb::ResponseOp {
             response: Some(pb::response_op::Response::ResponsePut(pb::PutResponse {
-                header: Some(header.clone()),
+                header: Some(*header),
                 prev_kv: m.prev_kvs.first().map(conv::record_to_kv),
             })),
         }
@@ -288,7 +288,7 @@ fn mutation_result_to_response_op(
         pb::ResponseOp {
             response: Some(pb::response_op::Response::ResponseDeleteRange(
                 pb::DeleteRangeResponse {
-                    header: Some(header.clone()),
+                    header: Some(*header),
                     deleted: m.n,
                     prev_kvs: m.prev_kvs.iter().map(conv::record_to_kv).collect(),
                 },

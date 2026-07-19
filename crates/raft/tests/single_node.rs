@@ -40,8 +40,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNet {
         openraft::error::RPCError<NodeId, openraft::BasicNode, openraft::error::RaftError<NodeId>>,
     > {
         Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
+            openraft::error::NetworkError::new(&std::io::Error::other(
                 "no network in single-node test",
             )),
         ))
@@ -60,8 +59,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNet {
         >,
     > {
         Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
+            openraft::error::NetworkError::new(&std::io::Error::other(
                 "no network in single-node test",
             )),
         ))
@@ -76,8 +74,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNet {
         openraft::error::RPCError<NodeId, openraft::BasicNode, openraft::error::RaftError<NodeId>>,
     > {
         Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
+            openraft::error::NetworkError::new(&std::io::Error::other(
                 "no network in single-node test",
             )),
         ))

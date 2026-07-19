@@ -42,8 +42,7 @@ fn err() -> openraft::error::RPCError<
     openraft::BasicNode,
     openraft::error::RaftError<NodeId>,
 > {
-    openraft::error::RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::new(
-        std::io::ErrorKind::Other,
+    openraft::error::RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::other(
         "test: no peers",
     )))
 }
@@ -72,8 +71,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNetConn {
         >,
     > {
         Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
+            openraft::error::NetworkError::new(&std::io::Error::other(
                 "test: no peers",
             )),
         ))
@@ -235,7 +233,6 @@ async fn delete_range_returns_count_and_prev_kvs() {
             key: b"k1".to_vec(),
             range_end: b"k3".to_vec(),
             prev_kv: true,
-            ..Default::default()
         })
         .await
         .unwrap()

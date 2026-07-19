@@ -79,8 +79,7 @@ async fn user_without_perm_is_denied_write() {
             &tok,
         ))
         .await
-        .err()
-        .expect("should be denied");
+        .expect_err("should be denied");
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
@@ -144,8 +143,7 @@ async fn user_with_matching_perm_is_allowed() {
             &tok,
         ))
         .await
-        .err()
-        .expect("out-of-range should be denied");
+        .expect_err("out-of-range should be denied");
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
@@ -208,7 +206,6 @@ async fn read_perm_does_not_allow_write() {
             &tok,
         ))
         .await
-        .err()
-        .expect("read-only role should not write");
+        .expect_err("read-only role should not write");
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }

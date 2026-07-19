@@ -171,7 +171,7 @@ impl Maintenance for MaintenanceService {
                 let blob = data[sent..end].to_vec();
                 sent = end;
                 let resp = pb::SnapshotResponse {
-                    header: Some(header.clone()),
+                    header: Some(header),
                     remaining_bytes: (total - sent) as u64,
                     blob,
                     version: ETCD_COMPAT_VERSION.to_string(),
@@ -252,9 +252,9 @@ async fn hash_kv_table(
                 continue;
             }
         }
-        h.update(&(k.len() as u32).to_be_bytes());
+        h.update((k.len() as u32).to_be_bytes());
         h.update(&k);
-        h.update(&(v.len() as u32).to_be_bytes());
+        h.update((v.len() as u32).to_be_bytes());
         h.update(&v);
     }
     let digest = h.finalize();

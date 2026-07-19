@@ -141,7 +141,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
                 RPCError::Unreachable(u) => RPCError::Unreachable(u),
                 RPCError::PayloadTooLarge(p) => RPCError::PayloadTooLarge(p),
                 RPCError::RemoteError(_) => RPCError::Network(NetworkError::new(
-                    &std::io::Error::new(std::io::ErrorKind::Other, "remote raft error"),
+                    &std::io::Error::other("remote raft error"),
                 )),
             })?;
         let resp = cli

@@ -1,3 +1,5 @@
+#![allow(dead_code)] // shared scaffolding; each test binary uses a subset
+
 //! Shared test harness: spin up an in-process fastetcd server with
 //! KV + Cluster + Maintenance services on an ephemeral port.
 
@@ -49,8 +51,7 @@ fn err() -> openraft::error::RPCError<
     openraft::BasicNode,
     openraft::error::RaftError<NodeId>,
 > {
-    openraft::error::RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::new(
-        std::io::ErrorKind::Other,
+    openraft::error::RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::other(
         "test: no peers",
     )))
 }
@@ -79,8 +80,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNetConn {
         >,
     > {
         Err(openraft::error::RPCError::Network(
-            openraft::error::NetworkError::new(&std::io::Error::new(
-                std::io::ErrorKind::Other,
+            openraft::error::NetworkError::new(&std::io::Error::other(
                 "test: no peers",
             )),
         ))
