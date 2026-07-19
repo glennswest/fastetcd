@@ -3,25 +3,30 @@
 //! voter set after upgrade.
 //!
 //! v0.8.2 never persisted raft membership. Once its log was purged, the
-//! membership entry (at the head of the log) was gone from everywhere,
-//! and a restart under v1.0.0 loaded an empty voter set → no leader.
-//! The fix reconstructs membership from `--initial-cluster` and persists
-//! it durably. This test simulates the legacy dir (MVCC data written
-//! straight through the store, no membership meta) and checks that
-//! recovery restores a non-empty voter set that survives a restart.
+//! bootstrap membership entry was gone from everywhere, and a restart
+//! under v1.0.0 loaded an empty voter set → no leader. The v1.0.1+
+//! upgrade recovers the voter set in place and persists it durably,
+//! preferring the *actual* membership still in the retained log and only
+//! falling back to `--initial-cluster` when the log has been purged
+//! clean of it. These tests cover: the config-fallback path survives a
+//! restart, a dir that already has membership is left alone, and the
+//! retained-log scan recovers the exact on-disk voter set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openraft::storage::RaftStateMachine;
-use openraft::{BasicNode, LeaderId, LogId, Membership, StoredMembership};
+use openraft::{
+    BasicNode, Entry, EntryPayload, LeaderId, LogId, Membership, RaftLogReader, StoredMembership,
+};
 use tempfile::tempdir;
 
-use fastetcd_raft::types::NodeId;
+use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_storage::mvcc::{Mutation, MvccStore};
 use fastetcd_storage::redb_engine::RedbEngine;
-use fastetcd_storage::KvStore;
+use fastetcd_storage::{KvStore, WriteBatch, WriteOptions};
 
 async fn open_sm(path: &std::path::Path) -> (FastetcdStateMachine, MvccStore) {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(path).unwrap());
@@ -126,4 +131,65 @@ async fn does_not_touch_a_dir_that_already_has_membership() {
     }
     let (sm, _mvcc) = open_sm(&path).await;
     assert!(!sm.membership_is_empty().await);
+}
+
+/// A faithful conversion recovers the *actual* voter set from the
+/// retained raft log, not a guess from config. This writes a real
+/// `Membership` entry into the log store (as it exists on disk) and
+/// verifies the startup scan extracts exactly those voters — including
+/// a set that differs from any static config, which is the case a
+/// config-only recovery would get wrong.
+#[tokio::test]
+async fn recovers_actual_membership_from_the_retained_log() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("log.redb");
+    let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
+
+    // The live voter set diverged from bootstrap: nodes {2,3,4}, not the
+    // {1,2,3} a config might name. Write it as a Membership log entry at
+    // index 40, plus a later plain entry, exactly as the on-disk log holds.
+    let voters: BTreeSet<NodeId> = [2, 4, 3].into_iter().collect();
+    let nodes: BTreeMap<NodeId, BasicNode> = voters
+        .iter()
+        .map(|id| (*id, BasicNode::new(format!("http://10.0.0.{id}:2380"))))
+        .collect();
+    let membership_entry: Entry<TypeConfig> = Entry {
+        log_id: LogId {
+            leader_id: LeaderId::new(2, 2),
+            index: 40,
+        },
+        payload: EntryPayload::Membership(Membership::new(vec![voters.clone()], nodes)),
+    };
+    let tail_entry: Entry<TypeConfig> = Entry {
+        log_id: LogId {
+            leader_id: LeaderId::new(2, 2),
+            index: 41,
+        },
+        payload: EntryPayload::Blank,
+    };
+    let mut batch = WriteBatch::new();
+    for e in [&membership_entry, &tail_entry] {
+        batch.put(
+            "raft_log",
+            &e.log_id.index.to_be_bytes(),
+            &bincode::serialize(e).unwrap(),
+        );
+    }
+    engine.commit(batch, WriteOptions::default()).await.unwrap();
+
+    // The same scan startup performs over the retained log.
+    let mut log = KvLogStore::new(engine);
+    let mut latest: Option<StoredMembership<NodeId, BasicNode>> = None;
+    for entry in log.try_get_log_entries(0..42).await.unwrap() {
+        if let EntryPayload::Membership(m) = entry.payload {
+            latest = Some(StoredMembership::new(Some(entry.log_id), m));
+        }
+    }
+
+    let recovered = latest.expect("membership entry must be found in the retained log");
+    let got: BTreeSet<NodeId> = recovered.membership().voter_ids().collect();
+    assert_eq!(
+        got, voters,
+        "must recover the exact on-disk voter set {{2,3,4}}, not a config guess"
+    );
 }

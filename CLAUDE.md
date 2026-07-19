@@ -10,7 +10,18 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.1`** — Critical upgrade fix (#11). A rolling upgrade of a
+**`1.0.2`** — Makes the #11 upgrade a faithful in-place conversion. The
+v1.0.1 recovery rebuilt the voter set from `--initial-cluster`, which is
+only a guess if the live membership had diverged from bootstrap. v1.0.2
+first recovers the *actual* membership from the retained raft log (scans
+for the newest `Membership` entry — the true voter set as of the last
+on-disk membership change), and falls back to `--initial-cluster` only
+when the log has been purged clean of it. The startup log states which
+source was used. Standing rule going forward: any on-disk-incompatible
+change ships an automatic in-place upgrade; never tell an operator to
+wipe/rebuild.
+
+Previous: **`1.0.1`** — Critical upgrade fix (#11). A rolling upgrade of a
 long-running cluster from v0.8.2 → v1.0.0 could strand it: every member
 came up with an empty voter set and never elected a leader (MVCC data
 survived; only membership/leadership was lost). Root cause was the #9

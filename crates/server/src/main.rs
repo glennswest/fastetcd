@@ -513,6 +513,30 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let recovery_log_id = log_state.last_purged_log_id.or(log_state.last_log_id);
+
+        // A faithful conversion recovers the *actual* membership from the
+        // on-disk raft state. Scan the retained log for the newest
+        // Membership entry — that is the true voter set as of the last
+        // membership change still on disk. Only if the log has been purged
+        // clean of them do we fall back to --initial-cluster.
+        let membership_from_log: Option<
+            openraft::StoredMembership<NodeId, openraft::BasicNode>,
+        > = {
+            use openraft::RaftLogReader;
+            let lo = log_state.last_purged_log_id.map(|l| l.index + 1).unwrap_or(0);
+            let hi = log_state.last_log_id.map(|l| l.index + 1).unwrap_or(0);
+            let mut latest = None;
+            if hi > lo {
+                for entry in log.try_get_log_entries(lo..hi).await? {
+                    if let openraft::EntryPayload::Membership(m) = entry.payload {
+                        latest =
+                            Some(openraft::StoredMembership::new(Some(entry.log_id), m));
+                    }
+                }
+            }
+            latest
+        };
+
         if args.force_new_cluster {
             // Escape hatch: rebuild membership as a cluster of one (self),
             // preserving MVCC data. Operator re-adds peers afterwards.
@@ -531,21 +555,34 @@ async fn main() -> anyhow::Result<()> {
                  preserved. Re-add the other members with `member add` once up."
             );
         } else if has_data && sm.membership_is_empty().await {
-            // (#11) A legacy dir whose membership was purged from the log
-            // and never persisted. Rebuild it from --initial-cluster, the
-            // authoritative record of the intended voter set.
-            let members: std::collections::BTreeSet<NodeId> = all_members.keys().copied().collect();
-            let stored = openraft::StoredMembership::new(
-                recovery_log_id,
-                openraft::Membership::new(vec![members], all_members.clone()),
-            );
+            // (#11) Auto-upgrade a pre-v1.0.1 directory in place: recover
+            // the voter set and persist it durably in the new format,
+            // losing no data. Prefer the real membership from the retained
+            // log; fall back to config only when it is genuinely gone.
+            let (stored, source) = match membership_from_log {
+                Some(m) => (m, "retained raft log (exact)"),
+                None => {
+                    let members: std::collections::BTreeSet<NodeId> =
+                        all_members.keys().copied().collect();
+                    (
+                        openraft::StoredMembership::new(
+                            recovery_log_id,
+                            openraft::Membership::new(vec![members], all_members.clone()),
+                        ),
+                        "--initial-cluster (log purged clean of membership; best effort)",
+                    )
+                }
+            };
+            let voters: Vec<NodeId> = stored.membership().voter_ids().collect();
             sm.recover_membership(stored).await?;
             tracing::warn!(
-                voters = ?all_members.keys().collect::<Vec<_>>(),
-                "recovered raft membership from --initial-cluster for a data directory \
-                 that predates durable membership (fastetcd#11 upgrade). If the cluster's \
-                 membership had diverged from --initial-cluster, reconcile with \
-                 `member add`/`member remove` after startup, or use --force-new-cluster."
+                source,
+                ?voters,
+                "upgraded a pre-v1.0.1 data directory in place: recovered raft \
+                 membership and persisted it durably (fastetcd#11). MVCC data preserved. \
+                 If recovery used --initial-cluster and the live membership had since \
+                 diverged, reconcile with `member add`/`member remove`, or restart one \
+                 surviving member with --force-new-cluster."
             );
         }
 
