@@ -582,18 +582,35 @@ async fn main() -> anyhow::Result<()> {
     {
         // Safety backup before a newer version touches the data (#backup):
         // take it before recovery writes anything, while we hold the lock.
+        //
+        // Best-effort by design: a backup copies the whole db, so it can
+        // fail (no disk space for a second copy, an unwritable backups
+        // dir) in situations where normal operation would be fine. That
+        // must never stop the node from starting — otherwise a failed
+        // safety net crash-loops the control plane, the exact opposite of
+        // its purpose. Log loudly and continue.
         if args.upgrade_backup {
             let backup_dir = args
                 .upgrade_backup_dir
                 .clone()
                 .unwrap_or_else(|| args.data_dir.join("backups"));
-            fastetcd_server::admin::backup_before_version(
+            if let Err(e) = fastetcd_server::admin::backup_before_version(
                 sm.mvcc(),
                 &args.data_dir,
                 &backup_dir,
                 env!("CARGO_PKG_VERSION"),
             )
-            .await?;
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    backup_dir = %backup_dir.display(),
+                    "pre-version safety backup FAILED — starting anyway. Free space or \
+                     fix permissions on the backup directory, or set \
+                     FASTETCD_UPGRADE_BACKUP=false to skip it. Take a manual backup with \
+                     `fastetcd backup --out <path>` when the node is stopped."
+                );
+            }
         }
 
         // In-place upgrade / recovery (#9, #11), shared with `fsck --repair`.

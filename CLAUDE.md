@@ -10,7 +10,17 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.3`** — Data-directory safety toolkit, so an upgrade can never
+**`1.0.4`** — Startup-robustness fix. In v1.0.3 the automatic
+pre-version safety backup was fatal: `backup_before_version(...).await?`
+meant that if the backup copy failed — no disk space for a second copy
+of a large db, an unwritable/misowned `backups/` dir — fastetcd exited
+and systemd crash-looped it, so a *failed safety net* could take a
+control-plane node down (the opposite of its purpose). The backup is now
+best-effort: on failure it logs an error with the remedy (free space /
+fix permissions / `FASTETCD_UPGRADE_BACKUP=false`) and the node starts
+anyway. Nothing else about the backup changed.
+
+Previous: **`1.0.3`** — Data-directory safety toolkit, so an upgrade can never
 be a one-way door. (1) **Automatic pre-version backup**: the fastetcd
 version that last opened a data dir is recorded in `mvcc_meta`; on
 startup, if the running binary is a different version and there is data,

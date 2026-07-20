@@ -156,3 +156,24 @@ async fn no_startup_backup_for_an_empty_dir() {
         "an empty directory has nothing to back up"
     );
 }
+
+#[tokio::test]
+async fn a_failed_backup_surfaces_an_error_so_startup_can_continue() {
+    let dir = tempdir().unwrap();
+    seed(dir.path(), 2).await;
+
+    let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(admin::data_file(dir.path())).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    mvcc.write_open_version("1.0.3").await.unwrap();
+
+    // Put a regular file where the backup *directory* should be, so
+    // create_dir_all fails — the same class of failure as a read-only or
+    // full disk. backup_before_version must return the error rather than
+    // panic; startup logs it and continues (verified by the functional
+    // upgrade test).
+    let blocked = dir.path().join("blocked-backups");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+
+    let res = admin::backup_before_version(&mvcc, dir.path(), &blocked, "1.0.4").await;
+    assert!(res.is_err(), "a backup that cannot be written must surface an error");
+}
