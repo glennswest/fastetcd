@@ -78,20 +78,34 @@ pub async fn recover_data_dir(
 
     let recovery_log_id = log_state.last_purged_log_id.or(log_state.last_log_id);
 
-    // Prefer the actual membership still in the retained log.
-    let membership_from_log: Option<StoredMembership<NodeId, BasicNode>> = {
-        let lo = log_state.last_purged_log_id.map(|l| l.index + 1).unwrap_or(0);
-        let hi = log_state.last_log_id.map(|l| l.index + 1).unwrap_or(0);
-        let mut latest = None;
-        if hi > lo {
-            for entry in log.try_get_log_entries(lo..hi).await? {
-                if let EntryPayload::Membership(m) = entry.payload {
-                    latest = Some(StoredMembership::new(Some(entry.log_id), m));
+    // Recover the real voter set from the retained log — but ONLY when we
+    // actually need it (membership is empty), and bounded to a window near
+    // the tip so we never materialize a huge log. A healthy cluster has a
+    // non-empty membership and must never pay this scan on startup; doing
+    // it unconditionally over a large un-purged log was part of the #13
+    // startup hang. Membership entries are near cluster events, so the
+    // newest one is in the recent tail; older ones (bootstrap) live in the
+    // purged prefix and are covered by the --initial-cluster fallback.
+    let need_membership_recovery =
+        !force_new_cluster && has_data && sm.membership_is_empty().await;
+    let membership_from_log: Option<StoredMembership<NodeId, BasicNode>> =
+        if need_membership_recovery {
+            const WINDOW: u64 = 20_000;
+            let hi = log_state.last_log_id.map(|l| l.index + 1).unwrap_or(0);
+            let lo_floor = log_state.last_purged_log_id.map(|l| l.index + 1).unwrap_or(0);
+            let lo = lo_floor.max(hi.saturating_sub(WINDOW));
+            let mut latest = None;
+            if hi > lo {
+                for entry in log.try_get_log_entries(lo..hi).await? {
+                    if let EntryPayload::Membership(m) = entry.payload {
+                        latest = Some(StoredMembership::new(Some(entry.log_id), m));
+                    }
                 }
             }
-        }
-        latest
-    };
+            latest
+        } else {
+            None
+        };
 
     if force_new_cluster {
         let node = all_members.get(&node_id).cloned().unwrap_or_default();
@@ -106,7 +120,7 @@ pub async fn recover_data_dir(
             "--force-new-cluster: rebuilt single-node membership; MVCC data \
              preserved. Re-add the other members with `member add` once up."
         );
-    } else if has_data && sm.membership_is_empty().await {
+    } else if need_membership_recovery {
         let (stored, source) = match membership_from_log {
             Some(m) => (m, "retained raft log (exact)"),
             None => {

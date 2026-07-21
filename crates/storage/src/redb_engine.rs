@@ -241,6 +241,28 @@ impl Snapshot for RedbSnapshot {
         .await
         .map_err(|e| StorageError::Io(Box::new(e)))?
     }
+
+    /// Efficient last-row lookup via redb's B-tree, so reading the tail of
+    /// a large table (e.g. the Raft log at startup) is O(log n) and does
+    /// not materialize every value (fastetcd#13).
+    async fn last(&self, table: &str) -> StorageResult<Option<(Vec<u8>, Vec<u8>)>> {
+        let txn = self.txn.clone();
+        let table = table.to_string();
+        task::spawn_blocking(move || -> StorageResult<Option<(Vec<u8>, Vec<u8>)>> {
+            let t = match txn.open_table(RedbEngine::table_def(&table)) {
+                Ok(t) => t,
+                Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+                Err(e) => return Err(StorageError::io(e)),
+            };
+            let out = t
+                .last()
+                .map_err(StorageError::io)?
+                .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()));
+            Ok(out)
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?
+    }
 }
 
 fn bound_ref(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
@@ -298,5 +320,26 @@ mod tests {
     async fn conformance_count() {
         let (_dir, eng) = open_temp();
         conformance::count_matches_range_len(&eng).await;
+    }
+
+    #[tokio::test]
+    async fn last_returns_the_max_key_without_scanning_all() {
+        let (_dir, eng) = open_temp();
+        // Empty table → None.
+        let snap = eng.snapshot().await.unwrap();
+        assert!(snap.last("t").await.unwrap().is_none());
+        drop(snap);
+
+        // Insert keys out of order; last() must return the largest key.
+        let mut b = WriteBatch::new();
+        for i in [5u32, 1, 9, 3, 7] {
+            b.put("t", &i.to_be_bytes(), format!("v{i}").as_bytes());
+        }
+        eng.commit(b, WriteOptions::default()).await.unwrap();
+
+        let snap = eng.snapshot().await.unwrap();
+        let (k, v) = snap.last("t").await.unwrap().expect("non-empty");
+        assert_eq!(k, 9u32.to_be_bytes().to_vec());
+        assert_eq!(v, b"v9".to_vec());
     }
 }

@@ -10,7 +10,23 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.4`** — Startup-robustness fix. In v1.0.3 the automatic
+**`1.0.5`** — Startup no longer loads the whole raft log into RAM (#13,
+the acute half). On the g8 3-master cluster every member hung right
+after the "starting" line — the peer port (:2380) never opened, so no
+election, no quorum, control plane down. Cause: `get_log_state` (called
+by openraft on every startup) did `range(Unbounded, Unbounded)` over
+`raft_log`, materializing all ~93k un-purged entries (2.1 GB) just to
+read the last one. Added `Snapshot::last` (an O(log n) reverse B-tree
+lookup in redb; a slow default for other engines) and used it in
+`get_log_state`. Also gated + windowed the #11 membership-recovery log
+scan so a healthy cluster never scans the log on startup and a legacy
+recovery scan is bounded to the last 20k entries. Startup is now bounded
+regardless of log size. NOTE: this fixes *restart*; it does not stop the
+log from growing — that's the snapshot/purge work below (still needed
+for 24/7 operation, since fastetcd's whole-DB in-RAM snapshot build
+stalls at scale, which is why the log reached 93k).
+
+Previous: **`1.0.4`** — Startup-robustness fix. In v1.0.3 the automatic
 pre-version safety backup was fatal: `backup_before_version(...).await?`
 meant that if the backup copy failed — no disk space for a second copy
 of a large db, an unwritable/misowned `backups/` dir — fastetcd exited

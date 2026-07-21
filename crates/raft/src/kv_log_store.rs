@@ -111,16 +111,17 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             .snapshot()
             .await
             .map_err(|e| io_err(ErrorVerb::Read, e))?;
-        // last_log_id: highest entry in raft_log.
-        let entries = snap
-            .range(TABLE_LOG, Bound::Unbounded, Bound::Unbounded, 0)
+        // last_log_id: the highest-index entry in raft_log. Read only the
+        // last row — a full range scan here loads the entire (possibly
+        // huge, un-purged) log into RAM on every startup, which hangs the
+        // node before it can bind its peer port (fastetcd#13).
+        let last = snap
+            .last(TABLE_LOG)
             .await
-            .map_err(|e| io_err(ErrorVerb::Read, e))?;
-        let last = entries
-            .last()
+            .map_err(|e| io_err(ErrorVerb::Read, e))?
             .map(|(_, bytes)| -> Result<LogId<NodeId>, StorageError<NodeId>> {
                 let e: Entry<TypeConfig> =
-                    bincode::deserialize(bytes).map_err(|err| io_err(ErrorVerb::Read, err))?;
+                    bincode::deserialize(&bytes).map_err(|err| io_err(ErrorVerb::Read, err))?;
                 Ok(e.log_id)
             })
             .transpose()?;

@@ -191,6 +191,22 @@ pub trait Snapshot: Send + Sync {
         start: Bound<Vec<u8>>,
         end: Bound<Vec<u8>>,
     ) -> StorageResult<u64>;
+
+    /// Return the entry with the largest key in `table`, or `None` if the
+    /// table is empty.
+    ///
+    /// The default materializes the whole table and takes the last row —
+    /// engines should override this with a reverse/last B-tree lookup.
+    /// The Raft log store depends on the override: it reads the last log
+    /// entry on every startup, and a log that has grown to tens of
+    /// thousands of entries otherwise loads gigabytes into RAM before the
+    /// node can bind its peer port and hold an election (fastetcd#13).
+    async fn last(&self, table: &str) -> StorageResult<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self
+            .range(table, Bound::Unbounded, Bound::Unbounded, 0)
+            .await?
+            .pop())
+    }
 }
 
 /// The top-level storage engine trait. Implementations are expected to
