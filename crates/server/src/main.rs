@@ -200,6 +200,14 @@ struct Args {
     #[arg(long, env = "FASTETCD_AUTO_COMPACTION_RETENTION", default_value_t = 0)]
     auto_compaction_retention: i64,
 
+    /// How often the auto-compaction ticker runs, in seconds.
+    #[arg(
+        long,
+        env = "FASTETCD_AUTO_COMPACTION_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    auto_compaction_interval_secs: u64,
+
     /// (etcd compat) Per-request quota in bytes.
     #[arg(long, env = "FASTETCD_QUOTA_BACKEND_BYTES")]
     quota_backend_bytes: Option<i64>,
@@ -685,7 +693,7 @@ async fn main() -> anyhow::Result<()> {
         server_state.clone(),
         fastetcd_server::compaction::Mode::Revision,
         args.auto_compaction_retention,
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_secs(args.auto_compaction_interval_secs.max(1)),
     ) {
         tracing::info!(
             retention = args.auto_compaction_retention,
