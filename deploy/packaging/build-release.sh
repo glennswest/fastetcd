@@ -22,6 +22,7 @@ mkdir -p "dist/$dir"
 cp target/x86_64-unknown-linux-musl/release/fastetcd \
    target/x86_64-unknown-linux-musl/release/fastetcd-ctl \
    target/x86_64-unknown-linux-musl/release/fastetcd-migrate \
+   target/x86_64-unknown-linux-musl/release/fastetcd-bench \
    deploy/systemd/fastetcd.service \
    deploy/systemd/fastetcd.conf.example \
    README.md \

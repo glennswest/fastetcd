@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.6`** — Bounded memory + log-size management (#13, the sustaining
+**`1.0.7`** — Tooling release: ships `fastetcd-bench`, a small concurrent
+gRPC load generator (put / linearizable-get / serializable-get,
+throughput + latency percentiles), now bundled in the release tarball
+(work-plan #14). No server/behavior change from 1.0.6. Reference numbers
+on 8-core/15G/SSD, single node, 256B values: put ~5.2k ops/s (p50 11ms,
+fsync-bound), linearizable get ~61k ops/s (p50 0.9ms), serializable get
+~57k ops/s; RSS flat at ~274 MB. Follower serializable reads ~64k ops/s.
+
+Previous: **`1.0.6`** — Bounded memory + log-size management (#13, the sustaining
 half). Four changes so a node's memory and raft log stay bounded 24/7
 regardless of data size, and snapshot+purge keeps up instead of
 stalling:
