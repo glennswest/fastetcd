@@ -237,28 +237,13 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Delete entries with index >= log_id.index.
-        let snap = self
-            .engine
-            .snapshot()
-            .await
-            .map_err(|e| io_err(ErrorVerb::Write, e))?;
-        let rows = snap
-            .range(
-                TABLE_LOG,
-                Bound::Included(idx_key(log_id.index).to_vec()),
-                Bound::Unbounded,
-                0,
-            )
-            .await
-            .map_err(|e| io_err(ErrorVerb::Write, e))?;
-        if rows.is_empty() {
-            return Ok(());
-        }
+        // Delete entries with index >= log_id.index via a range delete,
+        // so we never load the (possibly large) tail into RAM (#13).
+        // `[0xFF; 9]` is greater than any 8-byte index key, so the range
+        // covers [index, end).
+        let start = idx_key(log_id.index).to_vec();
         let mut batch = WriteBatch::new();
-        for (k, _) in rows {
-            batch.delete(TABLE_LOG, &k);
-        }
+        batch.delete_range(TABLE_LOG, &start, &[0xFFu8; 9]);
         self.engine
             .commit(batch, WriteOptions::default())
             .await
@@ -267,26 +252,15 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Delete entries with index <= log_id.index AND record the
-        // new last_purged_log_id.
-        let snap = self
-            .engine
-            .snapshot()
-            .await
-            .map_err(|e| io_err(ErrorVerb::Write, e))?;
-        let rows = snap
-            .range(
-                TABLE_LOG,
-                Bound::Unbounded,
-                Bound::Included(idx_key(log_id.index).to_vec()),
-                0,
-            )
-            .await
-            .map_err(|e| io_err(ErrorVerb::Write, e))?;
+        // Delete entries with index <= log_id.index via a range delete
+        // (bounded memory — the whole purged prefix was previously loaded
+        // into RAM, which is a large part of the #13 blowup) and record
+        // the new last_purged_log_id. `end` is one byte past the target
+        // key, so the exclusive range [empty, end) includes index.
+        let mut end = idx_key(log_id.index).to_vec();
+        end.push(0);
         let mut batch = WriteBatch::new();
-        for (k, _) in rows {
-            batch.delete(TABLE_LOG, &k);
-        }
+        batch.delete_range(TABLE_LOG, &[], &end);
         let bytes = bincode::serialize(&log_id).map_err(|e| io_err(ErrorVerb::Write, e))?;
         batch.put(TABLE_META, META_LAST_PURGED, &bytes);
         self.engine

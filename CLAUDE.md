@@ -10,7 +10,28 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.5`** — Startup no longer loads the whole raft log into RAM (#13,
+**`1.0.6`** — Bounded memory + log-size management (#13, the sustaining
+half). Four changes so a node's memory and raft log stay bounded 24/7
+regardless of data size, and snapshot+purge keeps up instead of
+stalling:
+- **Snapshots live on disk, not RAM.** The state machine used to hold
+  the entire serialized database as a `Vec` in `current_snapshot` (why
+  an idle node sat at gigabytes) and lost it on restart (why purge
+  stalled). Now the body is written to `<data-dir>/snapshots/current.snap`
+  and only the small `SnapshotMeta` is kept in memory; it's reloaded on
+  restart so openraft can purge the log immediately.
+- **Bounded log purge.** `purge`/`truncate` used a range read that loaded
+  the whole purged prefix (key+value) into RAM — a large part of the
+  2.1 GB. They now use a `delete_range` (keys only).
+- **Auto-compaction** (opt-in, `--auto-compaction-retention <revs>`,
+  revision mode): a leader-side ticker proposes `Compact` through Raft
+  to bound MVCC history, and therefore snapshot cost. Off by default —
+  under Kubernetes the apiserver drives compaction itself.
+- **Tunable snapshot policy**: `--snapshot-count` (default 5000) and
+  `--max-in-snapshot-log-to-keep` (default 1000) now configure openraft's
+  snapshot/purge, matching etcd's `--snapshot-count`.
+
+Previous: **`1.0.5`** — Startup no longer loads the whole raft log into RAM (#13,
 the acute half). On the g8 3-master cluster every member hung right
 after the "starting" line — the peer port (:2380) never opened, so no
 election, no quorum, control plane down. Cause: `get_log_state` (called

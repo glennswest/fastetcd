@@ -47,7 +47,7 @@ fn put_entry(index: u64, key: &str, value: &str) -> Entry<TypeConfig> {
 async fn open_sm(path: &std::path::Path) -> (FastetcdStateMachine, MvccStore) {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(path).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc.clone()).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc.clone(), path.parent().unwrap().join("snapshots")).await.unwrap();
     (sm, mvcc)
 }
 
@@ -166,4 +166,35 @@ async fn installed_snapshot_survives_restart() {
         Some(log_id(1, 10)),
         "the installed applied position must be persisted, not just in memory"
     );
+}
+
+/// #13 memory + purge-resume: a built snapshot must live on disk (not be
+/// held in RAM) and survive a restart, so openraft can purge the log
+/// against it immediately after a restart instead of stalling.
+#[tokio::test]
+async fn snapshot_persists_to_disk_and_survives_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.redb");
+    let snap_file = path.parent().unwrap().join("snapshots").join("current.snap");
+
+    {
+        let (mut sm, _mvcc) = open_sm(&path).await;
+        sm.apply(vec![put_entry(1, "a", "1"), put_entry(2, "b", "2")])
+            .await
+            .unwrap();
+        let s = sm.get_snapshot_builder().await.build_snapshot().await.unwrap();
+        assert_eq!(s.meta.last_log_id.map(|l| l.index), Some(2));
+    }
+    assert!(snap_file.exists(), "snapshot body must be persisted to disk");
+
+    // Reopen (simulated restart): the snapshot must still be available.
+    {
+        let (mut sm, _mvcc) = open_sm(&path).await;
+        let cur = sm
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("snapshot must survive restart so purge can resume");
+        assert_eq!(cur.meta.last_log_id.map(|l| l.index), Some(2));
+    }
 }

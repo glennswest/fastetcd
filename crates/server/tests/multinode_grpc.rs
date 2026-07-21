@@ -47,7 +47,7 @@ async fn start_node(
     let path = dir.path().join("data.redb");
     let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc, dir.path().join("snapshots")).await.unwrap();
     let log = KvLogStore::new(engine);
 
     let config = Arc::new(

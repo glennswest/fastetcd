@@ -18,6 +18,7 @@ pub mod admin;
 pub mod auth;
 pub mod authz;
 pub mod cluster;
+pub mod compaction;
 pub mod conv;
 pub mod kv;
 pub mod lease;

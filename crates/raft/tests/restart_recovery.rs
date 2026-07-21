@@ -52,7 +52,7 @@ where
 {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(path).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc.clone()).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc.clone(), path.parent().unwrap().join("snapshots")).await.unwrap();
     f(sm, mvcc).await
 }
 

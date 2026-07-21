@@ -176,11 +176,29 @@ struct Args {
     // can launch without error; the values are logged but not
     // otherwise consumed (yet).
     //
-    /// (etcd compat) Snapshot frequency in committed entries.
-    /// Not yet honored by fastetcd; openraft handles snapshotting
-    /// based on its own configuration.
-    #[arg(long, env = "FASTETCD_SNAPSHOT_COUNT")]
-    snapshot_count: Option<u64>,
+    /// Take a raft snapshot (and then purge the log) every N applied
+    /// entries. Lower keeps the log smaller; higher lets a lagging
+    /// follower catch up from the log instead of a snapshot. Matches
+    /// etcd's `--snapshot-count`.
+    #[arg(long, env = "FASTETCD_SNAPSHOT_COUNT", default_value_t = 5000)]
+    snapshot_count: u64,
+
+    /// Number of already-snapshotted log entries to retain after a
+    /// purge (a catch-up buffer for followers just behind the snapshot).
+    #[arg(
+        long,
+        env = "FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP",
+        default_value_t = 1000
+    )]
+    max_in_snapshot_log_to_keep: u64,
+
+    /// Auto-compaction retention, in revisions. Keeps the most recent N
+    /// key revisions and compacts older history, bounding the MVCC store
+    /// (and therefore snapshot cost). `0` disables it (the default) —
+    /// under Kubernetes the apiserver drives compaction itself. Matches
+    /// etcd's `--auto-compaction-retention` in `revision` mode.
+    #[arg(long, env = "FASTETCD_AUTO_COMPACTION_RETENTION", default_value_t = 0)]
+    auto_compaction_retention: i64,
 
     /// (etcd compat) Per-request quota in bytes.
     #[arg(long, env = "FASTETCD_QUOTA_BACKEND_BYTES")]
@@ -475,9 +493,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Log the no-op compat flags we received so operators can see
     // them in startup output even though we don't act on them.
-    if let Some(v) = &args.snapshot_count {
-        tracing::debug!(snapshot_count = v, "etcd-compat flag accepted (no-op)");
-    }
     if let Some(v) = &args.quota_backend_bytes {
         tracing::debug!(quota_backend_bytes = v, "etcd-compat flag accepted (no-op)");
     }
@@ -505,14 +520,20 @@ async fn main() -> anyhow::Result<()> {
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
     let mvcc = MvccStore::open(engine.clone()).await?;
-    let sm = FastetcdStateMachine::open(mvcc).await?;
+    let sm = FastetcdStateMachine::open(mvcc, args.data_dir.join("snapshots")).await?;
     let mut log = KvLogStore::new(engine);
 
+    // Snapshot + purge is what bounds the raft log: openraft snapshots
+    // every `snapshot_count` applied entries and then purges the log,
+    // keeping only `max_in_snapshot_log_to_keep`. Exposed so operators
+    // can tune the log-size vs follower-catch-up tradeoff (#13).
     let config = Arc::new(
         Config {
             heartbeat_interval: 250,
             election_timeout_min: 1000,
             election_timeout_max: 2000,
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(args.snapshot_count),
+            max_in_snapshot_log_to_keep: args.max_in_snapshot_log_to_keep,
             ..Default::default()
         }
         .validate()
@@ -660,6 +681,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());
+    if let Some(_h) = fastetcd_server::compaction::spawn(
+        server_state.clone(),
+        fastetcd_server::compaction::Mode::Revision,
+        args.auto_compaction_retention,
+        std::time::Duration::from_secs(300),
+    ) {
+        tracing::info!(
+            retention = args.auto_compaction_retention,
+            "MVCC auto-compaction enabled (revision mode)"
+        );
+    }
 
     // Metrics endpoint (Prometheus /metrics).
     if !args.listen_metrics_url.trim().is_empty() {

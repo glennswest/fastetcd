@@ -282,7 +282,7 @@ pub async fn cmd_fsck(
     println!("ok    structural: {} opens", src.display());
 
     let mvcc = MvccStore::open(engine.clone()).await?;
-    let sm = FastetcdStateMachine::open(mvcc.clone()).await?;
+    let sm = FastetcdStateMachine::open(mvcc.clone(), data_dir.join("snapshots")).await?;
     let mut log = KvLogStore::new(engine);
 
     let mut problems = 0u32;

@@ -31,7 +31,7 @@ use fastetcd_storage::{KvStore, WriteBatch, WriteOptions};
 async fn open_sm(path: &std::path::Path) -> (FastetcdStateMachine, MvccStore) {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(path).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc.clone()).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc.clone(), path.parent().unwrap().join("snapshots")).await.unwrap();
     (sm, mvcc)
 }
 
