@@ -880,8 +880,16 @@ async fn main() -> anyhow::Result<()> {
         }
         // An unbounded MVCC history is the usual reason a bounded volume
         // fills. If the operator declared a cluster size but left
-        // compaction off, bound it: keep enough revisions to cover the
-        // apiserver's own 5-minute compaction window with room to spare.
+        // compaction off, bound it.
+        //
+        // The retention window is in revisions, but what we actually
+        // want to hold constant is *time*: node leases alone write about
+        // 6 revisions per node per minute (a 10s renewal each), so
+        // scaling retention with node count keeps roughly a fixed window
+        // regardless of cluster size. 100 revisions per node is ~16
+        // minutes at that rate — comfortably more than the apiserver's
+        // own 5-minute compaction interval, so this never fights it, and
+        // the floor keeps a tiny cluster from compacting too eagerly.
         if derived_compaction == 0 {
             derived_compaction = (args.expected_nodes as i64).saturating_mul(100).max(10_000);
             tracing::info!(
