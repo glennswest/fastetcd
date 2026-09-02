@@ -66,6 +66,16 @@ spec:
                 --client-cert-auth \
                 {{- end }}
                 {{- end }}
+                {{- with .Values.space }}
+                --quota-backend-bytes={{ .quotaBackendBytes }} \
+                --space-high-water-percent={{ .highWaterPercent }} \
+                --space-alarm-percent={{ .alarmPercent }} \
+                --space-clear-percent={{ .clearPercent }} \
+                --space-check-interval-secs={{ .checkIntervalSecs }} \
+                --space-reclaim-retention={{ .reclaimRetention }} \
+                --auto-defrag={{ .autoDefrag }} \
+                --max-snapshots={{ .maxSnapshots }} \
+                {{- end }}
                 {{- range .Values.extraArgs }}
                 {{ . }} \
                 {{- end }}

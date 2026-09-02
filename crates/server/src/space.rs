@@ -99,8 +99,13 @@ pub struct SpaceStats {
     /// Bytes in the database holding live data (`0` until a usage walk
     /// has run — it is too expensive to do on every sample).
     pub db_in_use_bytes: u64,
-    /// Size of the persisted raft snapshot.
+    /// Size of the retained raft snapshots.
     pub snapshot_bytes: u64,
+    /// Everything in the data directory: the database, the snapshots,
+    /// and anything else living beside them (upgrade safety backups,
+    /// replaced files from a restore). All of it competes for the same
+    /// volume, so all of it counts.
+    pub data_dir_bytes: u64,
     /// Size of the filesystem holding the data directory, and what is
     /// still available on it. Both `0` if the platform has no probe.
     pub fs_total_bytes: u64,
@@ -115,8 +120,15 @@ pub struct SpaceStats {
 
 impl SpaceStats {
     /// Everything the store occupies on the data volume.
+    ///
+    /// The data directory's total is the honest number — a stale
+    /// upgrade backup fills a volume exactly as well as live data does
+    /// — with the database plus snapshots as a floor for the case where
+    /// the directory scan came up short (a data dir elsewhere, an
+    /// unreadable subdirectory).
     pub fn used_bytes(&self) -> u64 {
-        self.db_bytes.saturating_add(self.snapshot_bytes)
+        self.data_dir_bytes
+            .max(self.db_bytes.saturating_add(self.snapshot_bytes))
     }
 
     /// Occupancy as a fraction of capacity, 0.0–1.0+.
@@ -135,6 +147,7 @@ pub struct SpaceGuard {
     db_bytes: AtomicU64,
     db_in_use_bytes: AtomicU64,
     snapshot_bytes: AtomicU64,
+    data_dir_bytes: AtomicU64,
     fs_total_bytes: AtomicU64,
     fs_available_bytes: AtomicU64,
     capacity_bytes: AtomicU64,
@@ -155,6 +168,7 @@ impl SpaceGuard {
             db_bytes: AtomicU64::new(0),
             db_in_use_bytes: AtomicU64::new(0),
             snapshot_bytes: AtomicU64::new(0),
+            data_dir_bytes: AtomicU64::new(0),
             fs_total_bytes: AtomicU64::new(0),
             fs_available_bytes: AtomicU64::new(0),
             capacity_bytes: AtomicU64::new(0),
@@ -208,6 +222,7 @@ impl SpaceGuard {
             db_bytes: self.db_bytes.load(Ordering::Relaxed),
             db_in_use_bytes: self.db_in_use_bytes.load(Ordering::Relaxed),
             snapshot_bytes: self.snapshot_bytes.load(Ordering::Relaxed),
+            data_dir_bytes: self.data_dir_bytes.load(Ordering::Relaxed),
             fs_total_bytes: self.fs_total_bytes.load(Ordering::Relaxed),
             fs_available_bytes: self.fs_available_bytes.load(Ordering::Relaxed),
             capacity_bytes: self.capacity_bytes.load(Ordering::Relaxed),
@@ -279,9 +294,10 @@ impl SpaceGuard {
                 self.db_bytes.load(Ordering::Relaxed)
             });
         let snapshot_bytes = state.sm.snapshot_bytes();
+        let data_dir_bytes = fastetcd_storage::fs_space::dir_size(&self.data_dir);
         let fs = fastetcd_storage::fs_space::probe(&self.data_dir);
 
-        let used = db_bytes.saturating_add(snapshot_bytes);
+        let used = data_dir_bytes.max(db_bytes.saturating_add(snapshot_bytes));
         let capacity = self.capacity_bytes(used, fs.map(|f| f.available));
         let used_ppm = if capacity == 0 {
             0
@@ -291,6 +307,7 @@ impl SpaceGuard {
 
         self.db_bytes.store(db_bytes, Ordering::Relaxed);
         self.snapshot_bytes.store(snapshot_bytes, Ordering::Relaxed);
+        self.data_dir_bytes.store(data_dir_bytes, Ordering::Relaxed);
         self.fs_total_bytes
             .store(fs.map(|f| f.total).unwrap_or(0), Ordering::Relaxed);
         self.fs_available_bytes

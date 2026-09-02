@@ -119,6 +119,13 @@ struct Args {
     #[arg(long, env = "FASTETCD_UPGRADE_BACKUP_DIR")]
     upgrade_backup_dir: Option<PathBuf>,
 
+    /// How many upgrade safety backups to keep. Each is a full copy of
+    /// the database on the same volume the database has to keep running
+    /// on, so they are rolled off oldest-first before a new one is
+    /// written.
+    #[arg(long, env = "FASTETCD_UPGRADE_BACKUP_RETAIN", default_value_t = 2)]
+    upgrade_backup_retain: usize,
+
     /// Cluster ID token (etcd compatibility — used by etcd to
     /// detect cross-cluster member confusion). Accepted; fastetcd's
     /// cluster_id flag takes precedence if both are set.
@@ -705,6 +712,7 @@ async fn main() -> anyhow::Result<()> {
                 &args.data_dir,
                 &backup_dir,
                 env!("CARGO_PKG_VERSION"),
+                args.upgrade_backup_retain.max(1),
             )
             .await
             {

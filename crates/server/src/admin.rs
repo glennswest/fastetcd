@@ -165,6 +165,7 @@ pub async fn backup_before_version(
     data_dir: &Path,
     backup_dir: &Path,
     current: &str,
+    retain: usize,
 ) -> anyhow::Result<Option<PathBuf>> {
     let stored = mvcc.read_open_version().await?;
     let has_data = mvcc.current_revision().await > 0;
@@ -173,6 +174,11 @@ pub async fn backup_before_version(
     }
     let from = stored.as_deref().unwrap_or("pre-1.0.3");
     std::fs::create_dir_all(backup_dir)?;
+    // Each backup is a full copy of the database, and it lands on the
+    // same volume the database has to keep running on. Roll the old
+    // ones off oldest-first *before* the copy, so the directory never
+    // holds more than `retain` of them even momentarily (fastetcd#14).
+    prune_backups(backup_dir, retain.saturating_sub(1));
     let dst = backup_dir.join(format!(
         "fastetcd-{}-to-{}-{}.redb",
         sanitize(from),
@@ -189,6 +195,46 @@ pub async fn backup_before_version(
          version. Restore with `fastetcd restore <path>` if the upgrade misbehaves."
     );
     Ok(Some(dst))
+}
+
+/// Keep at most `keep` upgrade safety backups, deleting the oldest
+/// first. Only files this code wrote are considered — anything an
+/// operator dropped in the directory by hand is left alone.
+pub fn prune_backups(backup_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backup_dir) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, PathBuf, u64)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with("fastetcd-") || !name.ends_with(".redb") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, path, meta.len()))
+        })
+        .collect();
+    if backups.len() <= keep {
+        return;
+    }
+    backups.sort_by_key(|(mtime, _, _)| *mtime);
+    let drop_count = backups.len() - keep;
+    for (_, path, bytes) in backups.into_iter().take(drop_count) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(
+                backup = %path.display(),
+                freed_bytes = bytes,
+                "rolled off an old upgrade safety backup"
+            ),
+            Err(e) => tracing::warn!(
+                backup = %path.display(),
+                error = %e,
+                "could not remove an old upgrade safety backup"
+            ),
+        }
+    }
 }
 
 fn sanitize(v: &str) -> String {

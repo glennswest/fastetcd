@@ -124,14 +124,14 @@ async fn backs_up_only_when_the_version_changes() {
 
     // Same version → no backup.
     assert!(
-        admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.2")
+        admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.2", 2)
             .await
             .unwrap()
             .is_none(),
         "no backup when the version is unchanged"
     );
     // Newer version → a backup is written.
-    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3")
+    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3", 2)
         .await
         .unwrap();
     assert!(made.is_some() && made.unwrap().exists(), "backup on version change");
@@ -149,7 +149,7 @@ async fn no_startup_backup_for_an_empty_dir() {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(admin::data_file(dir.path())).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
     assert!(
-        admin::backup_before_version(&mvcc, dir.path(), &dir.path().join("backups"), "1.0.3")
+        admin::backup_before_version(&mvcc, dir.path(), &dir.path().join("backups"), "1.0.3", 2)
             .await
             .unwrap()
             .is_none(),
@@ -174,6 +174,55 @@ async fn a_failed_backup_surfaces_an_error_so_startup_can_continue() {
     let blocked = dir.path().join("blocked-backups");
     std::fs::write(&blocked, b"not a directory").unwrap();
 
-    let res = admin::backup_before_version(&mvcc, dir.path(), &blocked, "1.0.4").await;
+    let res = admin::backup_before_version(&mvcc, dir.path(), &blocked, "1.0.4", 2).await;
     assert!(res.is_err(), "a backup that cannot be written must surface an error");
+}
+
+/// Upgrade safety backups are full copies of the database, written into
+/// the data directory that the database still has to run on. Without
+/// roll-off, a handful of upgrades fills a bounded volume with copies of
+/// itself (fastetcd#14).
+#[tokio::test]
+async fn upgrade_backups_are_rolled_off_oldest_first() {
+    let dir = tempdir().unwrap();
+    seed(dir.path(), 2).await;
+    let backups = dir.path().join("backups");
+
+    let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(admin::data_file(dir.path())).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+
+    let mut written = Vec::new();
+    for (i, version) in ["1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4"].iter().enumerate() {
+        mvcc.write_open_version(&format!("1.0.{i}")).await.unwrap();
+        let made = admin::backup_before_version(&mvcc, dir.path(), &backups, version, 2)
+            .await
+            .unwrap()
+            .expect("a version change writes a backup");
+        // The filename carries a whole-second timestamp; keep them
+        // distinct so the oldest-first order is unambiguous.
+        let older =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(600 - i as u64 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&made)
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+        written.push(made);
+    }
+
+    let kept: Vec<_> = std::fs::read_dir(&backups)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(kept.len(), 2, "retention keeps two backups, got {kept:?}");
+    assert!(
+        kept.contains(written.last().unwrap()),
+        "the newest backup must survive"
+    );
+    assert!(
+        !kept.contains(&written[0]),
+        "the oldest backup must be rolled off"
+    );
 }

@@ -16,3 +16,27 @@
 #ETCD_INITIAL_CLUSTER=default=http://localhost:2380
 #ETCD_INITIAL_CLUSTER_STATE=new
 #ETCD_INITIAL_CLUSTER_TOKEN=fastetcd-cluster
+
+# --- Disk space (see docs/04-disk-space.md) -------------------------
+# fastetcd measures the data volume's real free space, reclaims at the
+# high-water mark (compact -> snapshot -> purge -> defragment) and
+# raises a NOSPACE alarm at the alarm mark, where writes are refused
+# but reads, deletes, compaction and defragment keep working. The
+# defaults below need no configuration on a normally-sized volume.
+
+# Ceiling on the store's footprint. 0 (the default) means the volume
+# itself is the limit, which is the right setting for a fixed-size
+# volume.
+#ETCD_QUOTA_BACKEND_BYTES=0
+# Raft snapshots retained on disk. Each is a full copy of the database.
+#ETCD_MAX_SNAPSHOTS=1
+# Steady-state MVCC compaction, in revisions. Off by default: under
+# Kubernetes the apiserver drives its own compaction. The space
+# monitor compacts under pressure regardless.
+#ETCD_AUTO_COMPACTION_RETENTION=0
+#FASTETCD_SPACE_HIGH_WATER_PERCENT=80
+#FASTETCD_SPACE_ALARM_PERCENT=95
+#FASTETCD_SPACE_CLEAR_PERCENT=70
+#FASTETCD_SPACE_CHECK_INTERVAL_SECS=30
+#FASTETCD_SPACE_RECLAIM_RETENTION=1000
+#FASTETCD_AUTO_DEFRAG=true

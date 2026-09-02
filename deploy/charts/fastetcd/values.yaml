@@ -48,4 +48,24 @@ tls:
   caFile: ""
   clientCertAuth: false
 
+# Disk space management (see docs/04-disk-space.md). fastetcd measures
+# the PVC's real free space, reclaims at the high-water mark (compact ->
+# snapshot -> purge -> defragment) and raises a NOSPACE alarm at the
+# alarm mark, where writes are refused but reads, deletes, compaction
+# and defragment keep working. Defaults suit a normally-sized volume;
+# tighten highWaterPercent on a small one so reclaim starts earlier.
+space:
+  # Ceiling on the store's footprint in bytes. 0 = the volume is the
+  # limit, which is what you want with `persistence.size` set.
+  quotaBackendBytes: 0
+  highWaterPercent: 80
+  alarmPercent: 95
+  clearPercent: 70
+  checkIntervalSecs: 30
+  # Revisions of MVCC history kept when compacting under pressure.
+  reclaimRetention: 1000
+  autoDefrag: true
+  # Snapshots retained on disk. Each is a full copy of the database.
+  maxSnapshots: 1
+
 extraArgs: []     # extra CLI flags passed verbatim to fastetcd
