@@ -173,7 +173,8 @@ strategy.
   `etcdctl`); etcd-io/etcd's robustness suite (out-of-tree
   follow-up); Jepsen; Kubernetes e2e.
 
-Current count: 100+ tests pass workspace-wide.
+Current count: 151 tests pass workspace-wide (on Linux; a few are
+Linux-only, so a macOS run reports fewer).
 
 ## Disk space
 
@@ -192,8 +193,20 @@ fastetcd-ctl alarm           # list raised alarms
 fastetcd defrag --data-dir … # offline escape hatch; works on a full volume
 ```
 
-See `docs/04-disk-space.md` for the flags, metrics and recovery
-procedures.
+Size the volume against the cluster, not against the data — a raft
+snapshot is a full copy of the database, so the volume runs roughly 10x
+the live Kubernetes objects:
+
+```bash
+fastetcd sizing --nodes 100     # prints the arithmetic, not just a number
+```
+
+At default pod density: 512 MiB for 1-10 nodes, 1 GiB at 100, 2 GiB at
+500, 4 GiB at 1000. `--expected-nodes N` makes the server run the same
+check against its real volume at startup.
+
+See `docs/04-disk-space.md` for the flags, metrics, sizing model and
+recovery procedures.
 
 ## Deployment
 
