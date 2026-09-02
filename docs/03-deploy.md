@@ -175,6 +175,32 @@ Each node calls `raft.initialize` with the same member set;
 openraft elects a leader among them. After bootstrap, `MemberAdd`
 adds new nodes; `MemberRemove` removes them.
 
+## Disk space
+
+fastetcd sizes itself against the volume it is on, not against a
+configured quota: it samples the data directory and the filesystem's
+real free space, reclaims at a high-water mark (compact → raft snapshot
+→ log purge → defragment) and raises etcd's `NOSPACE` alarm at a higher
+mark, where writes are refused but reads, deletes, compaction and
+defragment keep working.
+
+The defaults need no configuration on a normally-sized volume. On a
+small one (a few hundred MB or less), lower `--space-high-water-percent`
+so reclaim starts earlier, and keep `--max-snapshots 1` — a snapshot is
+a full copy of the database.
+
+If a volume has already filled and the server can no longer do anything,
+stop it and defragment offline:
+
+```
+systemctl stop fastetcd
+fastetcd defrag --data-dir /var/lib/fastetcd
+systemctl start fastetcd
+```
+
+Full details, flags, metrics and recovery procedures:
+`docs/04-disk-space.md`.
+
 ## Backups
 
 ```
