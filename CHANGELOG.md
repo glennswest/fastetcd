@@ -61,6 +61,23 @@
 - `--quota-backend-bytes` is no longer a no-op compat flag.
 
 ### Fixed
+- **storage (#14):** `usage()` reported redb's `stored_bytes` — the key
+  and value payload — as bytes in use, rather than the pages holding
+  them. A store full of live 4 KiB values looked three-quarters empty,
+  so `Status`, `/metrics` and `fastetcd defrag` told an operator 22 MB
+  was recoverable from a store where a defragment freed nothing. Now
+  `allocated_pages * page_size`, matching etcd's `dbSizeInUse`
+  semantics. (redb releases a delete's pages on a later commit, so the
+  figure lags a large delete by a commit or two; the reclaim path
+  compacts before it measures.)
+- **storage (#14):** an online defragment failed outright with "a
+  transaction is still in progress" on any loaded node. redb refuses to
+  compact while a read transaction is live, and a snapshot holds one for
+  as long as its caller does — long after the lock used to create it was
+  released — so under steady traffic one essentially always was.
+  Defragment now takes the engine's exclusive lock (stopping new
+  snapshots) and waits for the outstanding readers to drain, with a 30s
+  timeout that names the reader count and points at the offline path.
 - **#14:** a full data volume wedged the store in both directions —
   every read failed at the linearizable barrier behind a pending
   snapshot write, every write failed at the same place, and the one
