@@ -22,9 +22,23 @@ Four things accumulate, and only the first is your data:
 
 A store can therefore be mostly empty and still occupy the whole volume:
 deleting every key frees pages inside the file without returning a byte
-to the filesystem. `dbSize` (the file) and `dbSizeInUse` (the live data
-in it) are reported separately for exactly this reason, and the gap
-between them is what a defragment would hand back.
+to the filesystem. `dbSize` (the file) and `dbSizeInUse` (the pages
+actually held) are reported separately for exactly this reason.
+
+The gap between them is an **upper bound** on what a defragment can
+return, not a promise. The allocator can usually only give back whole
+regions at the end of the file, so a store whose live pages are spread
+across it frees less — sometimes nothing. Read the figure as "is a
+defragment worth the pause", never as "I will get this many bytes".
+Two related things to know:
+
+- Deleting a lot of keys does not immediately move bytes from
+  `dbSizeInUse` to the gap: the engine releases those pages on a later
+  commit. The figure catches up within a commit or two, which is why the
+  reclaim path compacts *before* it measures.
+- If a defragment frees nothing, the live data itself is what fills the
+  volume. Compact history to turn live pages into free ones, then
+  defragment again.
 
 ## Why running out is a deadlock, not a slowdown
 
@@ -113,7 +127,7 @@ have the room and want older copies as a safety net.
 
 ```
 etcd_mvcc_db_total_size_in_bytes           # the file
-etcd_mvcc_db_total_size_in_use_in_bytes    # live data inside it
+etcd_mvcc_db_total_size_in_use_in_bytes    # pages actually held
 etcd_server_quota_backend_bytes            # effective capacity
 fastetcd_store_snapshot_size_in_bytes      # retained snapshots
 fastetcd_disk_total_bytes                  # the volume
@@ -146,6 +160,13 @@ fastetcd-ctl alarm --disarm            # clear (re-raised if still over)
 
 `etcdctl` works for all of these too — `endpoint status`, `compact`,
 `defrag`, `alarm list`, `alarm disarm`.
+
+A defragment on a busy node does not fail: it stops handing out new
+read snapshots, waits up to 30 seconds for the in-flight ones to finish,
+then compacts. Writes continue during that wait — blocking them would
+deadlock, since an apply holds its read snapshot across its own commit.
+If a scan or watch holds a snapshot open past the timeout, the error
+says so and points at the offline path below.
 
 **When the volume is already full** and the server can no longer do
 anything, stop it and defragment offline:
