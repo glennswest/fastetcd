@@ -42,6 +42,12 @@ use tonic::Status;
 
 use crate::state::ServerState;
 
+/// How stale a live-bytes measurement may be before it is recomputed.
+/// The measurement walks the whole database, so it runs on the monitor's
+/// own schedule rather than on any request path; `Maintenance.Status`
+/// and `/metrics` read whatever the monitor last recorded.
+pub const IN_USE_MAX_AGE: Duration = Duration::from_secs(300);
+
 /// Message etcd returns when a write is refused for lack of space.
 /// Client libraries match on this text, so keep it verbatim.
 pub const ERR_NO_SPACE: &str = "etcdserver: mvcc: database space exceeded";
@@ -381,6 +387,12 @@ pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
         loop {
             tick.tick().await;
             let stats = guard.refresh(&state).await;
+            // Keep the live-bytes number fresh enough to report, on the
+            // monitor's schedule — the walk is O(database), so no
+            // request path should ever trigger it.
+            guard
+                .in_use_bytes(state.sm.mvcc().engine(), IN_USE_MAX_AGE)
+                .await;
             let high_ppm = pct_ppm(cfg.high_water_percent);
             if stats.capacity_bytes == 0 || stats.used_ppm < high_ppm {
                 continue;

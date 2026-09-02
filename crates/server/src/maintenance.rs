@@ -40,11 +40,6 @@ use crate::state::{response_header, ServerState};
 /// `dbSizeInUse` reporting and metrics, not the wire response.
 const ETCD_COMPAT_VERSION: &str = "3.6.0";
 
-/// How stale a `dbSizeInUse` measurement may be before `Status`
-/// recomputes it. Monitoring scrapes `endpoint status` on a short
-/// interval; the underlying walk is O(database), so it must not run on
-/// every call.
-const IN_USE_MAX_AGE_SECS: u64 = 60;
 
 #[derive(Clone)]
 pub struct MaintenanceService {
@@ -131,15 +126,14 @@ impl Maintenance for MaintenanceService {
         // The gap between them is what a defragment would return to the
         // filesystem, and it is the number an operator needs to decide
         // whether defragmenting is worth the pause. Measuring it walks
-        // the whole database, so it is rate-limited behind a cache.
+        // the whole database, so it is rate-limited behind a cache the
+        // space monitor keeps warm — monitoring can scrape `endpoint
+        // status` as often as it likes without paying for the walk.
         let space = self.state.space.clone();
         let stats = space.refresh(&self.state).await;
         let db_size_in_use = if space.is_enabled() {
             space
-                .in_use_bytes(
-                    self.state.sm.mvcc().engine(),
-                    std::time::Duration::from_secs(IN_USE_MAX_AGE_SECS),
-                )
+                .in_use_bytes(self.state.sm.mvcc().engine(), crate::space::IN_USE_MAX_AGE)
                 .await
         } else {
             db_size

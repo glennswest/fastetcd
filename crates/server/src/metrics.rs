@@ -203,6 +203,8 @@ impl Metrics {
             self.quota_backend_bytes.set(stats.capacity_bytes as i64);
             self.space_used_ratio.set(stats.used_ratio());
             self.nospace_alarm.set(if stats.nospace { 1 } else { 0 });
+            // Live bytes come from the space monitor's cache — the
+            // measurement is O(database) and must not run on a scrape.
             self.db_size_in_use_bytes.set(stats.db_in_use_bytes as i64);
         }
     }
