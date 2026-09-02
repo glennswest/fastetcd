@@ -428,6 +428,47 @@ mod tests {
         );
     }
 
+    /// The gap between `file_bytes` and `in_use_bytes` is advertised to
+    /// operators as "what a defragment would give back", and the space
+    /// monitor uses it to decide whether the pause is worth it. So it
+    /// must not over-promise: a store that is genuinely full of live
+    /// data has to report ~nothing reclaimable, even though its logical
+    /// key+value bytes are a fraction of the file (fastetcd#14 — the
+    /// first cut used redb's `stored_bytes`, which measures the payload
+    /// rather than the pages holding it, and told an operator 22 MB was
+    /// recoverable from a store where a defragment freed zero).
+    #[tokio::test]
+    async fn reclaimable_bytes_does_not_over_promise_on_live_data() {
+        let (_dir, eng) = open_temp();
+        let value = vec![9u8; 4096];
+        for chunk in 0..16u32 {
+            let mut b = WriteBatch::new();
+            for i in 0..64u32 {
+                b.put("live", &(chunk * 64 + i).to_be_bytes(), &value);
+            }
+            eng.commit(b, WriteOptions::default()).await.unwrap();
+        }
+
+        let usage = eng.usage().await.unwrap();
+        let before = usage.file_bytes;
+        eng.defragment().await.unwrap();
+        let actually_freed = before.saturating_sub(eng.size_on_disk().await.unwrap());
+
+        assert!(
+            usage.reclaimable_bytes() >= actually_freed,
+            "a defragment freed {actually_freed} but only {} was advertised",
+            usage.reclaimable_bytes()
+        );
+        // The real test: nothing was deleted, so the estimate must be
+        // small — not "most of the file".
+        assert!(
+            usage.reclaimable_bytes() < usage.file_bytes / 4,
+            "nothing was deleted, yet {} of {} bytes was advertised as reclaimable",
+            usage.reclaimable_bytes(),
+            usage.file_bytes
+        );
+    }
+
     #[tokio::test]
     async fn last_returns_the_max_key_without_scanning_all() {
         let (_dir, eng) = open_temp();
