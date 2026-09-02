@@ -53,6 +53,10 @@ impl Lease for LeaseService {
         request: Request<pb::LeaseGrantRequest>,
     ) -> Result<Response<pb::LeaseGrantResponse>, Status> {
         let req = request.into_inner();
+        // etcd caps lease grants under a NOSPACE alarm alongside puts —
+        // a new lease is a new keyspace to fill (fastetcd#14). Revoke
+        // and keep-alive stay available.
+        self.state.space.check_write()?;
         let resp = self
             .propose(FastetcdLogEntry::LeaseGrant {
                 id: req.id,

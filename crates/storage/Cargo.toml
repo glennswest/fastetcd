@@ -41,6 +41,12 @@ sha2.workspace = true
 
 redb = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# `statvfs`, for the data directory's filesystem free-space probe
+# (fastetcd#14). Present on every unix target we build for — Linux and
+# macOS both — so this is not a Linux-only dependency.
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # tokio-uring is Linux-only; the iouring engine is gated behind the
 # `iouring` feature *and* the target-os filter so non-Linux builds

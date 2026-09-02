@@ -15,6 +15,7 @@
 //! The MVCC state machine layer and the lease/watch fan-out layer live
 //! in this crate too, but land in later milestones.
 
+pub mod fs_space;
 pub mod kvstore;
 pub mod mvcc;
 
@@ -27,5 +28,8 @@ pub mod wal_engine;
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 pub mod iouring_engine;
 
-pub use kvstore::{KvStore, Snapshot, StorageError, StorageResult, WriteBatch, WriteOptions};
+pub use fs_space::FsSpace;
+pub use kvstore::{
+    KvStore, Snapshot, StorageError, StorageResult, StoreUsage, WriteBatch, WriteOptions,
+};
 pub use mvcc::{Mutation, MutationResult, MvccError, MvccResult, MvccStore, RangeResult};

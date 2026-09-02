@@ -46,6 +46,23 @@ impl KvService {
     }
 }
 
+/// True if a txn writes anything new. A txn that only reads or only
+/// deletes is allowed under the NOSPACE alarm: refusing it would remove
+/// the one way a client has to free space (fastetcd#14).
+fn txn_consumes_space(req: &pb::TxnRequest) -> bool {
+    fn op_consumes(op: &pb::RequestOp) -> bool {
+        match &op.request {
+            Some(pb::request_op::Request::RequestPut(_)) => true,
+            // A nested txn can hide a put.
+            Some(pb::request_op::Request::RequestTxn(t)) => txn_consumes_space(t),
+            Some(pb::request_op::Request::RequestRange(_))
+            | Some(pb::request_op::Request::RequestDeleteRange(_))
+            | None => false,
+        }
+    }
+    req.success.iter().any(op_consumes) || req.failure.iter().any(op_consumes)
+}
+
 #[tonic::async_trait]
 impl Kv for KvService {
     async fn range(
@@ -84,6 +101,10 @@ impl Kv for KvService {
             b"",
         )
         .await?;
+        // Under the NOSPACE alarm a put is refused so the store keeps
+        // enough room to compact, snapshot and defragment its way out.
+        // Reads and deletes are deliberately still served (fastetcd#14).
+        self.state.space.check_write()?;
         let mutation = conv::put_request_to_mutation(&req);
         let resp = self
             .propose(FastetcdLogEntry::Apply {
@@ -147,6 +168,9 @@ impl Kv for KvService {
         request: Request<pb::TxnRequest>,
     ) -> Result<Response<pb::TxnResponse>, Status> {
         let req = request.into_inner();
+        if txn_consumes_space(&req) {
+            self.state.space.check_write()?;
+        }
         let mut compares = Vec::with_capacity(req.compare.len());
         for c in &req.compare {
             compares.push(conv::compare_from_proto(c)?);

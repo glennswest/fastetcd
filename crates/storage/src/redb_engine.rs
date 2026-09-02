@@ -18,7 +18,8 @@ use tokio::sync::RwLock;
 use tokio::task;
 
 use crate::kvstore::{
-    BatchOp, KvStore, Snapshot, StorageError, StorageResult, WriteBatch, WriteOptions,
+    BatchOp, KvStore, Snapshot, StorageError, StorageResult, StoreUsage, WriteBatch,
+    WriteOptions,
 };
 
 /// redb-backed engine.
@@ -141,6 +142,38 @@ impl KvStore for RedbEngine {
         .await
         .map_err(|e| StorageError::Io(Box::new(e)))??;
         Ok(sz)
+    }
+
+    /// redb reports live vs. allocated space through a write
+    /// transaction's `stats()`. That walk visits every B-tree page, so
+    /// it is O(size of the database) and holds the write lock for its
+    /// duration — call it on demand (deciding whether a defragment is
+    /// worth it, answering `Maintenance.Status`), never on a hot path.
+    /// The transaction is aborted, so nothing is written.
+    async fn usage(&self) -> StorageResult<StoreUsage> {
+        let file_bytes = self.size_on_disk().await?;
+        let inner = self.inner.clone();
+        let db_guard = inner.db.read().await;
+        let txn = db_guard.begin_write().map_err(StorageError::io)?;
+        let stats = task::spawn_blocking(move || -> StorageResult<(u64, u64)> {
+            let txn = txn;
+            let stats = txn.stats().map_err(StorageError::io)?;
+            let in_use = stats.stored_bytes() + stats.metadata_bytes();
+            let fragmented = stats.fragmented_bytes();
+            // Nothing was mutated; abort so the transaction doesn't
+            // commit an empty write (which would cost an fsync).
+            txn.abort().map_err(StorageError::io)?;
+            Ok((in_use, fragmented))
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?;
+        drop(db_guard);
+        let (in_use_bytes, fragmented_bytes) = stats?;
+        Ok(StoreUsage {
+            file_bytes,
+            in_use_bytes,
+            fragmented_bytes,
+        })
     }
 
     fn engine_name(&self) -> &'static str {
@@ -320,6 +353,53 @@ mod tests {
     async fn conformance_count() {
         let (_dir, eng) = open_temp();
         conformance::count_matches_range_len(&eng).await;
+    }
+
+    #[tokio::test]
+    async fn usage_separates_live_bytes_from_file_size_and_defragment_reclaims() {
+        let (_dir, eng) = open_temp();
+        // Write a few MB, then delete most of it. redb frees the pages
+        // onto its free list but does not shrink the file, so the file
+        // stays at its high-water mark while in-use bytes collapse —
+        // exactly the gap a bounded volume runs out of space in
+        // (fastetcd#14).
+        let value = vec![7u8; 4096];
+        for chunk in 0..8 {
+            let mut b = WriteBatch::new();
+            for i in 0u32..64 {
+                b.put("big", &(chunk * 64 + i).to_be_bytes(), &value);
+            }
+            eng.commit(b, WriteOptions::default()).await.unwrap();
+        }
+        let full = eng.usage().await.unwrap();
+        assert!(full.in_use_bytes >= 512 * 4096, "in_use={}", full.in_use_bytes);
+
+        let mut b = WriteBatch::new();
+        b.delete_range("big", &0u32.to_be_bytes(), &500u32.to_be_bytes());
+        eng.commit(b, WriteOptions::default()).await.unwrap();
+
+        let after_delete = eng.usage().await.unwrap();
+        assert!(
+            after_delete.in_use_bytes < full.in_use_bytes / 2,
+            "delete should drop live bytes: {} -> {}",
+            full.in_use_bytes,
+            after_delete.in_use_bytes
+        );
+        assert!(
+            after_delete.reclaimable_bytes() > 0,
+            "file {} should exceed live bytes {}",
+            after_delete.file_bytes,
+            after_delete.in_use_bytes
+        );
+
+        eng.defragment().await.unwrap();
+        let after_defrag = eng.usage().await.unwrap();
+        assert!(
+            after_defrag.file_bytes < after_delete.file_bytes,
+            "defragment should shrink the file: {} -> {}",
+            after_delete.file_bytes,
+            after_defrag.file_bytes
+        );
     }
 
     #[tokio::test]

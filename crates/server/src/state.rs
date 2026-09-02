@@ -1,9 +1,12 @@
 //! Shared state passed into each gRPC service.
 
+use std::sync::Arc;
+
 use openraft::Raft;
 use tonic::Status;
 
 use crate::auth::AuthState;
+use crate::space::SpaceGuard;
 use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
     FastetcdLogEntry, FastetcdLogResponse, FastetcdStateMachine, TypeConfig, WriteForwarder,
@@ -21,6 +24,11 @@ pub struct ServerState {
     pub member_id: u64,
     pub auth: AuthState,
     pub forwarder: WriteForwarder,
+    /// Disk-space accounting and the NOSPACE alarm (fastetcd#14).
+    /// Defaults to a disabled guard so embeddings and tests that don't
+    /// manage space see no behavior change; the server installs a live
+    /// one via [`ServerState::with_space`].
+    pub space: Arc<SpaceGuard>,
 }
 
 impl ServerState {
@@ -39,7 +47,15 @@ impl ServerState {
             member_id,
             auth,
             forwarder,
+            space: Arc::new(SpaceGuard::disabled()),
         }
+    }
+
+    /// Install a live space guard. Called by the server binary once it
+    /// knows the data directory and the quota settings.
+    pub fn with_space(mut self, space: Arc<SpaceGuard>) -> Self {
+        self.space = space;
+        self
     }
 
     /// Fetch the current raft term — used for `ResponseHeader.raft_term`.

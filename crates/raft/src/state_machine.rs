@@ -35,6 +35,7 @@ use tokio::sync::Mutex;
 
 use fastetcd_storage::mvcc::MvccStore;
 
+use crate::snapshot_store::{self, SnapshotStore};
 use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
 /// Concrete state machine type, clonable, owned by the openraft
@@ -43,12 +44,14 @@ use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 pub struct FastetcdStateMachine {
     inner: Arc<Mutex<Inner>>,
     mvcc: MvccStore,
-    /// Directory holding the persisted current snapshot. The snapshot
-    /// body lives on disk (`current.snap`), never in RAM — the state
-    /// machine used to hold the whole serialized database as a `Vec` in
-    /// `current_snapshot`, which is why an idle node sat at gigabytes
-    /// (fastetcd#13). Only the small [`SnapshotMeta`] is kept in memory.
-    snapshot_dir: std::path::PathBuf,
+    /// Retained snapshots on disk. The snapshot body lives in a file,
+    /// never in RAM — the state machine used to hold the whole
+    /// serialized database as a `Vec` in `current_snapshot`, which is
+    /// why an idle node sat at gigabytes (fastetcd#13). Only the small
+    /// [`SnapshotMeta`] is kept in memory. The store rolls old
+    /// snapshots off so the volume holds a bounded number of copies
+    /// (fastetcd#14).
+    snapshots: SnapshotStore,
 }
 
 struct Inner {
@@ -59,9 +62,6 @@ struct Inner {
     current_snapshot: Option<SnapshotMeta<NodeId, openraft::BasicNode>>,
     snapshot_idx: u64,
 }
-
-const SNAP_FILE: &str = "current.snap";
-const SNAP_META_FILE: &str = "current.meta";
 
 /// Encoded snapshot payload. The MVCC state itself is large; we lean
 /// on `MvccStore::snapshot` to read a consistent view and bincode the
@@ -91,8 +91,20 @@ impl FastetcdStateMachine {
     pub async fn open(mvcc: MvccStore, snapshot_dir: impl Into<std::path::PathBuf>)
         -> Result<Self, anyhow::Error>
     {
-        let snapshot_dir = snapshot_dir.into();
-        std::fs::create_dir_all(&snapshot_dir)?;
+        Self::open_with_retention(mvcc, snapshot_dir, snapshot_store::DEFAULT_RETAIN).await
+    }
+
+    /// Like [`open`](Self::open), with an explicit number of snapshots
+    /// to retain on disk (`--max-snapshots`).
+    pub async fn open_with_retention(
+        mvcc: MvccStore,
+        snapshot_dir: impl Into<std::path::PathBuf>,
+        retain: usize,
+    ) -> Result<Self, anyhow::Error> {
+        // Opening the store reconciles the directory first: leftover
+        // temp files, half-written pairs and anything beyond retention
+        // are reclaimed before the node serves a request (fastetcd#14).
+        let snapshots = SnapshotStore::open(snapshot_dir.into(), retain)?;
         let (applied_bytes, membership_bytes) = mvcc.read_raft_meta().await?;
         // Encoded as `Option<LogId>`, matching what `apply` stages and
         // what `install_snapshot` writes — decoding it as a bare
@@ -108,20 +120,11 @@ impl FastetcdStateMachine {
                 None => StoredMembership::default(),
             };
 
-        // Restore the current snapshot's metadata from disk if both the
-        // body and its sidecar meta are present, so openraft can purge
-        // the log against it immediately after a restart (without this,
-        // a restart lost the snapshot and purge stalled — fastetcd#13).
-        let meta_path = snapshot_dir.join(SNAP_META_FILE);
-        let snap_path = snapshot_dir.join(SNAP_FILE);
-        let current_snapshot = if meta_path.exists() && snap_path.exists() {
-            match std::fs::read(&meta_path) {
-                Ok(bytes) => bincode::deserialize(&bytes).ok(),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        // Restore the newest retained snapshot's metadata, so openraft
+        // can purge the log against it immediately after a restart
+        // (without this, a restart lost the snapshot and purge stalled
+        // — fastetcd#13).
+        let current_snapshot = snapshots.latest_meta();
 
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -131,39 +134,47 @@ impl FastetcdStateMachine {
                 snapshot_idx: 0,
             })),
             mvcc,
-            snapshot_dir,
+            snapshots,
         })
     }
 
-    fn snap_path(&self) -> std::path::PathBuf {
-        self.snapshot_dir.join(SNAP_FILE)
-    }
-
-    /// Atomically persist the snapshot body + its metadata. The body is
-    /// written and renamed first, then the meta, so the meta never
-    /// points at a partial body.
+    /// Persist a snapshot through the retained store, rolling older
+    /// snapshots off first.
+    ///
+    /// Writing through a temp file needs room for the new snapshot
+    /// alongside whatever is retained. On a volume sized for one copy
+    /// that is the deadlock in fastetcd#14: the snapshot write fails
+    /// with ENOSPC, openraft surfaces that storage error on every read
+    /// and write, and a client can no longer delete data to make room.
+    /// The store rolls off before it writes, and on ENOSPC discards
+    /// every retained snapshot and retries — openraft can always
+    /// rebuild one, and a node with no snapshot is worth more than a
+    /// node that cannot write one.
     async fn persist_snapshot(
         &self,
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
         data: &[u8],
     ) -> std::io::Result<()> {
-        let dir = self.snapshot_dir.clone();
-        let final_snap = dir.join(SNAP_FILE);
-        let final_meta = dir.join(SNAP_META_FILE);
-        let tmp_snap = dir.join(format!("{SNAP_FILE}.tmp"));
-        let tmp_meta = dir.join(format!("{SNAP_META_FILE}.tmp"));
-        let meta_bytes =
-            bincode::serialize(meta).map_err(std::io::Error::other)?;
+        let snapshots = self.snapshots.clone();
+        let meta = meta.clone();
         let data = data.to_vec();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            std::fs::write(&tmp_snap, &data)?;
-            std::fs::rename(&tmp_snap, &final_snap)?;
-            std::fs::write(&tmp_meta, &meta_bytes)?;
-            std::fs::rename(&tmp_meta, &final_meta)?;
-            Ok(())
-        })
-        .await
-        .map_err(std::io::Error::other)?
+        tokio::task::spawn_blocking(move || snapshots.store(&meta, &data))
+            .await
+            .map_err(std::io::Error::other)??;
+        Ok(())
+    }
+
+    /// Bytes the retained snapshots occupy on the data volume. The space
+    /// monitor counts this against the store's footprint — a snapshot is
+    /// another full copy of the database, so leaving it out of the
+    /// accounting understates occupancy by roughly half.
+    pub fn snapshot_bytes(&self) -> u64 {
+        self.snapshots.total_bytes()
+    }
+
+    /// How many snapshots this node retains on disk.
+    pub fn snapshot_retention(&self) -> usize {
+        self.snapshots.retain()
     }
 
     pub fn mvcc(&self) -> &MvccStore {
@@ -386,8 +397,9 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
             }
         };
         // Read the body from disk on demand — never held in RAM.
-        let path = self.snap_path();
-        let data = tokio::task::spawn_blocking(move || std::fs::read(&path))
+        let snapshots = self.snapshots.clone();
+        let for_read = meta.clone();
+        let data = tokio::task::spawn_blocking(move || snapshots.read_body_for(&for_read))
             .await
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?;

@@ -209,6 +209,34 @@ pub trait Snapshot: Send + Sync {
     }
 }
 
+/// How much space an engine is occupying, and how much of that is
+/// actually holding live data.
+///
+/// A copy-on-write B-tree never shrinks its file on its own: pages
+/// freed by a delete go on a free list and are reused, so the file
+/// stays at its high-water mark. `file_bytes` is therefore what the
+/// filesystem sees; `in_use_bytes` is what the data would occupy after
+/// a defragment. The gap between them is what
+/// [`KvStore::defragment`] can hand back to the volume, and knowing it
+/// is what lets the server reclaim space *before* it hits ENOSPC
+/// (fastetcd#14).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreUsage {
+    /// Size of the engine's backing file(s) on disk.
+    pub file_bytes: u64,
+    /// Bytes holding live keys, values and index metadata.
+    pub in_use_bytes: u64,
+    /// Bytes lost to fragmentation within allocated pages.
+    pub fragmented_bytes: u64,
+}
+
+impl StoreUsage {
+    /// Bytes a defragment could plausibly return to the filesystem.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.file_bytes.saturating_sub(self.in_use_bytes)
+    }
+}
+
 /// The top-level storage engine trait. Implementations are expected to
 /// be cheaply `Clone` (e.g., `Arc`-wrapping their state) so the server
 /// can hand copies to multiple subsystems.
@@ -227,6 +255,20 @@ pub trait KvStore: Send + Sync + 'static {
     /// Best-effort estimate of the on-disk size in bytes. Used for
     /// `Maintenance.Status.dbSize`. May be approximate.
     async fn size_on_disk(&self) -> StorageResult<u64>;
+
+    /// Space accounting: file size vs. bytes actually holding data.
+    ///
+    /// The default reports the file size for both, i.e. "no reclaimable
+    /// space" — safe for engines that can't tell the difference, since
+    /// it never promises a defragment will free anything.
+    async fn usage(&self) -> StorageResult<StoreUsage> {
+        let file_bytes = self.size_on_disk().await?;
+        Ok(StoreUsage {
+            file_bytes,
+            in_use_bytes: file_bytes,
+            fragmented_bytes: 0,
+        })
+    }
 
     /// Engine-defined name for logging and metrics (`"redb"`, `"iouring"`).
     fn engine_name(&self) -> &'static str;

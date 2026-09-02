@@ -25,6 +25,7 @@ pub mod lease;
 pub mod lease_expiry;
 pub mod maintenance;
 pub mod metrics;
+pub mod space;
 pub mod state;
 pub mod watch;
 

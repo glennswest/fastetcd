@@ -52,8 +52,25 @@ pub fn spawn(
 }
 
 async fn compact_once(state: &ServerState, retention: i64) -> anyhow::Result<()> {
+    compact_to_retention(state, retention, "auto-compacting MVCC history").await?;
+    Ok(())
+}
+
+/// Propose a compaction that keeps the most recent `retention`
+/// revisions. Returns the revision compacted to, or `None` when there
+/// was nothing to do (not the leader, history shorter than the window,
+/// or the compaction point is already there).
+///
+/// Shared by the auto-compaction ticker and the space monitor's reclaim
+/// path (fastetcd#14), which compacts under disk pressure even when
+/// auto-compaction is switched off.
+pub async fn compact_to_retention(
+    state: &ServerState,
+    retention: i64,
+    why: &'static str,
+) -> anyhow::Result<Option<i64>> {
     if state.raft.metrics().borrow().current_leader != Some(state.member_id) {
-        return Ok(()); // followers don't propose
+        return Ok(None); // followers don't propose
     }
     let current = state.sm.mvcc().current_revision().await;
     let already = state.sm.mvcc().compact_revision().await;
@@ -61,14 +78,14 @@ async fn compact_once(state: &ServerState, retention: i64) -> anyhow::Result<()>
     // Nothing to do until there is more history than the window, and
     // never move the compaction point backwards.
     if target <= already || target <= 0 {
-        return Ok(());
+        return Ok(None);
     }
     tracing::info!(
         target: "fastetcd::compaction",
         current_rev = current,
         compact_to = target,
         retention,
-        "auto-compacting MVCC history"
+        "{why}"
     );
     match state
         .raft
@@ -78,13 +95,15 @@ async fn compact_once(state: &ServerState, retention: i64) -> anyhow::Result<()>
         Ok(w) => {
             if let FastetcdLogResponse::Compact { compact_rev } = w.data {
                 tracing::debug!(target: "fastetcd::compaction", compact_rev, "compacted");
+                return Ok(Some(compact_rev));
             }
+            Ok(Some(target))
         }
         Err(e) => {
             // ForwardToLeader during a transition is expected; the next
             // leader picks it up on its next tick.
             tracing::debug!(target: "fastetcd::compaction", "compact proposal failed: {e}");
+            Ok(None)
         }
     }
-    Ok(())
 }
