@@ -43,6 +43,19 @@
   `alarm [--disarm]`.
 - **docs:** `docs/04-disk-space.md` — what grows, what fastetcd does
   about it, every flag and metric, and the dig-out procedures.
+- **sizing:** `fastetcd sizing --nodes N [--pods-per-node P]` turns a
+  cluster shape into a recommended volume and shows the arithmetic. The
+  ladder at default density: 512 MiB for 1-10 nodes, 1 GiB at 100,
+  2 GiB at 500, 4 GiB at 1000, 16 GiB at 5000. The volume is roughly 10x
+  the live data and that is not waste — MVCC history, copy-on-write
+  overhead, a raft snapshot that is a full copy of the database, the
+  raft log, and the upgrade backups each multiply it. Small clusters all
+  land in the same bucket because fixed cluster overhead dominates below
+  ~50 nodes.
+- **sizing:** `--expected-nodes N` (with `--expected-pods-per-node`)
+  checks the real volume against that estimate at startup, while the
+  store is still empty and the answer is actionable, and enables
+  auto-compaction when it was left off. Warns rather than refuses.
 
 ### Changed
 - **BEHAVIOR (#14):** above `--space-alarm-percent` (95) the `NOSPACE`

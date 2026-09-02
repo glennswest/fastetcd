@@ -189,13 +189,72 @@ more room.
 
 ## Sizing
 
-Budget roughly:
+Ask the binary rather than guess:
+
+```bash
+fastetcd sizing --nodes 100                 # or --pods-per-node 110 for a dense cluster
+```
+
+It prints the arithmetic, not just a number. The ladder at the default
+30 pods/node:
+
+| Nodes | Live data | DB file | Minimum volume | Provision |
+|---:|---:|---:|---:|---:|
+| 1 | 32 MiB | 67 MiB | 317 MiB | **512 MiB** |
+| 10 | 35 MiB | 73 MiB | 343 MiB | **512 MiB** |
+| 100 | 63 MiB | 130 MiB | 603 MiB | **1 GiB** |
+| 500 | 185 MiB | 386 MiB | 1.7 GiB | **2 GiB** |
+| 1000 | 339 MiB | 704 MiB | 3.1 GiB | **4 GiB** |
+| 5000 | 1.5 GiB | 3.2 GiB | 14.4 GiB | **16 GiB** |
+
+Two things in that table are worth understanding before trusting it.
+
+**The volume is ~10x the live data, and that is not waste.** A 100-node
+cluster stores 63 MiB of Kubernetes objects and wants a 1 GiB volume.
+The multipliers, in order of size: MVCC history between compactions
+(+30%), the engine's copy-on-write overhead (x1.6), a raft snapshot
+(another *full copy* of the database), the raft log, and up to
+`--upgrade-backup-retain` safety backups (a full copy each). Sizing for
+the 63 MiB is how a volume fills.
+
+**Small clusters all land in the same bucket.** 1 node and 10 nodes both
+provision at 512 MiB, because below roughly 50 nodes the estimate is
+fixed cluster overhead — CRDs, RBAC, ServiceAccounts, API
+priority-and-fairness config, none of which scale with node count —
+multiplied by those same terms. There is nothing to shave by counting
+nodes at that size. Past ~100 nodes the pod term takes over and the
+estimate tracks the cluster.
+
+Pod density, not node count, is what actually drives the variable part:
+100 nodes at 110 pods/node stores more than twice what 100 nodes at 30
+does. If your clusters run dense, pass `--pods-per-node`.
+
+### Letting the server check
+
+```bash
+fastetcd --expected-nodes 100 ...
+```
+
+At startup this computes the same estimate against the real volume and
+says so in the log — while the store is still empty and the answer is
+still actionable:
 
 ```
-volume >= 2 x (live data + retained history) + raft log headroom
+ERROR DATA VOLUME IS TOO SMALL for the declared cluster size
+      volume=64.0 MiB needs=602.8 MiB provision=1.0 GiB
 ```
 
-The factor of two is the snapshot: while one is being written the volume
-holds the database and (briefly) a new full copy of it. On a volume
-sized for a single copy, keep `--max-snapshots 1` and give compaction a
-retention window it can actually hold.
+It warns rather than refuses: an operator who knows their cluster better
+than the model should not be blocked from starting, and a control plane
+that will not boot is worse than one that needs attention later. It also
+enables MVCC auto-compaction if `--auto-compaction-retention` was left
+at `0`, since an unbounded history is what fills a bounded volume.
+
+### Substituting your own numbers
+
+Every constant in the model is a named value in
+`crates/server/src/sizing.rs` with the reasoning attached —
+`PER_NODE_BYTES` (10 KiB: a `Node` with up to 50 reported images, its
+`Lease`, its `CSINode`), `PER_POD_BYTES` (8 KiB), `FIXED_CLUSTER_BYTES`
+(32 MiB), `HISTORY_FRACTION_PCT`, `COW_OVERHEAD_PCT`. If you have
+measured your own cluster, those are the numbers to argue with.
