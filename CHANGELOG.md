@@ -2,6 +2,172 @@
 
 ## [Unreleased]
 
+## [v1.1.0] — 2026-09-02
+
+### Added
+- **space (#14):** disk-space accounting, pressure reclaim and etcd's
+  `NOSPACE` alarm, so a bounded data volume stays bounded. Occupancy —
+  data file, retained snapshots, and the filesystem's real free space
+  via `statvfs` — is sampled every `--space-check-interval-secs`
+  (default 30). Effective capacity is the smaller of
+  `--quota-backend-bytes` and what the volume can actually hold, so an
+  oversized quota can no longer hide a small volume. Above
+  `--space-high-water-percent` (80) the store reclaims: compact MVCC
+  history to `--space-reclaim-retention` revisions (even with
+  auto-compaction off), trigger a raft snapshot so the log can be
+  purged, then defragment if enough would come back.
+- **space (#14):** raft snapshots are now a retained set with roll-off.
+  `--max-snapshots` (default 1, etcd's flag name) is enforced
+  oldest-first *before* a new snapshot is written, so a write never
+  needs room for `retain + 1` copies. Leftover temp files and
+  half-written pairs are reclaimed on startup, and the pre-v1.1
+  single-file `current.snap` layout is migrated in place.
+- **admin (#14):** `fastetcd defrag --data-dir <dir>` — an offline
+  escape hatch that works on an already-full volume. It needs no
+  quorum, no read barrier and no snapshot write, which is exactly what
+  fails when the volume is full, and redb's compaction shrinks the file
+  in place rather than needing free space.
+- **maintenance (#14):** `Alarm` returns the real alarm set and honours
+  `DEACTIVATE`; `Status` reports `dbSizeInUse` (live bytes, measured
+  behind a 60s cache) and `dbSizeQuota` (effective capacity), and lists
+  `NOSPACE` under `errors`.
+- **metrics (#14):** `etcd_mvcc_db_total_size_in_use_in_bytes`,
+  `etcd_server_quota_backend_bytes`,
+  `fastetcd_store_snapshot_size_in_bytes`, `fastetcd_disk_total_bytes`,
+  `fastetcd_disk_available_bytes`, `fastetcd_store_space_used_ratio`,
+  `fastetcd_nospace_alarm_active`.
+- **storage (#14):** `KvStore::usage()` reports file / live /
+  fragmented bytes (redb via an aborted write-txn stats walk), and
+  `fs_space::probe()` reads the data directory's real free space.
+- **ctl (#14):** `fastetcd-ctl status`, `defrag`, `compact <rev>`,
+  `alarm [--disarm]`.
+- **docs:** `docs/04-disk-space.md` — what grows, what fastetcd does
+  about it, every flag and metric, and the dig-out procedures.
+
+### Changed
+- **BEHAVIOR (#14):** above `--space-alarm-percent` (95) the `NOSPACE`
+  alarm is raised and writes — `Put`, a `Txn` containing a put, and
+  `LeaseGrant` — are refused with gRPC `ResourceExhausted` and etcd's
+  message `etcdserver: mvcc: database space exceeded`. Reads, deletes,
+  compaction and defragment are deliberately **not** gated: refusing
+  those is what turns a full volume into an unrecoverable one. The
+  alarm clears itself below `--space-clear-percent` (70), or via
+  `etcdctl alarm disarm`.
+- **raft (#14):** a snapshot write that still hits `ENOSPC` now
+  discards every retained snapshot and retries, instead of returning a
+  storage error that openraft surfaces on every subsequent read and
+  write. openraft rebuilds a snapshot on its next tick; a node with no
+  snapshot is worth more than a node that cannot write one.
+- `--quota-backend-bytes` is no longer a no-op compat flag.
+
+### Fixed
+- **#14:** a full data volume wedged the store in both directions —
+  every read failed at the linearizable barrier behind a pending
+  snapshot write, every write failed at the same place, and the one
+  recovery a client could attempt (deleting keys so the next snapshot
+  fits) was refused for the same reason. Every process healthy, cluster
+  down. The store now refuses writes early, while it still works.
+
+## [v1.0.7] — 2026-07-21
+
+### Added
+- **ctl:** `fastetcd-bench`, a concurrent gRPC load generator (put /
+  linearizable get / serializable get; throughput and latency
+  percentiles), bundled in the release tarball. No server change.
+
+## [v1.0.6] — 2026-07-20
+
+### Changed
+- **raft (#13):** bounded memory and log size. Snapshot bodies live on
+  disk instead of RAM (only `SnapshotMeta` is kept in memory) and are
+  reloaded on restart so purge is not stalled; `purge`/`truncate` use a
+  keys-only `delete_range` instead of loading the purged prefix;
+  `--snapshot-count` and `--max-in-snapshot-log-to-keep` are now real
+  flags.
+
+### Added
+- **server:** `--auto-compaction-retention` (revision mode) and
+  `--auto-compaction-interval-secs`; a leader-side ticker proposes
+  `Compact` through Raft. Off by default.
+
+## [v1.0.5] — 2026-07-20
+
+### Fixed
+- **raft (#13):** startup no longer loads the whole raft log into RAM.
+  `get_log_state` did an unbounded range over `raft_log` just to read
+  the last entry, which hung every member of a 3-master cluster before
+  it could bind its peer port. Added `Snapshot::last` (an O(log n)
+  reverse B-tree lookup in redb) and gated/windowed the #11
+  membership-recovery scan so a healthy cluster never scans on startup.
+
+## [v1.0.4] — 2026-07-20
+
+### Fixed
+- **server:** the automatic pre-version safety backup was fatal on
+  failure, so a full disk or an unwritable `backups/` directory
+  crash-looped the node — a failed safety net taking down the control
+  plane. It is now best-effort: log the error with the remedy and start.
+
+## [v1.0.3] — 2026-07-19
+
+### Added
+- **admin:** data-directory safety toolkit. Automatic pre-version
+  backup before any recovery/conversion write, plus offline `fastetcd
+  backup`, `restore` and `fsck [--repair]` (each opens the redb file
+  exclusively and refuses if the server holds it).
+
+## [v1.0.2] — 2026-07-19
+
+### Fixed
+- **server (#11):** the upgrade recovery now recovers the *actual*
+  membership from the retained raft log (newest `Membership` entry) and
+  falls back to `--initial-cluster` only when the log has been purged
+  clean of it. The startup log states which source was used.
+
+## [v1.0.1] — 2026-07-19
+
+### Fixed
+- **server (#11):** a rolling upgrade from v0.8.2 could strand a
+  cluster — every member came up with an empty voter set and never
+  elected a leader. Detects the pre-v1.0.1 on-disk format and rebuilds
+  the voter set in place, persisting it before Raft starts. Added
+  `--force-new-cluster` (etcd parity) and a `format_version` marker.
+
+## [v1.0.0] — 2026-07-19
+
+### Fixed
+- **kv (#10):** linearizable reads. `serve_range` ignored
+  `serializable` and always read local state, so a lagging follower or
+  a leader that had silently lost leadership answered a default read
+  with stale data — surfacing as ~25% spurious CAS failures in
+  read-modify-write loops. A default Range now runs a read barrier
+  first: `ensure_linearizable` on the leader, `RaftPeer.ForwardRead` to
+  the leader on a follower. `serializable=true` still opts out.
+
+## [v0.8.3] — 2026-07-18
+
+### Fixed
+- **raft (#9):** a single node could not survive a reboot —
+  `last_applied_log_id` / `last_membership` were rebuilt as `None` on
+  every open, so openraft replayed from index 0 (crash-looping once a
+  snapshot had purged the early entries, or silently double-applying
+  every mutation). Both now persist into `mvcc_meta`, folded into the
+  same `WriteBatch` as the mutation they describe.
+- **raft (#8):** a rejoined member stayed at an old MVCC revision:
+  `rebuild_mvcc` wrote through the engine while `MvccStore` kept
+  serving the counters it cached at open. Added
+  `MvccStore::reload_write_state`.
+- **cluster (#7):** `member add/remove` against a follower returned
+  openraft's raw `ForwardToLeader`; added `RaftPeer.ForwardMembership`.
+
+## [v0.8.2] — 2026-07-16
+
+### Fixed
+- **raft (#8):** atomic snapshot build — the MVCC handle and
+  `last_applied` are captured together under the state-machine lock, so
+  a concurrent apply cannot produce a snapshot whose data predates its
+  own `last_applied_log_id`.
+
 ## [v0.8.1] — 2026-07-06
 
 ### Fixed

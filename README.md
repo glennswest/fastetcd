@@ -175,6 +175,26 @@ strategy.
 
 Current count: 100+ tests pass workspace-wide.
 
+## Disk space
+
+fastetcd is normally deployed onto a fixed-size volume, so it manages
+its own footprint rather than growing until the volume says no. It
+samples the data file, the retained snapshots and the filesystem's real
+free space; reclaims at a high-water mark (compact → snapshot → purge →
+defragment); and raises etcd's `NOSPACE` alarm at a higher mark, where
+writes are refused but reads, deletes, compaction and defragment keep
+working — so the store can always be dug out.
+
+```bash
+fastetcd-ctl status          # dbSize vs dbSizeInUse vs capacity
+fastetcd-ctl defrag          # return freed pages to the filesystem
+fastetcd-ctl alarm           # list raised alarms
+fastetcd defrag --data-dir … # offline escape hatch; works on a full volume
+```
+
+See `docs/04-disk-space.md` for the flags, metrics and recovery
+procedures.
+
 ## Deployment
 
 See `docs/03-deploy.md` for the full guide. Quick paths:

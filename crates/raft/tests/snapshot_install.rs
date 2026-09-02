@@ -175,7 +175,9 @@ async fn installed_snapshot_survives_restart() {
 async fn snapshot_persists_to_disk_and_survives_restart() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.redb");
-    let snap_file = path.parent().unwrap().join("snapshots").join("current.snap");
+    let snap_dir = path.parent().unwrap().join("snapshots");
+    // Snapshots are named by the log index they cover, zero-padded.
+    let snap_file = snap_dir.join("00000000000000000002.snap");
 
     {
         let (mut sm, _mvcc) = open_sm(&path).await;
@@ -197,4 +199,97 @@ async fn snapshot_persists_to_disk_and_survives_restart() {
             .expect("snapshot must survive restart so purge can resume");
         assert_eq!(cur.meta.last_log_id.map(|l| l.index), Some(2));
     }
+}
+
+/// The snapshot directory must not grow with every snapshot taken: each
+/// one is a full copy of the database, and on a fixed-size volume that
+/// is what fills it (fastetcd#14). Retention rolls the old ones off.
+#[tokio::test]
+async fn repeated_snapshots_do_not_accumulate_on_disk() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.redb");
+    let snap_dir = path.parent().unwrap().join("snapshots");
+
+    let (mut sm, _mvcc) = open_sm(&path).await;
+    let mut sizes = Vec::new();
+    for index in 1..=5u64 {
+        sm.apply(vec![put_entry(index, &format!("k{index}"), "v")])
+            .await
+            .unwrap();
+        sm.get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        sizes.push(fastetcd_storage::fs_space::dir_size(&snap_dir));
+    }
+
+    let bodies = std::fs::read_dir(&snap_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "snap"))
+        .count();
+    assert_eq!(bodies, 1, "the default retention keeps exactly one snapshot");
+
+    // Five snapshots of a store that grew by one small key each time
+    // must not have produced five snapshots' worth of files.
+    assert!(
+        sizes[4] < sizes[0] * 3,
+        "snapshot directory grew from {} to {} over five snapshots",
+        sizes[0],
+        sizes[4]
+    );
+    assert_eq!(
+        sm.snapshot_bytes(),
+        fastetcd_storage::fs_space::dir_size(&snap_dir),
+        "snapshot_bytes must report what is actually on the volume"
+    );
+}
+
+/// With a larger retention, older snapshots are kept — and still rolled
+/// off oldest-first once the limit is reached.
+#[tokio::test]
+async fn retention_above_one_keeps_that_many_snapshots() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.redb");
+    let snap_dir = path.parent().unwrap().join("snapshots");
+
+    let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    let mut sm = FastetcdStateMachine::open_with_retention(mvcc, &snap_dir, 3)
+        .await
+        .unwrap();
+    assert_eq!(sm.snapshot_retention(), 3);
+
+    for index in 1..=6u64 {
+        sm.apply(vec![put_entry(index, &format!("k{index}"), "v")])
+            .await
+            .unwrap();
+        sm.get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+    }
+
+    let mut kept: Vec<String> = std::fs::read_dir(&snap_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "snap"))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    kept.sort();
+    assert_eq!(
+        kept,
+        vec![
+            "00000000000000000004.snap".to_string(),
+            "00000000000000000005.snap".to_string(),
+            "00000000000000000006.snap".to_string(),
+        ],
+        "the three newest snapshots survive, oldest-first roll-off"
+    );
+
+    // The newest is still the one openraft gets.
+    let cur = sm.get_current_snapshot().await.unwrap().unwrap();
+    assert_eq!(cur.meta.last_log_id.map(|l| l.index), Some(6));
 }
