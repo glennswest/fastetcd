@@ -270,6 +270,26 @@ struct Args {
     #[arg(long, env = "FASTETCD_AUTO_DEFRAG", default_value_t = true)]
     auto_defrag: bool,
 
+    /// Nodes this cluster is expected to run. Used to size the store:
+    /// at startup fastetcd computes the volume that shape needs and
+    /// warns if the data volume is smaller, which is the check that
+    /// would have caught fastetcd#14 before it filled. It also enables
+    /// MVCC auto-compaction when `--auto-compaction-retention` is left
+    /// at its default, since an unbounded history is what fills a
+    /// bounded volume. `0` (the default) disables the check.
+    /// `fastetcd sizing --nodes N` prints the same arithmetic offline.
+    #[arg(long, env = "FASTETCD_EXPECTED_NODES", default_value_t = 0)]
+    expected_nodes: u64,
+
+    /// Average pods per node, for `--expected-nodes`. This term
+    /// dominates the estimate.
+    #[arg(
+        long,
+        env = "FASTETCD_EXPECTED_PODS_PER_NODE",
+        default_value_t = fastetcd_server::sizing::DEFAULT_PODS_PER_NODE
+    )]
+    expected_pods_per_node: u64,
+
     /// Raft snapshots retained on disk. Each is a full copy of the
     /// database, so on a fixed-size volume each extra copy is another
     /// whole database; the default of 1 keeps only the current one.
@@ -325,6 +345,19 @@ enum Command {
         /// Overwrite even if the current data directory is newer.
         #[arg(long, default_value_t = false)]
         force: bool,
+    },
+    /// Print how large a data volume this cluster shape needs, and the
+    /// arithmetic behind it. Sizing for the data alone is how a volume
+    /// fills: a raft snapshot is a full copy of the database, so the
+    /// floor is roughly twice the data before any headroom.
+    Sizing {
+        /// Nodes the cluster will run.
+        #[arg(long, default_value_t = 1)]
+        nodes: u64,
+        /// Average pods per node. `max-pods` defaults to 110; real
+        /// clusters average far lower, and this term dominates.
+        #[arg(long, default_value_t = fastetcd_server::sizing::DEFAULT_PODS_PER_NODE)]
+        pods_per_node: u64,
     },
     /// Rewrite the data file so space freed by deletes, compaction and
     /// log purge is returned to the filesystem. The offline escape
@@ -522,6 +555,22 @@ async fn run_subcommand(
             admin::cmd_restore(&args.data_dir, backup, *force).await
         }
         Command::Defrag => admin::cmd_defrag(&args.data_dir).await,
+        Command::Sizing {
+            nodes,
+            pods_per_node,
+        } => {
+            print!(
+                "{}",
+                fastetcd_server::sizing::report(fastetcd_server::sizing::ClusterShape {
+                    nodes: *nodes,
+                    pods_per_node: *pods_per_node,
+                    snapshot_count: args.snapshot_count,
+                    max_snapshots: args.max_snapshots as u64,
+                    upgrade_backup_retain: args.upgrade_backup_retain as u64,
+                })
+            );
+            Ok(())
+        }
         Command::Fsck { repair } => {
             // Build the configured voter set for the recovery fallback,
             // the same way server startup does.
@@ -790,6 +839,59 @@ async fn main() -> anyhow::Result<()> {
         fastetcd_server::space::SpaceGuard::new(args.data_dir.clone(), space_cfg)
     });
 
+    // Declared cluster shape (#14 follow-up): check the volume is big
+    // enough for what this cluster is expected to hold, while it is
+    // still empty and the answer is actionable. Warn rather than refuse
+    // — an operator who knows better than the model should not be
+    // stopped from starting, and a control plane that will not boot is
+    // worse than one that is going to need attention later.
+    let mut derived_compaction = args.auto_compaction_retention;
+    if args.expected_nodes > 0 {
+        let shape = fastetcd_server::sizing::ClusterShape {
+            nodes: args.expected_nodes,
+            pods_per_node: args.expected_pods_per_node,
+            snapshot_count: args.snapshot_count,
+            max_snapshots: args.max_snapshots as u64,
+            upgrade_backup_retain: args.upgrade_backup_retain as u64,
+        };
+        let est = fastetcd_server::sizing::estimate(shape);
+        let fs = fastetcd_storage::fs_space::probe(&args.data_dir);
+        let volume = fs.map(|f| f.total).unwrap_or(0);
+        if volume > 0 && volume < est.recommended_volume_bytes {
+            tracing::error!(
+                expected_nodes = args.expected_nodes,
+                volume = %fastetcd_server::sizing::human(volume),
+                needs = %fastetcd_server::sizing::human(est.recommended_volume_bytes),
+                provision = %fastetcd_server::sizing::human(est.provision_bytes),
+                "DATA VOLUME IS TOO SMALL for the declared cluster size. A raft \
+                 snapshot is a full copy of the database, so the floor is roughly \
+                 twice the data before headroom. Run `fastetcd sizing --nodes N` \
+                 for the breakdown. Starting anyway; the store will compact and \
+                 defragment under pressure, and will refuse writes rather than \
+                 fill."
+            );
+        } else {
+            tracing::info!(
+                expected_nodes = args.expected_nodes,
+                volume = %fastetcd_server::sizing::human(volume),
+                needs = %fastetcd_server::sizing::human(est.recommended_volume_bytes),
+                "data volume is sized for the declared cluster"
+            );
+        }
+        // An unbounded MVCC history is the usual reason a bounded volume
+        // fills. If the operator declared a cluster size but left
+        // compaction off, bound it: keep enough revisions to cover the
+        // apiserver's own 5-minute compaction window with room to spare.
+        if derived_compaction == 0 {
+            derived_compaction = (args.expected_nodes as i64).saturating_mul(100).max(10_000);
+            tracing::info!(
+                retention = derived_compaction,
+                "--expected-nodes set and --auto-compaction-retention left at 0: \
+                 enabling revision-mode auto-compaction derived from the cluster size"
+            );
+        }
+    }
+
     let server_state = Arc::new(
         ServerState::new(
             raft.clone(),
@@ -817,11 +919,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(_h) = fastetcd_server::compaction::spawn(
         server_state.clone(),
         fastetcd_server::compaction::Mode::Revision,
-        args.auto_compaction_retention,
+        derived_compaction,
         std::time::Duration::from_secs(args.auto_compaction_interval_secs.max(1)),
     ) {
         tracing::info!(
-            retention = args.auto_compaction_retention,
+            retention = derived_compaction,
             "MVCC auto-compaction enabled (revision mode)"
         );
     }
