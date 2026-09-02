@@ -122,6 +122,15 @@ pub struct TestServerHandles {
 }
 
 pub async fn start_test_server_full() -> TestServerHandles {
+    start_test_server_with_space(None).await
+}
+
+/// Start a server with an explicit space guard configuration, so tests
+/// can drive the NOSPACE alarm (fastetcd#14). `None` means the default
+/// disabled guard, which is what every other test wants.
+pub async fn start_test_server_with_space(
+    space: Option<fastetcd_server::space::SpaceConfig>,
+) -> TestServerHandles {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kv.redb");
     let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
@@ -149,7 +158,14 @@ pub async fn start_test_server_full() -> TestServerHandles {
     let auth_state = AuthState::default();
     let peers = fastetcd_raft::network::empty_peers();
     let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
-    let state = Arc::new(ServerState::new(raft, sm, 7, 1, auth_state.clone(), forwarder));
+    let mut state = ServerState::new(raft, sm, 7, 1, auth_state.clone(), forwarder);
+    if let Some(cfg) = space {
+        state = state.with_space(Arc::new(fastetcd_server::space::SpaceGuard::new(
+            dir.path().to_path_buf(),
+            cfg,
+        )));
+    }
+    let state = Arc::new(state);
     let _ = log;
 
     let kv = KvService::new(state.clone());

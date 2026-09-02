@@ -43,6 +43,40 @@ enum Cmd {
     SnapshotSave {
         path: PathBuf,
     },
+    /// Report member status, including disk occupancy and any alarms.
+    Status,
+    /// Rewrite the backend so space freed by deletes, compaction and
+    /// log purge goes back to the filesystem. Not gated on the NOSPACE
+    /// alarm — it is meant to work on a store that is already refusing
+    /// writes.
+    Defrag,
+    /// Discard MVCC history below `revision`. Bounds the store's growth
+    /// and, unlike a put, is still accepted under a NOSPACE alarm.
+    Compact {
+        revision: i64,
+    },
+    /// List raised alarms, or clear them with `--disarm`.
+    Alarm {
+        /// Clear the alarms instead of listing them.
+        #[arg(long, default_value_t = false)]
+        disarm: bool,
+    },
+}
+
+/// Render a byte count the way an operator reads it.
+fn human_bytes(n: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
 }
 
 #[tokio::main]
@@ -115,6 +149,81 @@ async fn main() -> anyhow::Result<()> {
             }
             tokio::io::AsyncWriteExt::flush(&mut out).await?;
             println!("wrote {} bytes to {}", total, path.display());
+        }
+        Cmd::Status => {
+            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let r = c.status(pb::StatusRequest {}).await?.into_inner();
+            println!("version:      {}", r.version);
+            println!("member:       {:x}  leader: {:x}", r.header.map(|h| h.member_id).unwrap_or(0), r.leader);
+            println!("raft:         term {} index {} applied {}", r.raft_term, r.raft_index, r.raft_applied_index);
+            println!("db size:      {}", human_bytes(r.db_size));
+            println!("db in use:    {}", human_bytes(r.db_size_in_use));
+            println!(
+                "reclaimable:  {}  (run `fastetcd-ctl defrag` to return it)",
+                human_bytes(r.db_size - r.db_size_in_use)
+            );
+            if r.db_size_quota > 0 {
+                let pct = (r.db_size as f64 / r.db_size_quota as f64) * 100.0;
+                println!(
+                    "capacity:     {} ({pct:.1}% used)",
+                    human_bytes(r.db_size_quota)
+                );
+            }
+            if r.errors.is_empty() {
+                println!("alarms:       none");
+            } else {
+                println!("alarms:       {}", r.errors.join(", "));
+            }
+        }
+        Cmd::Defrag => {
+            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let before = c.status(pb::StatusRequest {}).await?.into_inner().db_size;
+            c.defragment(pb::DefragmentRequest {}).await?;
+            let after = c.status(pb::StatusRequest {}).await?.into_inner().db_size;
+            println!(
+                "defrag: {} -> {} ({} returned to the filesystem)",
+                human_bytes(before),
+                human_bytes(after),
+                human_bytes((before - after).max(0))
+            );
+        }
+        Cmd::Compact { revision } => {
+            let mut c = KvClient::connect(args.endpoint).await?;
+            c.compact(pb::CompactionRequest {
+                revision,
+                physical: false,
+            })
+            .await?;
+            println!("compacted to revision {revision}");
+        }
+        Cmd::Alarm { disarm } => {
+            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let action = if disarm {
+                pb::alarm_request::AlarmAction::Deactivate
+            } else {
+                pb::alarm_request::AlarmAction::Get
+            };
+            let r = c
+                .alarm(pb::AlarmRequest {
+                    action: action as i32,
+                    member_id: 0,
+                    alarm: pb::AlarmType::None as i32,
+                })
+                .await?
+                .into_inner();
+            if r.alarms.is_empty() {
+                println!("no alarms raised");
+            } else {
+                for a in r.alarms {
+                    println!(
+                        "memberID:{:x} alarm:{}",
+                        a.member_id,
+                        pb::AlarmType::try_from(a.alarm)
+                            .map(|t| t.as_str_name().to_string())
+                            .unwrap_or_else(|_| a.alarm.to_string())
+                    );
+                }
+            }
         }
     }
     Ok(())
