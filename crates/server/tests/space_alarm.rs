@@ -71,7 +71,6 @@ async fn under_the_alarm_writes_are_refused_but_recovery_still_works() {
             compare: vec![],
             success: vec![],
             failure: vec![pb::RequestOp {
-                response: None,
                 request: Some(pb::request_op::Request::RequestPut(pb::PutRequest {
                     key: b"sneaky".to_vec(),
                     value: b"v".to_vec(),
@@ -108,7 +107,6 @@ async fn under_the_alarm_writes_are_refused_but_recovery_still_works() {
     kv.txn(pb::TxnRequest {
         compare: vec![],
         success: vec![pb::RequestOp {
-            response: None,
             request: Some(pb::request_op::Request::RequestRange(pb::RangeRequest {
                 key: b"keep".to_vec(),
                 ..Default::default()
@@ -134,7 +132,6 @@ async fn under_the_alarm_writes_are_refused_but_recovery_still_works() {
     kv.txn(pb::TxnRequest {
         compare: vec![],
         success: vec![pb::RequestOp {
-            response: None,
             request: Some(pb::request_op::Request::RequestDeleteRange(
                 pb::DeleteRangeRequest {
                     key: b"keep".to_vec(),
