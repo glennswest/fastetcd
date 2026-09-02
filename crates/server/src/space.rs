@@ -140,6 +140,10 @@ pub struct SpaceGuard {
     capacity_bytes: AtomicU64,
     used_ppm: AtomicU64,
     nospace: AtomicBool,
+    /// Unix seconds at which `db_in_use_bytes` was last measured. The
+    /// measurement walks the whole database, so it is rate-limited
+    /// rather than run on every caller's request.
+    in_use_measured_at: AtomicU64,
 }
 
 impl SpaceGuard {
@@ -156,6 +160,7 @@ impl SpaceGuard {
             capacity_bytes: AtomicU64::new(0),
             used_ppm: AtomicU64::new(0),
             nospace: AtomicBool::new(false),
+            in_use_measured_at: AtomicU64::new(0),
         }
     }
 
@@ -229,9 +234,40 @@ impl SpaceGuard {
         }
     }
 
+    /// Live bytes in the database, measured at most once per
+    /// `max_age`.
+    ///
+    /// The measurement is a full walk of the engine's B-tree, so it is
+    /// deliberately not on any hot path: callers that want a number for
+    /// a human (`Maintenance.Status`, `/metrics`) get the cached one and
+    /// pay for a fresh walk only when it has gone stale.
+    pub async fn in_use_bytes(
+        &self,
+        engine: &Arc<dyn fastetcd_storage::KvStore>,
+        max_age: Duration,
+    ) -> u64 {
+        let now = unix_secs();
+        let measured_at = self.in_use_measured_at.load(Ordering::Relaxed);
+        if now.saturating_sub(measured_at) >= max_age.as_secs() {
+            match engine.usage().await {
+                Ok(usage) => {
+                    self.db_in_use_bytes
+                        .store(usage.in_use_bytes, Ordering::Relaxed);
+                    self.in_use_measured_at.store(now, Ordering::Relaxed);
+                }
+                Err(e) => tracing::warn!(target: "fastetcd::space", "usage: {e}"),
+            }
+        }
+        self.db_in_use_bytes.load(Ordering::Relaxed)
+    }
+
     /// Sample the store's footprint and update the alarm. Returns the
-    /// new stats.
-    async fn sample(&self, state: &ServerState) -> SpaceStats {
+    /// new stats. Cheap — a file size, a directory scan and a `statvfs`
+    /// — so it is safe to call from a request path.
+    pub async fn refresh(&self, state: &ServerState) -> SpaceStats {
+        if !self.enabled {
+            return self.stats();
+        }
         let db_bytes = state
             .sm
             .mvcc()
@@ -264,6 +300,13 @@ impl SpaceGuard {
 
         self.update_alarm(used_ppm, used, capacity);
         self.stats()
+    }
+
+    /// Record an in-use measurement taken elsewhere (the reclaim path
+    /// already pays for the walk).
+    fn record_in_use(&self, bytes: u64) {
+        self.db_in_use_bytes.store(bytes, Ordering::Relaxed);
+        self.in_use_measured_at.store(unix_secs(), Ordering::Relaxed);
     }
 
     fn update_alarm(&self, used_ppm: u64, used: u64, capacity: u64) {
@@ -300,6 +343,13 @@ fn pct_ppm(percent: u8) -> u64 {
     percent as u64 * 10_000
 }
 
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Spawn the space monitor. Returns `None` when the guard is disabled.
 pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
     if !state.space.is_enabled() {
@@ -313,7 +363,7 @@ pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
         let mut last_reclaim: Option<tokio::time::Instant> = None;
         loop {
             tick.tick().await;
-            let stats = guard.sample(&state).await;
+            let stats = guard.refresh(&state).await;
             let high_ppm = pct_ppm(cfg.high_water_percent);
             if stats.capacity_bytes == 0 || stats.used_ppm < high_ppm {
                 continue;
@@ -335,7 +385,7 @@ pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
             }
             // Re-sample immediately so the alarm reflects the reclaim
             // rather than waiting a whole interval.
-            guard.sample(&state).await;
+            guard.refresh(&state).await;
         }
     }))
 }
@@ -383,10 +433,7 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
     }
     let engine = state.sm.mvcc().engine().clone();
     let usage = engine.usage().await?;
-    state
-        .space
-        .db_in_use_bytes
-        .store(usage.in_use_bytes, Ordering::Relaxed);
+    state.space.record_in_use(usage.in_use_bytes);
     if usage.reclaimable_bytes() < cfg.defrag_min_reclaim_bytes {
         tracing::info!(
             target: "fastetcd::space",

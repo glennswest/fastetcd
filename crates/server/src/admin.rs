@@ -221,6 +221,61 @@ pub async fn cmd_backup(data_dir: &Path, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `fastetcd defrag` — offline space reclaim.
+///
+/// This is the escape hatch for a volume that is already full
+/// (fastetcd#14). Every other route out needs something the wedged
+/// server cannot do: a linearizable read needs a read barrier, a delete
+/// needs a raft proposal, and both fail behind the same pending
+/// snapshot write. Defragmenting offline needs none of that — no
+/// quorum, no snapshot, no log append — it rewrites the data file
+/// compactly and truncates it.
+///
+/// It also does not need free space to work: redb's compaction moves
+/// live pages toward the front of the existing file and shortens it.
+///
+/// The server must be stopped; opening the file exclusively is what
+/// proves that.
+pub async fn cmd_defrag(data_dir: &Path) -> anyhow::Result<()> {
+    let src = data_file(data_dir);
+    if !src.exists() {
+        anyhow::bail!("no data directory at {}", src.display());
+    }
+    let before = std::fs::metadata(&src)?.len();
+    let engine = open_or_hint(&src)?;
+    let usage = engine
+        .usage()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading store usage: {e}"))?;
+    println!(
+        "defrag: {} is {} bytes, {} bytes live ({} bytes reclaimable)",
+        src.display(),
+        usage.file_bytes,
+        usage.in_use_bytes,
+        usage.reclaimable_bytes()
+    );
+    engine
+        .defragment()
+        .await
+        .map_err(|e| anyhow::anyhow!("defragment: {e}"))?;
+    drop(engine);
+    let after = std::fs::metadata(&src)?.len();
+    println!(
+        "defrag: {} -> {} bytes ({} bytes returned to the filesystem)",
+        before,
+        after,
+        before.saturating_sub(after)
+    );
+    if after >= before {
+        println!(
+            "defrag: nothing was reclaimable — the live data itself is what fills \
+             the volume. Compact MVCC history (`etcdctl compact <rev>`, or run with \
+             --auto-compaction-retention) or give the volume more room."
+        );
+    }
+    Ok(())
+}
+
 /// `fastetcd restore <backup> [--force]`.
 pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow::Result<()> {
     if !backup.exists() {

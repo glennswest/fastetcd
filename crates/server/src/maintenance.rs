@@ -6,10 +6,15 @@
 //!   across nodes at the same revision; etcd uses CRC32 but client tools
 //!   treat it as an opaque hash). At a revision, HashKV restricts to
 //!   `mod_revision <= revision`.
-//! - `Alarm` — empty list; fastetcd does not surface alarm-shaped state
-//!   yet. `AlarmRequest` with `action != Get` is a no-op success.
-//! - `Defragment` — no-op success today (`redb` has no online compact
-//!   that's safe to invoke from here). Re-enable once we wire it.
+//! - `Alarm` — the real alarm set. Today that is `NOSPACE`, raised by
+//!   the space monitor when the store's footprint crosses the alarm
+//!   mark and cleared when it falls back below the low-water mark or an
+//!   operator disarms it (fastetcd#14).
+//! - `Defragment` — rewrites the engine's file so pages freed by
+//!   deletes and compaction go back to the filesystem. Does not go
+//!   through Raft (it changes no state, only layout) and is not gated
+//!   on the NOSPACE alarm, so it works on a store that is already
+//!   refusing writes — which is exactly when it is needed.
 //! - `Snapshot` — streams the bincode-serialized state machine snapshot
 //!   to the client in 64 KiB chunks.
 //! - `MoveLeader` — `Status::unimplemented` until peer transport lands.
@@ -35,6 +40,12 @@ use crate::state::{response_header, ServerState};
 /// `dbSizeInUse` reporting and metrics, not the wire response.
 const ETCD_COMPAT_VERSION: &str = "3.6.0";
 
+/// How stale a `dbSizeInUse` measurement may be before `Status`
+/// recomputes it. Monitoring scrapes `endpoint status` on a short
+/// interval; the underlying walk is O(database), so it must not run on
+/// every call.
+const IN_USE_MAX_AGE_SECS: u64 = 60;
+
 #[derive(Clone)]
 pub struct MaintenanceService {
     state: Arc<ServerState>,
@@ -50,13 +61,53 @@ impl MaintenanceService {
 impl Maintenance for MaintenanceService {
     async fn alarm(
         &self,
-        _request: Request<pb::AlarmRequest>,
+        request: Request<pb::AlarmRequest>,
     ) -> Result<Response<pb::AlarmResponse>, Status> {
+        use pb::alarm_request::AlarmAction;
+
+        let req = request.into_inner();
+        let action = AlarmAction::try_from(req.action).unwrap_or(AlarmAction::Get);
+        let targets_this_member = req.member_id == 0 || req.member_id == self.state.member_id;
+        let targets_nospace = req.alarm == pb::AlarmType::None as i32
+            || req.alarm == pb::AlarmType::Nospace as i32;
+
+        // Re-sample before answering so `etcdctl alarm list` reflects
+        // the store as it is now, not as it was up to one monitor tick
+        // ago. The sample is cheap (file size + statvfs).
+        let space = self.state.space.clone();
+        space.refresh(&self.state).await;
+
+        match action {
+            AlarmAction::Get => {}
+            AlarmAction::Deactivate => {
+                if targets_this_member && targets_nospace {
+                    space.disarm_nospace();
+                }
+            }
+            AlarmAction::Activate => {
+                // etcd lets an operator raise an alarm by hand. There is
+                // no legitimate reason to force NOSPACE on a store with
+                // room, and doing so would refuse writes with no way for
+                // the monitor to tell it apart from a real one.
+                return Err(Status::unimplemented(
+                    "raising an alarm by hand is not supported; NOSPACE is raised \
+                     by the space monitor when the store crosses its alarm mark",
+                ));
+            }
+        }
+
+        let mut alarms = Vec::new();
+        if space.nospace() && targets_this_member && targets_nospace {
+            alarms.push(pb::AlarmMember {
+                member_id: self.state.member_id,
+                alarm: pb::AlarmType::Nospace as i32,
+            });
+        }
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(pb::AlarmResponse {
             header: Some(header),
-            alarms: Vec::new(),
+            alarms,
         }))
     }
 
@@ -76,6 +127,29 @@ impl Maintenance for MaintenanceService {
             .await
             .map_err(|e| Status::internal(format!("size_on_disk: {e}")))?;
 
+        // dbSize is the file; dbSizeInUse is the live data inside it.
+        // The gap between them is what a defragment would return to the
+        // filesystem, and it is the number an operator needs to decide
+        // whether defragmenting is worth the pause. Measuring it walks
+        // the whole database, so it is rate-limited behind a cache.
+        let space = self.state.space.clone();
+        let stats = space.refresh(&self.state).await;
+        let db_size_in_use = if space.is_enabled() {
+            space
+                .in_use_bytes(
+                    self.state.sm.mvcc().engine(),
+                    std::time::Duration::from_secs(IN_USE_MAX_AGE_SECS),
+                )
+                .await
+        } else {
+            db_size
+        };
+        let mut errors = Vec::new();
+        if stats.nospace {
+            // etcd reports raised alarms here, by name.
+            errors.push(pb::AlarmType::Nospace.as_str_name().to_string());
+        }
+
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(pb::StatusResponse {
             header: Some(header),
@@ -85,11 +159,11 @@ impl Maintenance for MaintenanceService {
             raft_index: metrics.last_log_index.unwrap_or(0),
             raft_term: metrics.current_term,
             raft_applied_index: metrics.last_applied.map(|l| l.index).unwrap_or(0),
-            errors: Vec::new(),
-            db_size_in_use: db_size as i64,
+            errors,
+            db_size_in_use: db_size_in_use as i64,
             is_learner: false,
             storage_version: ETCD_COMPAT_VERSION.to_string(),
-            db_size_quota: 0,
+            db_size_quota: stats.capacity_bytes as i64,
             downgrade_info: None,
         }))
     }
@@ -98,6 +172,14 @@ impl Maintenance for MaintenanceService {
         &self,
         _request: Request<pb::DefragmentRequest>,
     ) -> Result<Response<pb::DefragmentResponse>, Status> {
+        let before = self
+            .state
+            .sm
+            .mvcc()
+            .engine()
+            .size_on_disk()
+            .await
+            .unwrap_or(0);
         self.state
             .sm
             .mvcc()
@@ -105,6 +187,24 @@ impl Maintenance for MaintenanceService {
             .defragment()
             .await
             .map_err(|e| Status::internal(format!("defragment: {e}")))?;
+        let after = self
+            .state
+            .sm
+            .mvcc()
+            .engine()
+            .size_on_disk()
+            .await
+            .unwrap_or(before);
+        tracing::info!(
+            target: "fastetcd::maintenance",
+            before_bytes = before,
+            after_bytes = after,
+            freed_bytes = before.saturating_sub(after),
+            "defragment complete"
+        );
+        // Freed space may have cleared the alarm; re-sample rather than
+        // leave writes refused until the next monitor tick.
+        self.state.space.clone().refresh(&self.state).await;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(pb::DefragmentResponse {

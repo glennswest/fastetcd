@@ -8,6 +8,12 @@
 //!   - `etcd_server_has_leader` (gauge 0/1)
 //!   - `etcd_server_leader_changes_seen_total` (counter)
 //!   - `etcd_mvcc_db_total_size_in_bytes` (gauge)
+//!   - `etcd_mvcc_db_total_size_in_use_in_bytes` (gauge)
+//!   - `etcd_server_quota_backend_bytes` (gauge)
+//!   - `fastetcd_store_space_used_ratio` (gauge, 0-1)
+//!   - `fastetcd_store_snapshot_size_in_bytes` (gauge)
+//!   - `fastetcd_disk_total_bytes` / `fastetcd_disk_available_bytes`
+//!   - `fastetcd_nospace_alarm_active` (gauge 0/1)
 //!   - `etcd_debugging_mvcc_current_revision` (gauge)
 //!   - `etcd_debugging_mvcc_compact_revision` (gauge)
 //!   - `fastetcd_engine` (info: redb / wal / iouring)
@@ -43,6 +49,13 @@ pub struct Metrics {
     pub has_leader: Gauge,
     pub leader_changes_total: Counter,
     pub db_size_bytes: Gauge,
+    pub db_size_in_use_bytes: Gauge,
+    pub quota_backend_bytes: Gauge,
+    pub snapshot_size_bytes: Gauge,
+    pub disk_total_bytes: Gauge,
+    pub disk_available_bytes: Gauge,
+    pub space_used_ratio: Gauge<f64, std::sync::atomic::AtomicU64>,
+    pub nospace_alarm: Gauge,
     pub current_revision: Gauge,
     pub compact_revision: Gauge,
     /// Last leader id we saw, so leader_changes_total tracks
@@ -56,6 +69,13 @@ impl Metrics {
         let has_leader = Gauge::default();
         let leader_changes_total = Counter::default();
         let db_size_bytes = Gauge::default();
+        let db_size_in_use_bytes = Gauge::default();
+        let quota_backend_bytes = Gauge::default();
+        let snapshot_size_bytes = Gauge::default();
+        let disk_total_bytes = Gauge::default();
+        let disk_available_bytes = Gauge::default();
+        let space_used_ratio = Gauge::<f64, std::sync::atomic::AtomicU64>::default();
+        let nospace_alarm = Gauge::default();
         let current_revision = Gauge::default();
         let compact_revision = Gauge::default();
         let m = Arc::new(Self {
@@ -63,6 +83,13 @@ impl Metrics {
             has_leader: has_leader.clone(),
             leader_changes_total: leader_changes_total.clone(),
             db_size_bytes: db_size_bytes.clone(),
+            db_size_in_use_bytes: db_size_in_use_bytes.clone(),
+            quota_backend_bytes: quota_backend_bytes.clone(),
+            snapshot_size_bytes: snapshot_size_bytes.clone(),
+            disk_total_bytes: disk_total_bytes.clone(),
+            disk_available_bytes: disk_available_bytes.clone(),
+            space_used_ratio: space_used_ratio.clone(),
+            nospace_alarm: nospace_alarm.clone(),
             current_revision: current_revision.clone(),
             compact_revision: compact_revision.clone(),
             last_leader: AtomicU64::new(0),
@@ -94,6 +121,45 @@ impl Metrics {
                 db_size_bytes,
             );
             reg.register(
+                "etcd_mvcc_db_total_size_in_use_in_bytes",
+                "Bytes of the backend engine actually holding live data; \
+                 the gap to the total size is what a defragment would free",
+                db_size_in_use_bytes,
+            );
+            reg.register(
+                "etcd_server_quota_backend_bytes",
+                "Effective ceiling on the store's footprint: the configured \
+                 quota, or what the data volume can actually hold",
+                quota_backend_bytes,
+            );
+            reg.register(
+                "fastetcd_store_snapshot_size_in_bytes",
+                "Bytes occupied by the retained raft snapshots on the data volume",
+                snapshot_size_bytes,
+            );
+            reg.register(
+                "fastetcd_disk_total_bytes",
+                "Total size of the filesystem holding the data directory",
+                disk_total_bytes,
+            );
+            reg.register(
+                "fastetcd_disk_available_bytes",
+                "Bytes still available to fastetcd on the data volume",
+                disk_available_bytes,
+            );
+            reg.register(
+                "fastetcd_store_space_used_ratio",
+                "Store footprint as a fraction of its effective capacity; \
+                 reclaim starts at the high-water mark and writes are \
+                 refused at the alarm mark",
+                space_used_ratio,
+            );
+            reg.register(
+                "fastetcd_nospace_alarm_active",
+                "1 while the NOSPACE alarm is raised and writes are refused",
+                nospace_alarm,
+            );
+            reg.register(
                 "etcd_debugging_mvcc_current_revision",
                 "Latest MVCC revision applied to the state machine",
                 current_revision,
@@ -123,6 +189,21 @@ impl Metrics {
         self.compact_revision.set(comp);
         if let Ok(size) = state.sm.mvcc().engine().size_on_disk().await {
             self.db_size_bytes.set(size as i64);
+        }
+        // Occupancy of the data volume (fastetcd#14). Sampling is cheap
+        // — a file size, a directory scan and a statvfs — so it runs on
+        // the scrape like everything else here. `db_size_in_use` is the
+        // one expensive number and comes from its own cache.
+        if state.space.is_enabled() {
+            let stats = state.space.clone().refresh(state).await;
+            self.snapshot_size_bytes.set(stats.snapshot_bytes as i64);
+            self.disk_total_bytes.set(stats.fs_total_bytes as i64);
+            self.disk_available_bytes
+                .set(stats.fs_available_bytes as i64);
+            self.quota_backend_bytes.set(stats.capacity_bytes as i64);
+            self.space_used_ratio.set(stats.used_ratio());
+            self.nospace_alarm.set(if stats.nospace { 1 } else { 0 });
+            self.db_size_in_use_bytes.set(stats.db_in_use_bytes as i64);
         }
     }
 }

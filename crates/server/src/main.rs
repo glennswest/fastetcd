@@ -208,9 +208,68 @@ struct Args {
     )]
     auto_compaction_interval_secs: u64,
 
-    /// (etcd compat) Per-request quota in bytes.
-    #[arg(long, env = "FASTETCD_QUOTA_BACKEND_BYTES")]
-    quota_backend_bytes: Option<i64>,
+    /// Ceiling on the store's on-disk footprint, in bytes. `0` (the
+    /// default) means the data volume is the only limit — which is the
+    /// right setting for a fixed-size volume, since fastetcd measures
+    /// the filesystem's real free space either way and a quota larger
+    /// than the volume is a fiction. Crossing the high-water mark
+    /// triggers reclaim; crossing the alarm mark raises NOSPACE and
+    /// refuses writes. Matches etcd's `--quota-backend-bytes`.
+    #[arg(long, env = "FASTETCD_QUOTA_BACKEND_BYTES", default_value_t = 0)]
+    quota_backend_bytes: i64,
+
+    /// Percentage of capacity at which the store starts reclaiming
+    /// space (compact -> snapshot -> purge -> defragment).
+    #[arg(
+        long,
+        env = "FASTETCD_SPACE_HIGH_WATER_PERCENT",
+        default_value_t = 80
+    )]
+    space_high_water_percent: u8,
+
+    /// Percentage of capacity at which the NOSPACE alarm is raised and
+    /// writes are refused. Reads, deletes, compaction and defragment
+    /// keep working so the store can be dug out.
+    #[arg(long, env = "FASTETCD_SPACE_ALARM_PERCENT", default_value_t = 95)]
+    space_alarm_percent: u8,
+
+    /// Percentage of capacity the store must fall back below before the
+    /// NOSPACE alarm clears itself.
+    #[arg(long, env = "FASTETCD_SPACE_CLEAR_PERCENT", default_value_t = 70)]
+    space_clear_percent: u8,
+
+    /// How often occupancy is sampled, in seconds. `0` disables the
+    /// space monitor entirely (not recommended on a bounded volume).
+    #[arg(
+        long,
+        env = "FASTETCD_SPACE_CHECK_INTERVAL_SECS",
+        default_value_t = 30
+    )]
+    space_check_interval_secs: u64,
+
+    /// Revisions of MVCC history kept when compacting under disk
+    /// pressure. Applies even with `--auto-compaction-retention 0`: an
+    /// unbounded history is the usual reason a volume fills.
+    #[arg(
+        long,
+        env = "FASTETCD_SPACE_RECLAIM_RETENTION",
+        default_value_t = 1000
+    )]
+    space_reclaim_retention: i64,
+
+    /// Let the reclaim path defragment the engine. Defragment pauses
+    /// reads and writes while it runs, but it is the only step that
+    /// returns freed pages to the filesystem.
+    #[arg(long, env = "FASTETCD_AUTO_DEFRAG", default_value_t = true)]
+    auto_defrag: bool,
+
+    /// Raft snapshots retained on disk. Each is a full copy of the
+    /// database, so on a fixed-size volume each extra copy is another
+    /// whole database; the default of 1 keeps only the current one.
+    /// Older snapshots are rolled off oldest-first *before* a new one is
+    /// written. Matches etcd's `--max-snapshots`.
+    #[arg(long, env = "FASTETCD_MAX_SNAPSHOTS", default_value_t = 1)]
+    max_snapshots: usize,
 
     /// (etcd compat) Maximum gRPC request size.
     #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES")]
@@ -260,6 +319,12 @@ enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Rewrite the data file so space freed by deletes, compaction and
+    /// log purge is returned to the filesystem. The offline escape
+    /// hatch for a volume that is already full: it needs no raft
+    /// quorum, no read barrier and no snapshot write, so it works when
+    /// the running server can no longer do anything (fastetcd#14).
+    Defrag,
     /// Check the data directory for consistency, and with --repair fix
     /// the raft/format metadata that can strand a cluster.
     Fsck {
@@ -368,6 +433,15 @@ fn apply_etcd_env_compat() {
         ("FASTETCD_LISTEN_METRICS_URL", "ETCD_LISTEN_METRICS_URLS"),
         ("FASTETCD_SNAPSHOT_COUNT", "ETCD_SNAPSHOT_COUNT"),
         ("FASTETCD_QUOTA_BACKEND_BYTES", "ETCD_QUOTA_BACKEND_BYTES"),
+        ("FASTETCD_MAX_SNAPSHOTS", "ETCD_MAX_SNAPSHOTS"),
+        (
+            "FASTETCD_AUTO_COMPACTION_RETENTION",
+            "ETCD_AUTO_COMPACTION_RETENTION",
+        ),
+        (
+            "FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP",
+            "ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP",
+        ),
         ("FASTETCD_MAX_REQUEST_BYTES", "ETCD_MAX_REQUEST_BYTES"),
         ("FASTETCD_LOG_LEVEL", "ETCD_LOG_LEVEL"),
     ];
@@ -440,6 +514,7 @@ async fn run_subcommand(
         Command::Restore { backup, force } => {
             admin::cmd_restore(&args.data_dir, backup, *force).await
         }
+        Command::Defrag => admin::cmd_defrag(&args.data_dir).await,
         Command::Fsck { repair } => {
             // Build the configured voter set for the recovery fallback,
             // the same way server startup does.
@@ -501,9 +576,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Log the no-op compat flags we received so operators can see
     // them in startup output even though we don't act on them.
-    if let Some(v) = &args.quota_backend_bytes {
-        tracing::debug!(quota_backend_bytes = v, "etcd-compat flag accepted (no-op)");
-    }
     if let Some(v) = &args.max_request_bytes {
         tracing::debug!(max_request_bytes = v, "etcd-compat flag accepted (no-op)");
     }
@@ -528,7 +600,12 @@ async fn main() -> anyhow::Result<()> {
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
     let mvcc = MvccStore::open(engine.clone()).await?;
-    let sm = FastetcdStateMachine::open(mvcc, args.data_dir.join("snapshots")).await?;
+    let sm = FastetcdStateMachine::open_with_retention(
+        mvcc,
+        args.data_dir.join("snapshots"),
+        args.max_snapshots,
+    )
+    .await?;
     let mut log = KvLogStore::new(engine);
 
     // Snapshot + purge is what bounds the raft log: openraft snapshots
@@ -678,17 +755,57 @@ async fn main() -> anyhow::Result<()> {
     let auth_state = AuthState::default();
     AuthService::load_persisted(sm.mvcc().engine(), &auth_state).await?;
     let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
-    let server_state = Arc::new(ServerState::new(
-        raft.clone(),
-        sm,
-        args.cluster_id,
-        node_id,
-        auth_state.clone(),
-        forwarder,
-    ));
+
+    // Disk-space accounting (#14). A bounded data volume must never
+    // reach ENOSPC: at that point the snapshot write fails, openraft
+    // surfaces the storage error on every read and write, and even
+    // deleting keys to make room is refused. The monitor reclaims at the
+    // high-water mark and raises NOSPACE — refusing writes but not reads
+    // or deletes — well before the wall.
+    let space_cfg = fastetcd_server::space::SpaceConfig {
+        quota_backend_bytes: args.quota_backend_bytes.max(0) as u64,
+        high_water_percent: args.space_high_water_percent,
+        alarm_percent: args.space_alarm_percent,
+        clear_percent: args.space_clear_percent,
+        interval: std::time::Duration::from_secs(args.space_check_interval_secs.max(1)),
+        reclaim_retention: args.space_reclaim_retention.max(1),
+        auto_defrag: args.auto_defrag,
+        ..Default::default()
+    };
+    let space = Arc::new(if args.space_check_interval_secs == 0 {
+        tracing::warn!(
+            "space monitoring is disabled (--space-check-interval-secs 0) — \
+             nothing will reclaim space or raise a NOSPACE alarm"
+        );
+        fastetcd_server::space::SpaceGuard::disabled()
+    } else {
+        fastetcd_server::space::SpaceGuard::new(args.data_dir.clone(), space_cfg)
+    });
+
+    let server_state = Arc::new(
+        ServerState::new(
+            raft.clone(),
+            sm,
+            args.cluster_id,
+            node_id,
+            auth_state.clone(),
+            forwarder,
+        )
+        .with_space(space),
+    );
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());
+    if fastetcd_server::space::spawn(server_state.clone()).is_some() {
+        tracing::info!(
+            quota_backend_bytes = args.quota_backend_bytes,
+            high_water_percent = args.space_high_water_percent,
+            alarm_percent = args.space_alarm_percent,
+            max_snapshots = args.max_snapshots,
+            auto_defrag = args.auto_defrag,
+            "space monitor started"
+        );
+    }
     if let Some(_h) = fastetcd_server::compaction::spawn(
         server_state.clone(),
         fastetcd_server::compaction::Mode::Revision,
