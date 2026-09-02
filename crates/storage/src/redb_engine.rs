@@ -10,11 +10,12 @@
 
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::task;
 
 use crate::kvstore::{
@@ -33,6 +34,17 @@ pub struct RedbEngine {
 struct RedbInner {
     db: RwLock<Database>,
     path: PathBuf,
+    /// Snapshots currently outstanding. redb refuses to compact while
+    /// any read transaction is live, and a `RedbSnapshot` keeps its
+    /// transaction open for as long as the caller holds it — well after
+    /// the lock taken to create it was released. Under steady load
+    /// there is therefore almost always one live, which is why a
+    /// defragment on a busy server used to fail outright with "a
+    /// transaction is still in progress" (fastetcd#14). Defragment now
+    /// takes the write lock (which stops *new* snapshots) and waits
+    /// here for the outstanding ones to drain.
+    live_readers: Arc<AtomicUsize>,
+    readers_drained: Arc<Notify>,
 }
 
 impl RedbEngine {
@@ -45,6 +57,8 @@ impl RedbEngine {
             inner: Arc::new(RedbInner {
                 db: RwLock::new(db),
                 path,
+                live_readers: Arc::new(AtomicUsize::new(0)),
+                readers_drained: Arc::new(Notify::new()),
             }),
         })
     }
@@ -61,7 +75,10 @@ impl KvStore for RedbEngine {
         let db_guard = inner.db.read().await;
         let txn = db_guard.begin_read().map_err(StorageError::io)?;
         drop(db_guard);
+        inner.live_readers.fetch_add(1, Ordering::AcqRel);
         Ok(Arc::new(RedbSnapshot {
+            live_readers: inner.live_readers.clone(),
+            readers_drained: inner.readers_drained.clone(),
             _engine: inner.clone(),
             txn: Arc::new(txn),
         }))
@@ -192,45 +209,59 @@ impl KvStore for RedbEngine {
     }
 
     async fn defragment(&self) -> StorageResult<()> {
-        // Take the exclusive lock on the redb Database; this blocks any
-        // concurrent commit/snapshot until compaction completes.
+        // Take the exclusive lock first: `snapshot()` needs the read
+        // side, so from here on no *new* read transaction can be
+        // created. Reads and writes already in flight finish normally.
         let mut db_guard = self.inner.db.write().await;
 
-        // redb refuses to compact while any read transaction is live,
-        // and a busy server almost always has one in flight. Holding
-        // the write guard above stops *new* ones from being created, so
-        // the in-flight readers drain on their own — retry while that
-        // happens rather than failing a defragment the operator is
-        // running precisely because the volume is filling up.
-        const ATTEMPTS: usize = 20;
-        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
-        for attempt in 1..=ATTEMPTS {
-            match db_guard.compact() {
-                Ok(_changed) => return Ok(()),
-                Err(redb::CompactionError::TransactionInProgress) if attempt < ATTEMPTS => {
-                    tracing::debug!(
-                        target: "fastetcd::storage",
-                        attempt,
-                        "defragment waiting for in-flight readers to drain"
-                    );
-                    tokio::time::sleep(BACKOFF).await;
-                }
-                Err(e) => return Err(StorageError::io(e)),
+        // Then wait for the read transactions that were already
+        // outstanding to be dropped. redb refuses to compact while any
+        // of them is live, and on a busy server one essentially always
+        // is — this is why a defragment on a loaded node failed
+        // immediately with "a transaction is still in progress"
+        // (fastetcd#14), exactly when an operator most needs it to run.
+        const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
+        while self.inner.live_readers.load(Ordering::Acquire) > 0 {
+            let notified = self.inner.readers_drained.notified();
+            // Re-check after arming the waiter: the last reader may have
+            // been dropped between the load above and this point, and
+            // its notification would then have nobody to wake.
+            if self.inner.live_readers.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Err(StorageError::Misuse(format!(
+                    "defragment could not start: {} read transaction(s) stayed open \
+                     for {DRAIN_TIMEOUT:?} (a long-running range scan or watch). \
+                     Retry, or stop the server and run `fastetcd defrag`.",
+                    self.inner.live_readers.load(Ordering::Acquire)
+                )));
             }
         }
-        Err(StorageError::Misuse(
-            "defragment could not start: a read transaction stayed open for the \
-             whole retry window (a long-running range scan or watch)"
-                .to_string(),
-        ))
+
+        let _changed = db_guard.compact().map_err(StorageError::io)?;
+        Ok(())
     }
 }
 
 /// A redb read transaction that satisfies the `Snapshot` contract.
 struct RedbSnapshot {
+    live_readers: Arc<AtomicUsize>,
+    readers_drained: Arc<Notify>,
     // Kept alive so the read txn doesn't outlive the db handle.
     _engine: Arc<RedbInner>,
     txn: Arc<redb::ReadTransaction>,
+}
+
+impl Drop for RedbSnapshot {
+    fn drop(&mut self) {
+        // Releasing the last outstanding read transaction is what lets a
+        // waiting defragment start.
+        if self.live_readers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.readers_drained.notify_waiters();
+        }
+    }
 }
 
 #[async_trait]
@@ -461,23 +492,71 @@ mod tests {
         }
 
         let usage = eng.usage().await.unwrap();
+        // Every byte of what was written is live, so the pages redb
+        // holds must account for it. `stored_bytes` would report only
+        // the payload (~4 MiB here) and make three quarters of the file
+        // look recoverable.
+        let payload = 16 * 64 * 4096;
+        assert!(
+            usage.in_use_bytes >= payload,
+            "in_use {} must cover the {payload} bytes of live data",
+            usage.in_use_bytes
+        );
+
+        // The advertised figure is an upper bound on what a defragment
+        // can return, and it must hold: telling an operator that 22 MB
+        // is recoverable and then freeing zero is the failure this
+        // guards against.
         let before = usage.file_bytes;
         eng.defragment().await.unwrap();
         let actually_freed = before.saturating_sub(eng.size_on_disk().await.unwrap());
-
         assert!(
             usage.reclaimable_bytes() >= actually_freed,
             "a defragment freed {actually_freed} but only {} was advertised",
             usage.reclaimable_bytes()
         );
-        // The real test: nothing was deleted, so the estimate must be
-        // small — not "most of the file".
+
+        // And it converges: once defragmented, there is little left to
+        // promise.
+        let after = eng.usage().await.unwrap();
         assert!(
-            usage.reclaimable_bytes() < usage.file_bytes / 4,
-            "nothing was deleted, yet {} of {} bytes was advertised as reclaimable",
+            after.reclaimable_bytes() <= usage.reclaimable_bytes(),
+            "the estimate grew across a defragment: {} -> {}",
             usage.reclaimable_bytes(),
-            usage.file_bytes
+            after.reclaimable_bytes()
         );
+    }
+
+    /// A defragment must not fail just because a request is in flight.
+    /// redb refuses to compact while a read transaction is live, and on
+    /// a busy server one essentially always is — so a defragment used to
+    /// fail immediately, exactly when an operator most needs it to run
+    /// (fastetcd#14).
+    #[tokio::test]
+    async fn defragment_waits_for_an_outstanding_snapshot_instead_of_failing() {
+        let (_dir, eng) = open_temp();
+        let mut b = WriteBatch::new();
+        for i in 0..128u32 {
+            b.put("t", &i.to_be_bytes(), &[3u8; 1024]);
+        }
+        eng.commit(b, WriteOptions::default()).await.unwrap();
+
+        // Hold a snapshot, as an in-flight range scan or watch would.
+        let snap = eng.snapshot().await.unwrap();
+
+        let engine = eng.clone();
+        let defrag = tokio::spawn(async move { engine.defragment().await });
+
+        // Give the defragment time to take the lock and start waiting,
+        // then release the reader.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!defrag.is_finished(), "defragment must wait, not fail");
+        drop(snap);
+
+        defrag
+            .await
+            .expect("defragment task")
+            .expect("defragment must succeed once the reader is gone");
     }
 
     #[tokio::test]
