@@ -150,6 +150,15 @@ impl KvStore for RedbEngine {
     /// duration — call it on demand (deciding whether a defragment is
     /// worth it, answering `Maintenance.Status`), never on a hot path.
     /// The transaction is aborted, so nothing is written.
+    ///
+    /// "In use" is `allocated_pages * page_size` — the pages redb is
+    /// holding — not `stored_bytes`, which counts the key and value
+    /// bytes inside them. The difference is not academic: a store full
+    /// of live 4 KiB values reports roughly a quarter of its file as
+    /// `stored_bytes`, so using that number told an operator 22 MB was
+    /// recoverable from a store where a defragment freed nothing
+    /// (fastetcd#14). Only pages the allocator has actually released
+    /// can come back to the filesystem.
     async fn usage(&self) -> StorageResult<StoreUsage> {
         let file_bytes = self.size_on_disk().await?;
         let inner = self.inner.clone();
@@ -158,7 +167,9 @@ impl KvStore for RedbEngine {
         let stats = task::spawn_blocking(move || -> StorageResult<(u64, u64)> {
             let txn = txn;
             let stats = txn.stats().map_err(StorageError::io)?;
-            let in_use = stats.stored_bytes() + stats.metadata_bytes();
+            let in_use = stats
+                .allocated_pages()
+                .saturating_mul(stats.page_size() as u64);
             let fragmented = stats.fragmented_bytes();
             // Nothing was mutated; abort so the transaction doesn't
             // commit an empty write (which would cost an fsync).
