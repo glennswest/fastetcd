@@ -78,6 +78,10 @@
   Defragment now takes the engine's exclusive lock (stopping new
   snapshots) and waits for the outstanding readers to drain, with a 30s
   timeout that names the reader count and points at the offline path.
+- **space (#14):** `Maintenance.Status` could report more bytes in use
+  than the file contained, because the cached live-bytes measurement
+  described the pre-defragment file. Both defragment paths now
+  invalidate it, and the reported figure is clamped to the file size.
 - **#14:** a full data volume wedged the store in both directions —
   every read failed at the linearizable barrier behind a pending
   snapshot write, every write failed at the same place, and the one
