@@ -21,6 +21,13 @@ ports:
 persistence:
   enabled: true
   storageClass: ""
+  # Size this against the cluster, not against the data: a raft snapshot
+  # is a full copy of the database, so the volume runs ~10x the live
+  # Kubernetes objects. `fastetcd sizing --nodes N` prints the
+  # arithmetic. At default pod density: 512Mi for 1-10 nodes, 1Gi at
+  # 100, 2Gi at 500, 4Gi at 1000. 10Gi covers a large cluster with room
+  # to spare; set `space.expectedNodes` below to have the server check
+  # this at startup.
   size: 10Gi
 
 resources:
@@ -67,5 +74,12 @@ space:
   autoDefrag: true
   # Snapshots retained on disk. Each is a full copy of the database.
   maxSnapshots: 1
+  # Nodes this cluster will run. When set, the server checks
+  # persistence.size against its sizing model at startup and warns if
+  # the volume is too small — while the store is still empty and the
+  # answer is actionable. 0 disables the check.
+  expectedNodes: 0
+  # Average pods per node; this term dominates the estimate.
+  expectedPodsPerNode: 30
 
 extraArgs: []     # extra CLI flags passed verbatim to fastetcd

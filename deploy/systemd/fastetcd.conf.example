@@ -40,3 +40,10 @@
 #FASTETCD_SPACE_CHECK_INTERVAL_SECS=30
 #FASTETCD_SPACE_RECLAIM_RETENTION=1000
 #FASTETCD_AUTO_DEFRAG=true
+
+# Declared cluster size. When set, fastetcd checks the data volume
+# against its sizing model at startup and warns if it is too small, and
+# bounds MVCC history if auto-compaction was left off. Run
+# `fastetcd sizing --nodes N` for the arithmetic behind the number.
+#FASTETCD_EXPECTED_NODES=0
+#FASTETCD_EXPECTED_PODS_PER_NODE=30

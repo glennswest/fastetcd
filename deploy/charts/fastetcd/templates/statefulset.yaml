@@ -75,6 +75,10 @@ spec:
                 --space-reclaim-retention={{ .reclaimRetention }} \
                 --auto-defrag={{ .autoDefrag }} \
                 --max-snapshots={{ .maxSnapshots }} \
+                {{- if gt (int .expectedNodes) 0 }}
+                --expected-nodes={{ .expectedNodes }} \
+                --expected-pods-per-node={{ .expectedPodsPerNode }} \
+                {{- end }}
                 {{- end }}
                 {{- range .Values.extraArgs }}
                 {{ . }} \
