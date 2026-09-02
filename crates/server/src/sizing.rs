@@ -357,16 +357,40 @@ mod tests {
     }
 
     #[test]
-    fn density_matters_more_than_node_count() {
-        // 100 nodes at 110 pods each stores far more than 100 nodes at
-        // 30 — the pod term dominates, which is why the flag exists.
+    fn pod_density_dominates_the_variable_term() {
+        // Pods, not nodes, are what a Kubernetes datastore is mostly
+        // made of — which is why `--pods-per-node` exists and why
+        // sizing from node count alone under-reads a dense cluster.
         let sparse = estimate(shape(100));
         let dense = estimate(ClusterShape {
             nodes: 100,
             pods_per_node: 110,
             ..ClusterShape::default()
         });
-        assert!(dense.live_bytes > sparse.live_bytes * 2);
+
+        // The part that scales more than triples with density...
+        let sparse_var = sparse.live_bytes - FIXED_CLUSTER_BYTES;
+        let dense_var = dense.live_bytes - FIXED_CLUSTER_BYTES;
+        assert!(
+            dense_var > sparse_var * 3,
+            "variable term should scale with density: {} -> {}",
+            human(sparse_var),
+            human(dense_var)
+        );
+
+        // ...while the total does not even double, because the fixed
+        // cluster floor is half the estimate at this size. That floor is
+        // why a small cluster cannot be given a small volume.
+        assert!(
+            dense.live_bytes < sparse.live_bytes * 2,
+            "the fixed floor should damp the total: {} -> {}",
+            human(sparse.live_bytes),
+            human(dense.live_bytes)
+        );
+        assert!(
+            FIXED_CLUSTER_BYTES > sparse.live_bytes / 3,
+            "the fixed floor is a large share of a 100-node estimate"
+        );
     }
 
     #[test]
