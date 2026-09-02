@@ -226,7 +226,15 @@ impl SpaceGuard {
     pub fn stats(&self) -> SpaceStats {
         SpaceStats {
             db_bytes: self.db_bytes.load(Ordering::Relaxed),
-            db_in_use_bytes: self.db_in_use_bytes.load(Ordering::Relaxed),
+            db_in_use_bytes: {
+                let in_use = self.db_in_use_bytes.load(Ordering::Relaxed);
+                let db = self.db_bytes.load(Ordering::Relaxed);
+                if db == 0 {
+                    in_use
+                } else {
+                    in_use.min(db)
+                }
+            },
             snapshot_bytes: self.snapshot_bytes.load(Ordering::Relaxed),
             data_dir_bytes: self.data_dir_bytes.load(Ordering::Relaxed),
             fs_total_bytes: self.fs_total_bytes.load(Ordering::Relaxed),
@@ -262,6 +270,14 @@ impl SpaceGuard {
     /// deliberately not on any hot path: callers that want a number for
     /// a human (`Maintenance.Status`, `/metrics`) get the cached one and
     /// pay for a fresh walk only when it has gone stale.
+    /// Invalidate the cached live-bytes measurement, so the next reader
+    /// takes a fresh one. Called after a defragment, which changes the
+    /// answer completely — without this, `Status` could report more
+    /// bytes in use than the file now contains.
+    pub fn invalidate_in_use(&self) {
+        self.in_use_measured_at.store(0, Ordering::Relaxed);
+    }
+
     pub async fn in_use_bytes(
         &self,
         engine: &Arc<dyn fastetcd_storage::KvStore>,
@@ -279,7 +295,15 @@ impl SpaceGuard {
                 Err(e) => tracing::warn!(target: "fastetcd::space", "usage: {e}"),
             }
         }
-        self.db_in_use_bytes.load(Ordering::Relaxed)
+        // Never claim more is in use than the file holds: the cached
+        // measurement can predate a defragment that shrank it.
+        let db_bytes = self.db_bytes.load(Ordering::Relaxed);
+        let in_use = self.db_in_use_bytes.load(Ordering::Relaxed);
+        if db_bytes == 0 {
+            in_use
+        } else {
+            in_use.min(db_bytes)
+        }
     }
 
     /// Sample the store's footprint and update the alarm. Returns the
@@ -326,8 +350,8 @@ impl SpaceGuard {
     }
 
     /// Record an in-use measurement taken elsewhere (the reclaim path
-    /// already pays for the walk).
-    fn record_in_use(&self, bytes: u64) {
+    /// and the Defragment RPC already pay for the walk).
+    pub fn record_in_use(&self, bytes: u64) {
         self.db_in_use_bytes.store(bytes, Ordering::Relaxed);
         self.in_use_measured_at.store(unix_secs(), Ordering::Relaxed);
     }
@@ -480,6 +504,8 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
         "defragmenting the store (reads and writes pause until it completes)"
     );
     engine.defragment().await?;
+    // The measurement above describes a file that no longer exists.
+    state.space.invalidate_in_use();
     let after = engine.size_on_disk().await.unwrap_or(usage.file_bytes);
     tracing::warn!(
         target: "fastetcd::space",

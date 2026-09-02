@@ -197,7 +197,11 @@ impl Maintenance for MaintenanceService {
             "defragment complete"
         );
         // Freed space may have cleared the alarm; re-sample rather than
-        // leave writes refused until the next monitor tick.
+        // leave writes refused until the next monitor tick. The cached
+        // live-bytes figure describes the pre-defragment file, so drop
+        // it too — otherwise Status reports more in use than the file
+        // now holds.
+        self.state.space.invalidate_in_use();
         self.state.space.clone().refresh(&self.state).await;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
