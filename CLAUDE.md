@@ -10,7 +10,50 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.0.7`** — Tooling release: ships `fastetcd-bench`, a small concurrent
+**`1.1.0`** — Bounded on-disk footprint (#14). A fixed-size data volume
+must stay bounded and must never wedge the store. On the reported
+node a 64 MB volume filled after ~a day of ordinary control-plane
+traffic and then deadlocked in both directions: the snapshot write
+failed with ENOSPC, openraft surfaced that storage error on the
+linearizable read barrier *and* on every proposal, so even deleting
+keys to make room was refused — every process healthy, cluster down.
+Four changes:
+
+- **Snapshots are a retained set with roll-off.** They used to be one
+  file overwritten in place, which still needed room for two copies
+  during the write. `--max-snapshots` (default 1) is now enforced
+  oldest-first *before* the new snapshot is written, so a write never
+  needs room for `retain + 1`. Temp files and half-written pairs are
+  reclaimed on startup; the pre-1.1 `current.snap` layout migrates in
+  place. An ENOSPC on the write discards every retained snapshot and
+  retries — openraft rebuilds one, and a node with no snapshot beats a
+  node that cannot write one.
+- **Occupancy is measured against the device, not a quota.** The
+  monitor samples the data file, the retained snapshots and the
+  filesystem's real free space (`statvfs`); effective capacity is the
+  smaller of `--quota-backend-bytes` and what the volume can actually
+  hold. A 2 GiB quota on a 64 MB volume is a fiction, and it was that
+  fiction that let every threshold report healthy right up to ENOSPC.
+- **Reclaim at a high-water mark** (80%): compact MVCC history to
+  `--space-reclaim-retention` (even with auto-compaction off), trigger
+  a raft snapshot so the log can be purged, then defragment — the only
+  step that actually returns pages to the filesystem, since a
+  copy-on-write B-tree never shrinks its file on its own.
+- **NOSPACE alarm at 95%, raised while the store still works.** Writes
+  (`Put`, a `Txn` containing a put, `LeaseGrant`) are refused with
+  `ResourceExhausted` / `etcdserver: mvcc: database space exceeded`;
+  reads, deletes, compaction and defragment are deliberately not gated,
+  because refusing those is what makes a full volume unrecoverable.
+  Clears itself below 70% or via `etcdctl alarm disarm`.
+
+Also: `Maintenance.Alarm`/`Status` report real alarms, `dbSizeInUse`
+and `dbSizeQuota`; seven occupancy metrics on `/metrics`; offline
+`fastetcd defrag` (no quorum, no read barrier, no snapshot write —
+works on an already-full volume); `fastetcd-ctl status/defrag/compact/
+alarm`; `docs/04-disk-space.md`. Changelog backfilled for 0.8.2–1.0.7,
+which had drifted.
+
+Previous: **`1.0.7`** — Tooling release: ships `fastetcd-bench`, a small concurrent
 gRPC load generator (put / linearizable-get / serializable-get,
 throughput + latency percentiles), now bundled in the release tarball
 (work-plan #14). No server/behavior change from 1.0.6. Reference numbers
@@ -299,20 +342,21 @@ Tracked live in the Claude task system. Snapshot of the order:
 12. iouring engine implementing `KvStore` (Linux-only, cargo feature)
 13. Migration tool from etcd BoltDB
 14. Benchmarks: redb engine vs iouring engine vs upstream etcd
-15. **Bounded on-disk footprint (#14) — in progress.** A bounded data
+15. **Bounded on-disk footprint (#14) — done in v1.1.0.** A bounded data
     volume must never wedge the store. Work items:
-    - [ ] `KvStore::usage()` (file bytes / in-use bytes / fragmented
+    - [x] `KvStore::usage()` (file bytes / in-use bytes / fragmented
       bytes) + filesystem free-space probe.
-    - [ ] Space monitor task: high-water reclaim (compact → snapshot →
+    - [x] Space monitor task: high-water reclaim (compact → snapshot →
       purge → defragment) and a NOSPACE alarm at the alarm water mark.
-    - [ ] Writes rejected with `ResourceExhausted` under the alarm while
+    - [x] Writes rejected with `ResourceExhausted` under the alarm while
       reads/deletes/compaction/defrag stay available (etcd parity).
-    - [ ] Snapshot writes survive a full disk: stale `.tmp` cleanup on
-      open, and an ENOSPC retry that frees the previous snapshot first.
-    - [ ] `Maintenance.Alarm` returns real alarms; `Status` reports
+    - [x] Snapshot writes survive a full disk: retained-set roll-off
+      before each write, stale `.tmp`/orphan cleanup on open, and an
+      ENOSPC retry that frees every retained snapshot first.
+    - [x] `Maintenance.Alarm` returns real alarms; `Status` reports
       `dbSizeInUse` and `dbSizeQuota`.
-    - [ ] Occupancy metrics on `/metrics`.
-    - [ ] Offline `fastetcd defrag` escape hatch that works on a full
+    - [x] Occupancy metrics on `/metrics`.
+    - [x] Offline `fastetcd defrag` escape hatch that works on a full
       volume, plus `fastetcd-ctl defrag/compact/alarm`.
 
 ## Constraints & rules
