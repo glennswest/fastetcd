@@ -345,6 +345,71 @@ mod tests {
         );
     }
 
+    /// The ladder, pinned. Without this the model's *shape* is implied
+    /// rather than stated, and "does a 1000-node cluster really need
+    /// more than a 100-node one?" is a fair question to have to answer
+    /// from the code.
+    #[test]
+    fn the_sizing_ladder_is_what_the_docs_claim() {
+        let ladder: Vec<(u64, u64, u64)> = [1u64, 10, 100, 500, 1000, 5000]
+            .iter()
+            .map(|n| {
+                let e = estimate(shape(*n));
+                (*n, e.recommended_volume_bytes, e.provision_bytes)
+            })
+            .collect();
+
+        let mib = 1024 * 1024;
+        let gib = 1024 * mib;
+        let provisioned: Vec<u64> = ladder.iter().map(|(_, _, p)| *p).collect();
+        assert_eq!(
+            provisioned,
+            vec![512 * mib, 512 * mib, gib, 2 * gib, 4 * gib, 16 * gib],
+            "sizing ladder changed: {ladder:?}"
+        );
+
+        // 100 and 1000 nodes are emphatically not the same size.
+        let hundred = estimate(shape(100)).recommended_volume_bytes;
+        let thousand = estimate(shape(1000)).recommended_volume_bytes;
+        assert!(
+            thousand > hundred * 4,
+            "1000 nodes ({}) must dwarf 100 nodes ({})",
+            human(thousand),
+            human(hundred)
+        );
+    }
+
+    /// Small clusters *do* land in the same bucket, and that is the
+    /// model telling the truth rather than failing: below ~50 nodes the
+    /// estimate is fixed cluster overhead multiplied by the snapshot and
+    /// backup terms, so there is nothing to shave by counting nodes.
+    #[test]
+    fn small_clusters_are_dominated_by_fixed_cost_not_node_count() {
+        let one = estimate(shape(1));
+        let ten = estimate(shape(10));
+        assert_eq!(
+            one.provision_bytes, ten.provision_bytes,
+            "1 and 10 nodes provision the same; the difference is {} of live data",
+            human(ten.live_bytes - one.live_bytes)
+        );
+        // The node-proportional part is a rounding error at this size.
+        let variable = ten.live_bytes - FIXED_CLUSTER_BYTES;
+        assert!(
+            variable < FIXED_CLUSTER_BYTES / 8,
+            "10 nodes' variable term {} should be dwarfed by the {} floor",
+            human(variable),
+            human(FIXED_CLUSTER_BYTES)
+        );
+        // The crossover — where nodes start to matter more than the
+        // floor — is around 100 nodes at default density.
+        let hundred = estimate(shape(100));
+        assert!(
+            hundred.live_bytes - FIXED_CLUSTER_BYTES > FIXED_CLUSTER_BYTES / 2,
+            "by 100 nodes the variable term {} should rival the floor",
+            human(hundred.live_bytes - FIXED_CLUSTER_BYTES)
+        );
+    }
+
     #[test]
     fn the_estimate_grows_with_the_cluster() {
         let sizes: Vec<u64> = [1u64, 10, 100, 500, 1000]
