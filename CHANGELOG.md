@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [v1.2.0] — 2026-09-02
+
+### Added
+- **sizing:** `fastetcd sizing --nodes N [--pods-per-node P]` turns a
+  cluster shape into a recommended volume size and prints the
+  arithmetic behind it, so the estimate can be argued with rather than
+  trusted. The ladder at default density (30 pods/node): **512 MiB** for
+  1-10 nodes, **1 GiB** at 100, **2 GiB** at 500, **4 GiB** at 1000,
+  **16 GiB** at 5000.
+- **sizing:** `--expected-nodes N` / `--expected-pods-per-node P`. At
+  startup the server checks the real volume against that estimate —
+  while the store is still empty and the answer is actionable — and
+  logs an error naming the shortfall if it is too small. It warns
+  rather than refuses: an operator who knows their cluster better than
+  the model should not be blocked from booting a control plane. It also
+  enables revision-mode auto-compaction when
+  `--auto-compaction-retention` was left at `0`, scaled so the retained
+  window is roughly constant in *time* (~16 minutes) at any cluster
+  size, since node leases write ~6 revisions per node per minute.
+- **deploy:** the chart exposes `space.expectedNodes` /
+  `space.expectedPodsPerNode` and documents `persistence.size` against
+  the ladder; the systemd `EnvironmentFile` example gains the same.
+
+### Documentation
+- **docs:** `docs/04-disk-space.md` gains a sizing section explaining
+  why the volume runs ~10x the live data (MVCC history, copy-on-write
+  overhead, a raft snapshot that is a *full copy* of the database, the
+  raft log, and the upgrade backups), and why clusters below ~50 nodes
+  all land in the same bucket — the fixed cluster overhead (CRDs, RBAC,
+  API priority-and-fairness config) dominates until the pod term takes
+  over around 100 nodes.
+
 ## [v1.1.0] — 2026-09-02
 
 ### Added

@@ -10,7 +10,40 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.1.0`** — Bounded on-disk footprint (#14). A fixed-size data volume
+**`1.2.0`** — Volume sizing you can provision against. "How big should the
+volume be?" had no answer, and getting it wrong deadlocks the store
+(#14). `fastetcd sizing --nodes N [--pods-per-node P]` turns a cluster
+shape into a number *and shows its arithmetic*, so the estimate can be
+argued with. The ladder at 30 pods/node: 512 MiB for 1-10 nodes, 1 GiB
+at 100, 2 GiB at 500, 4 GiB at 1000, 16 GiB at 5000.
+
+The headline is that the volume runs roughly **10x the live data** — a
+100-node cluster stores 63 MiB of Kubernetes objects and wants 1 GiB —
+and that this is not waste. In order of size the multipliers are: MVCC
+history between compactions (+30%), the engine's copy-on-write overhead
+(x1.6), a raft snapshot (*a full copy of the database*, the term people
+forget), the raft log, and up to `--upgrade-backup-retain` safety
+backups at a full copy each. Sizing for the 63 MiB is how a volume
+fills.
+
+Two facts the model makes visible: clusters below ~50 nodes all land in
+the same bucket, because fixed cluster overhead (CRDs, RBAC, API
+priority-and-fairness config — none of it proportional to nodes)
+dominates until the pod term takes over around 100 nodes; and pod
+*density*, not node count, drives the variable part.
+
+`--expected-nodes N` runs the same check against the real volume at
+startup and logs the shortfall while the store is still empty and the
+answer is actionable — warning, not refusing, because a control plane
+that will not boot is worse than one that needs attention later. It also
+enables auto-compaction if it was left off, scaled to hold a roughly
+constant ~16-minute window at any cluster size.
+
+Filed #15 off the back of this: the snapshot term is a fastetcd-specific
+cost (etcd streams v3 snapshots out of bbolt rather than materializing a
+copy), and removing it would cut the volume requirement ~40%.
+
+Previous: **`1.1.0`** — Bounded on-disk footprint (#14). A fixed-size data volume
 must stay bounded and must never wedge the store. On the reported
 node a 64 MB volume filled after ~a day of ordinary control-plane
 traffic and then deadlocked in both directions: the snapshot write
@@ -52,6 +85,14 @@ and `dbSizeQuota`; seven occupancy metrics on `/metrics`; offline
 works on an already-full volume); `fastetcd-ctl status/defrag/compact/
 alarm`; `docs/04-disk-space.md`. Changelog backfilled for 0.8.2–1.0.7,
 which had drifted.
+
+An end-to-end test on a real bounded volume found three defects the unit
+tests had missed: `usage()` reported the key/value payload rather than
+the pages holding it (advertising 22 MB recoverable where a defragment
+freed zero); an online defragment failed outright on any loaded node,
+because redb refuses to compact while a read transaction is live and a
+snapshot holds one for as long as its caller does; and `Status` could
+report more bytes in use than the file contained.
 
 Previous: **`1.0.7`** — Tooling release: ships `fastetcd-bench`, a small concurrent
 gRPC load generator (put / linearizable-get / serializable-get,
