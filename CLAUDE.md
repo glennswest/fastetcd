@@ -342,7 +342,7 @@ Tracked live in the Claude task system. Snapshot of the order:
 12. iouring engine implementing `KvStore` (Linux-only, cargo feature)
 13. Migration tool from etcd BoltDB
 14. Benchmarks: redb engine vs iouring engine vs upstream etcd
-15. **Bounded on-disk footprint (#14) — done in v1.1.0.** A bounded data
+15. **Bounded on-disk footprint (#14) — done, shipped in v1.1.0.** A bounded data
     volume must never wedge the store. Work items:
     - [x] `KvStore::usage()` (file bytes / in-use bytes / fragmented
       bytes) + filesystem free-space probe.
