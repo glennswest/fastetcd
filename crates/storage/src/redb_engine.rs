@@ -10,7 +10,7 @@
 
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,6 +45,13 @@ struct RedbInner {
     /// here for the outstanding ones to drain.
     live_readers: Arc<AtomicUsize>,
     readers_drained: Arc<Notify>,
+    /// Set while a defragment is waiting for readers to drain. New
+    /// snapshots pause on it; writes deliberately do **not**, because
+    /// the MVCC apply path holds its snapshot across its own commit —
+    /// blocking that commit would keep the snapshot alive forever and
+    /// the drain could never finish.
+    defrag_pending: Arc<AtomicBool>,
+    defrag_done: Arc<Notify>,
 }
 
 impl RedbEngine {
@@ -59,6 +66,8 @@ impl RedbEngine {
                 path,
                 live_readers: Arc::new(AtomicUsize::new(0)),
                 readers_drained: Arc::new(Notify::new()),
+                defrag_pending: Arc::new(AtomicBool::new(false)),
+                defrag_done: Arc::new(Notify::new()),
             }),
         })
     }
@@ -72,6 +81,15 @@ impl RedbEngine {
 impl KvStore for RedbEngine {
     async fn snapshot(&self) -> StorageResult<Arc<dyn Snapshot>> {
         let inner = self.inner.clone();
+        // Hold off while a defragment is draining: every new read
+        // transaction resets the count it is waiting on.
+        while inner.defrag_pending.load(Ordering::Acquire) {
+            let done = inner.defrag_done.notified();
+            if !inner.defrag_pending.load(Ordering::Acquire) {
+                break;
+            }
+            done.await;
+        }
         let db_guard = inner.db.read().await;
         let txn = db_guard.begin_read().map_err(StorageError::io)?;
         drop(db_guard);
@@ -215,24 +233,33 @@ impl KvStore for RedbEngine {
     }
 
     async fn defragment(&self) -> StorageResult<()> {
-        // Take the exclusive lock first: `snapshot()` needs the read
-        // side, so from here on no *new* read transaction can be
-        // created. Reads and writes already in flight finish normally.
-        let mut db_guard = self.inner.db.write().await;
+        // redb refuses to compact while any read transaction is live,
+        // and a snapshot holds one for as long as its caller does — long
+        // after the lock used to create it was released. On a loaded
+        // node one essentially always is, so a defragment used to fail
+        // immediately with "a transaction is still in progress", exactly
+        // when an operator most needs it to run (fastetcd#14).
+        //
+        // So: stop handing out new snapshots, wait for the outstanding
+        // ones to be dropped, and only then take the exclusive lock and
+        // compact.
+        //
+        // Writes are deliberately *not* blocked during the drain. The
+        // MVCC apply path takes a snapshot and holds it across its own
+        // commit; blocking that commit (which needs the engine's read
+        // lock, and would therefore queue behind an exclusive lock taken
+        // early) would keep its snapshot alive for as long as we waited,
+        // and the drain could never finish. Taking the exclusive lock
+        // last lets those applies complete and release their readers.
+        let _pending = DefragPending::set(&self.inner);
 
-        // Then wait for the read transactions that were already
-        // outstanding to be dropped. redb refuses to compact while any
-        // of them is live, and on a busy server one essentially always
-        // is — this is why a defragment on a loaded node failed
-        // immediately with "a transaction is still in progress"
-        // (fastetcd#14), exactly when an operator most needs it to run.
         const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
         while self.inner.live_readers.load(Ordering::Acquire) > 0 {
             let notified = self.inner.readers_drained.notified();
             // Re-check after arming the waiter: the last reader may have
             // been dropped between the load above and this point, and
-            // its notification would then have nobody to wake.
+            // its notification would then have had nobody to wake.
             if self.inner.live_readers.load(Ordering::Acquire) == 0 {
                 break;
             }
@@ -246,8 +273,28 @@ impl KvStore for RedbEngine {
             }
         }
 
+        let mut db_guard = self.inner.db.write().await;
         let _changed = db_guard.compact().map_err(StorageError::io)?;
         Ok(())
+    }
+}
+
+/// Holds the "a defragment is draining" flag for the life of the
+/// defragment, so every exit path — success, drain timeout, a failed
+/// compaction — releases the snapshot waiters.
+struct DefragPending(Arc<RedbInner>);
+
+impl DefragPending {
+    fn set(inner: &Arc<RedbInner>) -> Self {
+        inner.defrag_pending.store(true, Ordering::Release);
+        Self(inner.clone())
+    }
+}
+
+impl Drop for DefragPending {
+    fn drop(&mut self) {
+        self.0.defrag_pending.store(false, Ordering::Release);
+        self.0.defrag_done.notify_waiters();
     }
 }
 

@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             println!("db size:      {}", human_bytes(r.db_size));
             println!("db in use:    {}", human_bytes(r.db_size_in_use));
             println!(
-                "reclaimable:  {}  (run `fastetcd-ctl defrag` to return it)",
+                "recoverable:  up to {}  (`fastetcd-ctl defrag`; an upper bound)",
                 human_bytes(r.db_size - r.db_size_in_use)
             );
             if r.db_size_quota > 0 {

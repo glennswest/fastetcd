@@ -231,7 +231,14 @@ pub struct StoreUsage {
 }
 
 impl StoreUsage {
-    /// Bytes a defragment could plausibly return to the filesystem.
+    /// Upper bound on what a defragment could return to the filesystem:
+    /// the part of the file not held by live pages.
+    ///
+    /// An upper bound, not a promise. An allocator can usually only give
+    /// back whole regions at the end of the file, so a store whose live
+    /// pages are spread across it may free less — or nothing. Treat this
+    /// as "is a defragment worth the pause", never as "you will get this
+    /// many bytes".
     pub fn reclaimable_bytes(&self) -> u64 {
         self.file_bytes.saturating_sub(self.in_use_bytes)
     }

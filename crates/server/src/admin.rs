@@ -294,7 +294,7 @@ pub async fn cmd_defrag(data_dir: &Path) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("reading store usage: {e}"))?;
     println!(
-        "defrag: {} is {} bytes, {} bytes live ({} bytes reclaimable)",
+        "defrag: {} is {} bytes, {} bytes live (up to {} bytes may be recoverable)",
         src.display(),
         usage.file_bytes,
         usage.in_use_bytes,
@@ -314,9 +314,11 @@ pub async fn cmd_defrag(data_dir: &Path) -> anyhow::Result<()> {
     );
     if after >= before {
         println!(
-            "defrag: nothing was reclaimable — the live data itself is what fills \
-             the volume. Compact MVCC history (`etcdctl compact <rev>`, or run with \
-             --auto-compaction-retention) or give the volume more room."
+            "defrag: nothing came back. The figure above is an upper bound — it is \
+             the space not currently held by live pages, and the allocator can only \
+             return whole regions at the end of the file. Compact MVCC history \
+             (`etcdctl compact <rev>`, or run with --auto-compaction-retention) to \
+             turn live pages into free ones, or give the volume more room."
         );
     }
     Ok(())
