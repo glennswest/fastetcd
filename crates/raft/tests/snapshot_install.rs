@@ -293,3 +293,52 @@ async fn retention_above_one_keeps_that_many_snapshots() {
     let cur = sm.get_current_snapshot().await.unwrap().unwrap();
     assert_eq!(cur.meta.last_log_id.map(|l| l.index), Some(6));
 }
+
+/// A snapshot that cannot be written must not take the node down
+/// (fastetcd#14).
+///
+/// openraft treats a `StorageError` from the snapshot builder as fatal:
+/// it comes back out of the linearizable read barrier *and* out of
+/// every proposal, so on the reported node a full volume made reads and
+/// writes fail together — and deleting keys to make room failed for the
+/// same reason. The snapshot body is a durability convenience; the
+/// state machine's data and `last_applied` are already committed. So a
+/// failed write must degrade to "no current snapshot" (the log just
+/// isn't purged yet), not to a dead node.
+#[tokio::test]
+async fn a_snapshot_that_cannot_be_written_does_not_fail_the_node() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("s.redb");
+    let snap_dir = path.parent().unwrap().join("snapshots");
+
+    let (mut sm, mvcc) = open_sm(&path).await;
+    sm.apply(vec![put_entry(1, "a", "1"), put_entry(2, "b", "2")])
+        .await
+        .unwrap();
+
+    // Block the write by parking a directory where the snapshot body
+    // has to land: the rename onto it fails for any user, root
+    // included, which a read-only directory would not.
+    std::fs::create_dir_all(snap_dir.join("00000000000000000002.snap")).unwrap();
+
+    let built = sm
+        .get_snapshot_builder()
+        .await
+        .build_snapshot()
+        .await
+        .expect("an unwritable snapshot must not surface as a storage error");
+    assert_eq!(built.meta.last_log_id.map(|l| l.index), Some(2));
+
+    // No snapshot is reported, so openraft simply doesn't purge yet.
+    assert!(
+        sm.get_current_snapshot().await.unwrap().is_none(),
+        "a snapshot that was not persisted must not be reported as current"
+    );
+
+    // And the state machine keeps working — which is the whole point.
+    sm.apply(vec![put_entry(3, "c", "3")])
+        .await
+        .expect("applies must continue after a failed snapshot write");
+    assert_eq!(mvcc.current_revision().await, 3);
+    assert_eq!(visible_keys(&mvcc).await, 3);
+}

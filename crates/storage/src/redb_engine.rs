@@ -181,11 +181,37 @@ impl KvStore for RedbEngine {
     }
 
     async fn defragment(&self) -> StorageResult<()> {
-        // Take the exclusive lock on the redb Database; this blocks
-        // any concurrent commit/snapshot until compaction completes.
+        // Take the exclusive lock on the redb Database; this blocks any
+        // concurrent commit/snapshot until compaction completes.
         let mut db_guard = self.inner.db.write().await;
-        let _changed = db_guard.compact().map_err(StorageError::io)?;
-        Ok(())
+
+        // redb refuses to compact while any read transaction is live,
+        // and a busy server almost always has one in flight. Holding
+        // the write guard above stops *new* ones from being created, so
+        // the in-flight readers drain on their own — retry while that
+        // happens rather than failing a defragment the operator is
+        // running precisely because the volume is filling up.
+        const ATTEMPTS: usize = 20;
+        const BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+        for attempt in 1..=ATTEMPTS {
+            match db_guard.compact() {
+                Ok(_changed) => return Ok(()),
+                Err(redb::CompactionError::TransactionInProgress) if attempt < ATTEMPTS => {
+                    tracing::debug!(
+                        target: "fastetcd::storage",
+                        attempt,
+                        "defragment waiting for in-flight readers to drain"
+                    );
+                    tokio::time::sleep(BACKOFF).await;
+                }
+                Err(e) => return Err(StorageError::io(e)),
+            }
+        }
+        Err(StorageError::Misuse(
+            "defragment could not start: a read transaction stayed open for the \
+             whole retry window (a long-running range scan or watch)"
+                .to_string(),
+        ))
     }
 }
 

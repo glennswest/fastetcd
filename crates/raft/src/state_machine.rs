@@ -371,18 +371,26 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
         })?;
 
         // Persist the installed snapshot to disk (body + meta) so it
-        // survives restart; keep only the meta in RAM.
-        self.persist_snapshot(meta, &data).await.map_err(|e| {
-            StorageIOError::write_snapshot(
-                Some(meta.signature()),
-                AnyError::error(format!("persist installed snapshot: {e}")),
-            )
-        })?;
+        // survives restart; keep only the meta in RAM. Best-effort: the
+        // data is already durable in the MVCC store above, so failing
+        // to keep a copy must not fail the install (see
+        // `build_snapshot` for why a storage error here is fatal to the
+        // whole node).
+        let persisted = self.persist_snapshot(meta, &data).await;
+        if let Err(e) = &persisted {
+            tracing::error!(
+                target: "fastetcd::snapshot",
+                error = %e,
+                "installed snapshot could not be persisted — the data is applied \
+                 and durable, but the log cannot be purged against it until a \
+                 snapshot lands. Free space on the data volume."
+            );
+        }
 
         let mut g = self.inner.lock().await;
         g.last_applied_log_id = payload.last_applied_log_id;
         g.last_membership = payload.last_membership;
-        g.current_snapshot = Some(meta.clone());
+        g.current_snapshot = persisted.is_ok().then(|| meta.clone());
         Ok(())
     }
 
@@ -437,10 +445,30 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
         };
         // Persist to disk (body + meta); keep only the meta in RAM so an
         // idle node doesn't hold the whole serialized database (#13).
-        self.sm.persist_snapshot(&meta, &data).await.map_err(|e| {
-            StorageIOError::write_snapshot(Some(meta.signature()), AnyError::new(&e))
-        })?;
-        self.sm.inner.lock().await.current_snapshot = Some(meta.clone());
+        //
+        // A failure here must not become a `StorageError`. openraft
+        // treats a storage error as fatal to the whole node: it surfaces
+        // on the linearizable read barrier and on every proposal, so a
+        // full volume took the store down in both directions and even
+        // deleting keys to make room was refused (fastetcd#14). The
+        // snapshot body is only a durability convenience — the state
+        // machine's data and `last_applied` are already committed — so
+        // when it cannot be written we log loudly, report no current
+        // snapshot (the log simply isn't purged yet) and keep serving.
+        let persisted = self.sm.persist_snapshot(&meta, &data).await;
+        if let Err(e) = &persisted {
+            tracing::error!(
+                target: "fastetcd::snapshot",
+                error = %e,
+                bytes = data.len(),
+                "could not persist the raft snapshot — continuing without one. \
+                 The raft log will not be purged until a snapshot lands, so free \
+                 space on the data volume (delete keys, `etcdctl compact`, \
+                 `etcdctl defrag`, or `fastetcd defrag` with the server stopped)."
+            );
+        }
+        self.sm.inner.lock().await.current_snapshot =
+            persisted.is_ok().then(|| meta.clone());
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),
