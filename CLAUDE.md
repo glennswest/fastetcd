@@ -299,6 +299,21 @@ Tracked live in the Claude task system. Snapshot of the order:
 12. iouring engine implementing `KvStore` (Linux-only, cargo feature)
 13. Migration tool from etcd BoltDB
 14. Benchmarks: redb engine vs iouring engine vs upstream etcd
+15. **Bounded on-disk footprint (#14) — in progress.** A bounded data
+    volume must never wedge the store. Work items:
+    - [ ] `KvStore::usage()` (file bytes / in-use bytes / fragmented
+      bytes) + filesystem free-space probe.
+    - [ ] Space monitor task: high-water reclaim (compact → snapshot →
+      purge → defragment) and a NOSPACE alarm at the alarm water mark.
+    - [ ] Writes rejected with `ResourceExhausted` under the alarm while
+      reads/deletes/compaction/defrag stay available (etcd parity).
+    - [ ] Snapshot writes survive a full disk: stale `.tmp` cleanup on
+      open, and an ENOSPC retry that frees the previous snapshot first.
+    - [ ] `Maintenance.Alarm` returns real alarms; `Status` reports
+      `dbSizeInUse` and `dbSizeQuota`.
+    - [ ] Occupancy metrics on `/metrics`.
+    - [ ] Offline `fastetcd defrag` escape hatch that works on a full
+      volume, plus `fastetcd-ctl defrag/compact/alarm`.
 
 ## Constraints & rules
 
