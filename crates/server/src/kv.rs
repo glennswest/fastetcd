@@ -21,7 +21,7 @@ use std::sync::Arc;
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::kv_server::Kv;
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
-use fastetcd_storage::mvcc::{MutationResult, RangeResult, TxnOpResult, TxnResult};
+use fastetcd_storage::mvcc::{RangeResult, TxnOpResult, TxnResult};
 use tonic::{Request, Response, Status};
 
 use crate::authz::{authorize, authorize_all, Access, RequiredPerm, UserIdentity};
@@ -238,7 +238,7 @@ impl Kv for KvService {
             other => return Err(Status::internal(format!("unexpected response: {other:?}"))),
         };
 
-        Ok(Response::new(txn_result_to_response(&self.state, result).await))
+        Ok(Response::new(txn_result_to_response(&self.state, &req, result).await?))
     }
 
     async fn compact(
@@ -316,70 +316,64 @@ fn range_result_to_response(
     }
 }
 
+/// Build the gRPC response for an applied txn.
+///
+/// Each `ResponseOp` takes its variant from the request op at the same
+/// position in the branch that ran, as etcd guarantees. The applied
+/// result alone cannot say: a single-key `DeleteRange` and a `Put`
+/// both produce one `MutationResult` with `n == 1`, and inferring the
+/// kind from that shape is what turned deletes into `ResponsePut`s
+/// (fastetcd#18). The request is still in hand here, so nothing about
+/// the kind needs to travel through Raft.
 async fn txn_result_to_response(
     state: &ServerState,
+    req: &pb::TxnRequest,
     txn: TxnResult,
-) -> pb::TxnResponse {
+) -> Result<pb::TxnResponse, Status> {
+    use pb::request_op::Request;
+    use pb::response_op::Response as Resp;
+
     let header = response_header(state, txn.revision).await;
-    let mut responses = Vec::with_capacity(txn.op_results.len());
-    for op_result in txn.op_results {
-        let pb_resp = match op_result {
-            TxnOpResult::Range(r) => {
-                // Construct an inner RangeResponse with the same header.
-                let header = pb::ResponseHeader {
-                    revision: txn.revision,
-                    ..header
-                };
-                pb::ResponseOp {
-                    response: Some(pb::response_op::Response::ResponseRange(
-                        range_result_to_response(header, r, false),
-                    )),
-                }
-            }
-            TxnOpResult::Mutation(m) => mutation_result_to_response_op(&header, m),
-        };
-        responses.push(pb_resp);
+    let ops = if txn.succeeded { &req.success } else { &req.failure };
+    if ops.len() != txn.op_results.len() {
+        return Err(Status::internal(format!(
+            "txn: {} op results for {} request ops",
+            txn.op_results.len(),
+            ops.len()
+        )));
     }
-    pb::TxnResponse {
+    let mut responses = Vec::with_capacity(ops.len());
+    for (op, result) in ops.iter().zip(txn.op_results) {
+        let response = match (&op.request, result) {
+            (Some(Request::RequestRange(r)), TxnOpResult::Range(res)) => {
+                Resp::ResponseRange(range_result_to_response(header, res, r.count_only))
+            }
+            (Some(Request::RequestPut(_)), TxnOpResult::Mutation(m)) => {
+                Resp::ResponsePut(pb::PutResponse {
+                    header: Some(header),
+                    prev_kv: m.prev_kvs.first().map(conv::record_to_kv),
+                })
+            }
+            (Some(Request::RequestDeleteRange(_)), TxnOpResult::Mutation(m)) => {
+                Resp::ResponseDeleteRange(pb::DeleteRangeResponse {
+                    header: Some(header),
+                    deleted: m.n,
+                    prev_kvs: m.prev_kvs.iter().map(conv::record_to_kv).collect(),
+                })
+            }
+            (req_op, _) => {
+                return Err(Status::internal(format!(
+                    "txn: op result does not match request op {req_op:?}"
+                )))
+            }
+        };
+        responses.push(pb::ResponseOp { response: Some(response) });
+    }
+    Ok(pb::TxnResponse {
         header: Some(header),
         succeeded: txn.succeeded,
         responses,
-    }
-}
-
-fn mutation_result_to_response_op(
-    header: &pb::ResponseHeader,
-    m: MutationResult,
-) -> pb::ResponseOp {
-    // We don't know inside a Txn whether the mutation was a Put or a
-    // DeleteRange; pick by the shape of the result. `n == 1` and
-    // exactly one prev_kv (or none) indicates a Put; any other shape
-    // is treated as DeleteRange (matches etcd's choice when result
-    // counts don't disambiguate — DeleteRange is the "generic" case).
-    //
-    // In practice the gRPC service knows because the request op
-    // already discriminated; the trade here is to keep TxnResult
-    // engine-agnostic. We could carry an op tag in TxnOpResult to
-    // make this exact — TODO for a follow-up.
-    let looks_like_put = m.n == 1 && m.prev_kvs.len() <= 1;
-    if looks_like_put {
-        pb::ResponseOp {
-            response: Some(pb::response_op::Response::ResponsePut(pb::PutResponse {
-                header: Some(*header),
-                prev_kv: m.prev_kvs.first().map(conv::record_to_kv),
-            })),
-        }
-    } else {
-        pb::ResponseOp {
-            response: Some(pb::response_op::Response::ResponseDeleteRange(
-                pb::DeleteRangeResponse {
-                    header: Some(*header),
-                    deleted: m.n,
-                    prev_kvs: m.prev_kvs.iter().map(conv::record_to_kv).collect(),
-                },
-            )),
-        }
-    }
+    })
 }
 
 fn mvcc_error_to_status(e: fastetcd_storage::mvcc::MvccError) -> Status {

@@ -316,6 +316,136 @@ async fn txn_success_branch_runs_when_compare_holds() {
     assert_eq!(range.kvs[0].value, b"v1");
 }
 
+fn put_op(key: &[u8], prev_kv: bool) -> pb::RequestOp {
+    pb::RequestOp {
+        request: Some(pb::request_op::Request::RequestPut(pb::PutRequest {
+            key: key.to_vec(),
+            value: b"v".to_vec(),
+            prev_kv,
+            ..Default::default()
+        })),
+    }
+}
+
+fn delete_op(key: &[u8], range_end: &[u8], prev_kv: bool) -> pb::RequestOp {
+    pb::RequestOp {
+        request: Some(pb::request_op::Request::RequestDeleteRange(pb::DeleteRangeRequest {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            prev_kv,
+        })),
+    }
+}
+
+fn range_op(key: &[u8], range_end: &[u8]) -> pb::RequestOp {
+    pb::RequestOp {
+        request: Some(pb::request_op::Request::RequestRange(pb::RangeRequest {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            ..Default::default()
+        })),
+    }
+}
+
+/// fastetcd#18: each response op has the variant of the request op at
+/// the same position. A single-key DeleteRange used to come back as a
+/// `ResponsePut`, because both results have `n == 1`.
+#[tokio::test]
+async fn txn_response_ops_match_request_ops() {
+    use pb::response_op::Response as R;
+    let (mut client, _dir) = start_test_server().await;
+    for k in [&b"a"[..], b"b", b"c1", b"c2"] {
+        client
+            .put(pb::PutRequest { key: k.to_vec(), value: b"v0".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+    }
+    let resp = client
+        .txn(pb::TxnRequest {
+            compare: vec![],
+            success: vec![
+                delete_op(b"a", b"", true), // single key, one hit: the #18 case
+                put_op(b"p", false),        // new key: no prev_kv
+                put_op(b"b", true),         // overwrite, with prev_kv
+                delete_op(b"missing", b"", false), // zero hits
+                delete_op(b"c", b"d", false),      // range, two hits
+                range_op(b"b", b""),
+            ],
+            failure: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.succeeded);
+    let ops: Vec<R> = resp.responses.into_iter().map(|r| r.response.unwrap()).collect();
+    assert_eq!(ops.len(), 6);
+
+    match &ops[0] {
+        R::ResponseDeleteRange(d) => {
+            assert_eq!(d.deleted, 1);
+            assert_eq!(d.prev_kvs.len(), 1);
+            assert_eq!(d.prev_kvs[0].key, b"a");
+        }
+        other => panic!("op 0: single-key delete read back as {other:?}"),
+    }
+    match &ops[1] {
+        R::ResponsePut(p) => assert!(p.prev_kv.is_none()),
+        other => panic!("op 1: put read back as {other:?}"),
+    }
+    match &ops[2] {
+        R::ResponsePut(p) => assert_eq!(p.prev_kv.as_ref().unwrap().value, b"v0"),
+        other => panic!("op 2: put read back as {other:?}"),
+    }
+    match &ops[3] {
+        R::ResponseDeleteRange(d) => assert_eq!(d.deleted, 0),
+        other => panic!("op 3: zero-hit delete read back as {other:?}"),
+    }
+    match &ops[4] {
+        R::ResponseDeleteRange(d) => assert_eq!(d.deleted, 2),
+        other => panic!("op 4: range delete read back as {other:?}"),
+    }
+    match &ops[5] {
+        R::ResponseRange(r) => {
+            assert_eq!(r.kvs.len(), 1);
+            assert_eq!(r.kvs[0].value, b"v");
+        }
+        other => panic!("op 5: range read back as {other:?}"),
+    }
+}
+
+/// The failure branch's ops are the ones matched against when the
+/// compare fails.
+#[tokio::test]
+async fn txn_failure_branch_response_ops_match_failure_ops() {
+    use pb::response_op::Response as R;
+    let (mut client, _dir) = start_test_server().await;
+    client
+        .put(pb::PutRequest { key: b"k".to_vec(), value: b"v0".to_vec(), ..Default::default() })
+        .await
+        .unwrap();
+    let resp = client
+        .txn(pb::TxnRequest {
+            compare: vec![pb::Compare {
+                key: b"k".to_vec(),
+                result: pb::compare::CompareResult::Equal as i32,
+                target: pb::compare::CompareTarget::Value as i32,
+                target_union: Some(pb::compare::TargetUnion::Value(b"nope".to_vec())),
+                ..Default::default()
+            }],
+            success: vec![put_op(b"k", false), put_op(b"k2", false)],
+            failure: vec![delete_op(b"k", b"", false)],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!resp.succeeded);
+    assert_eq!(resp.responses.len(), 1);
+    match resp.responses[0].response.as_ref().unwrap() {
+        R::ResponseDeleteRange(d) => assert_eq!(d.deleted, 1),
+        other => panic!("failure-branch delete read back as {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn compact_then_old_revision_errors() {
     let (mut client, _dir) = start_test_server().await;
