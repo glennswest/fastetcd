@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 2026-09-24
+- **fix:** `Txn` is now authorized (#22). It had no permission check,
+  so any authenticated user could read or write keys outside their
+  roles by wrapping the operation in a transaction. A txn now needs
+  read on every compare target and the permission of every op in both
+  the success and failure branches (nested txns included), checked
+  all-or-nothing before anything is proposed, as in etcd.
+- **fix:** `prev_kv` on `Put`/`DeleteRange` (standalone or in a txn)
+  now also requires read permission, as in etcd: returning the old
+  value is a read.
+- **docs:** `docs/03-deploy.md` documents what each operation needs and
+  that auth is not yet a security boundary (#31, #32, #33).
+
 ## [v1.2.1] — 2026-09-24
 
 ### Fixed

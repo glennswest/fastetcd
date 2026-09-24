@@ -142,6 +142,35 @@ etcdctl auth enable
 Clients then run with `--user=reader:password` (etcdctl) or send a
 `token` metadata field after calling `Authenticate`.
 
+### What a role's permissions cover
+
+With auth enabled, a non-root user's roles are checked on every KV
+operation, the same way etcd checks them:
+
+| Operation | Needs |
+|---|---|
+| `Range` | read on `[key, range_end)` |
+| `Put` | write on `key`; plus read if `prev_kv` |
+| `DeleteRange` | write on `[key, range_end)`; plus read if `prev_kv` |
+| `Txn` | read on every compare target, and the above for **every** op in **both** the success and failure branches (nested txns included) |
+
+A `Txn` is authorized as a whole before anything is proposed: one
+access the user's roles do not cover fails it with `PermissionDenied`,
+and nothing in it is applied. Both branches are checked because which
+one runs is only decided when the txn is applied. A compare is a read,
+because it reveals whether a key exists and what it holds. A
+write-only role therefore cannot run a guarded write (`compare` +
+`put`) on its own keys.
+
+**Auth is not yet a security boundary.** Three gaps remain, each
+tracked: `Watch` does not check permissions (#33); the admin RPCs
+(user/role management, `AuthDisable`, `Maintenance.Snapshot`, member
+changes, `Compact`) do not require root, so any authenticated user can
+grant itself the root role (#31); and auth state is written to the
+local node, not replicated through Raft (#32). Until those land, treat
+auth as protection against mistakes by trusted clients, not against a
+hostile one: scope untrusted clients with mTLS and a proxy.
+
 ## Storage engine
 
 fastetcd ships two engines:

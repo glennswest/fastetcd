@@ -13,9 +13,11 @@
 //!     enabled, the `AuthInterceptor` requires a valid token on
 //!     every request (see `auth_interceptor` below).
 //!
-//! Phase 1 does **not** enforce per-key permissions on KV requests.
-//! Authenticated users are full-cluster authorized. Per-key
-//! permission enforcement is Phase 2.
+//! Per-key permissions are enforced in `crate::authz` on every KV path
+//! (`Range`, `Put`, `DeleteRange`, and each compare and op of a `Txn`,
+//! #22). Not yet enforced: `Watch` (#33) and the root-only check on
+//! admin RPCs, including this service's own mutations (#31). Auth state
+//! is written to the local engine, not through Raft (#32).
 
 use std::collections::HashSet;
 use std::ops::Bound;
