@@ -605,8 +605,24 @@ impl MvccStore {
         range_end: &[u8],
         start_rev: i64,
     ) -> MvccResult<Vec<MvccEvent>> {
+        self.range_events_until(key, range_end, start_rev, i64::MAX)
+            .await
+    }
+
+    /// [`Self::range_events`] with an inclusive upper bound: events in
+    /// `(start_rev, min(end_rev, current_rev)]`. The Watch service uses
+    /// this to catch a lagging watcher up to exactly the revision it
+    /// then resumes live delivery from, so nothing is skipped or sent
+    /// twice at the seam.
+    pub async fn range_events_until(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        start_rev: i64,
+        end_rev: i64,
+    ) -> MvccResult<Vec<MvccEvent>> {
         let state = self.inner.write_state.lock().await;
-        let current = state.current_rev;
+        let current = state.current_rev.min(end_rev);
         let compact = state.compact_rev;
         drop(state);
 
