@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.2.2`** — `Txn` is authorized (#22). With auth enabled, `Txn` had
+**`1.2.3`** — Txn response ops have the variant of their request op
+(#18). The kind of each `ResponseOp` used to be guessed from the
+result's shape (`n == 1` → Put), so a `DeleteRange` that removed one
+key came back as a `ResponsePut`. The handler now builds the response
+by pairing each op in the branch that ran with its result, by position.
+No storage or raft wire change. Found alongside it: #35, a `Range`
+inside a txn doesn't see that txn's own earlier writes.
+
+Previous: **`1.2.2`** — `Txn` is authorized (#22). With auth enabled, `Txn` had
 no permission check at all, so any authenticated user could read or
 write any key by wrapping the operation in a transaction. A txn now
 needs read on every compare target, plus the permission of every op in
@@ -458,18 +466,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       changelog. Remaining auth gaps filed: #31 (admin RPCs not root-only), #32 (auth
       state not replicated), #33 (Watch unauthorized).
 
-18. **Txn response ops match their request ops (#18) — in progress.**
+18. **Txn response ops match their request ops (#18) — done, shipped in v1.2.3.**
     Each `ResponseOp` in a `TxnResponse` was a guess from the
     result's shape (`n == 1` → Put), so a single-key `DeleteRange` came
-    back as a `ResponsePut`, and a put that replaced nothing came back as a
-    `ResponseDeleteRange`. Work items:
-    - [ ] Build the response in the gRPC handler from the request ops
+    back as a `ResponsePut`. Work items:
+    - [x] Build the response in the gRPC handler from the request ops
       of the branch that ran (`succeeded` → success, else failure),
       zipped by position with the op results. No storage or raft wire
       change.
-    - [ ] Error rather than guess if the counts or kinds disagree.
-    - [ ] Regression tests in `kv_grpc.rs` (single-key delete, zero-hit
+    - [x] Error rather than guess if the counts or kinds disagree.
+    - [x] Regression tests in `kv_grpc.rs` (single-key delete, zero-hit
       delete, multi-key delete, put, range, failure branch); changelog.
+    - Found alongside: a `Range` in a txn doesn't see the txn's own
+      earlier writes (etcd's does) — #35.
 
 ## Constraints & rules
 
