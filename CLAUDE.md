@@ -458,6 +458,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       changelog. Remaining auth gaps filed: #31 (admin RPCs not root-only), #32 (auth
       state not replicated), #33 (Watch unauthorized).
 
+18. **Txn response ops match their request ops (#18) — in progress.**
+    Each `ResponseOp` in a `TxnResponse` was a guess from the
+    result's shape (`n == 1` → Put), so a single-key `DeleteRange` came
+    back as a `ResponsePut`, and a put that replaced nothing came back as a
+    `ResponseDeleteRange`. Work items:
+    - [ ] Build the response in the gRPC handler from the request ops
+      of the branch that ran (`succeeded` → success, else failure),
+      zipped by position with the op results. No storage or raft wire
+      change.
+    - [ ] Error rather than guess if the counts or kinds disagree.
+    - [ ] Regression tests in `kv_grpc.rs` (single-key delete, zero-hit
+      delete, multi-key delete, put, range, failure branch); changelog.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
