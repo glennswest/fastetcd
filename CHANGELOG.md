@@ -16,6 +16,7 @@
   live events ahead of, or duplicated in, the history replay; replay now
   runs under the stream lock and hands off at an exact revision. A
   future `start_revision` now withholds events below it.
+- **docs:** #15 (stream snapshots from a pinned read transaction to drop the on-disk copy) declined — safety first, performance next, disk savings last; the saving is ~14% of the minimum volume, not ~40%. Performance follow-up filed as #30 (file-backed snapshot transfer, no RAM-whole buffering).
 
 ## [v1.2.0] — 2026-09-02
 

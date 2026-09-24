@@ -39,9 +39,15 @@ that will not boot is worse than one that needs attention later. It also
 enables auto-compaction if it was left off, scaled to hold a roughly
 constant ~16-minute window at any cluster size.
 
-Filed #15 off the back of this: the snapshot term is a fastetcd-specific
-cost (etcd streams v3 snapshots out of bbolt rather than materializing a
-copy), and removing it would cut the volume requirement ~40%.
+Filed #15 off the back of this (streaming snapshots out of a pinned
+engine read transaction to drop the on-disk copy). **Declined
+2026-09-24**: priority for this component is safety first, performance
+next, disk savings last. A pinned read transaction makes a healthy
+leader's compaction and defragment wait on a lagging follower, and the
+saving is ~14% of the minimum volume (~80 MiB at 100 nodes), not the
+~40% first estimated. The on-disk snapshot stays. The performance half —
+stop buffering the whole snapshot in RAM on both ends of a transfer by
+moving it through files — is #30 (to be implemented by stormcentral).
 
 Previous: **`1.1.0`** — Bounded on-disk footprint (#14). A fixed-size data volume
 must stay bounded and must never wedge the store. On the reported
