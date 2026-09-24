@@ -406,19 +406,19 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Offline `fastetcd defrag` escape hatch that works on a full
       volume, plus `fastetcd-ctl defrag/compact/alarm`.
 
-16. **Watch never silently skips a revision (#16) — in progress.** A
+16. **Watch never silently skips a revision (#16) — done, shipped in v1.2.1.** A
     watcher that falls behind the event broadcast used to log `Lagged`
     and carry on, dropping events with no error. Work items:
-    - [ ] Per-watcher `next_rev` cursor; live delivery skips anything
+    - [x] Per-watcher `next_rev` cursor; live delivery skips anything
       the watcher already has (also fixes create/replay duplicates and
       out-of-order delivery, and honours a future `start_revision`).
-    - [ ] On `Lagged`, or a gap in the stream's batch revisions (e.g. a
+    - [x] On `Lagged`, or a gap in the stream's batch revisions (e.g. a
       follower installing a raft snapshot, which emits no events),
       resync each watcher from MVCC history up to the current revision.
-    - [ ] If that history is compacted, cancel the watch with
+    - [x] If that history is compacted, cancel the watch with
       `compact_revision` set (etcd `ErrCompacted`); on a read error,
       cancel with a reason. Never drop events silently.
-    - [ ] Regression test that forces lag and asserts every revision
+    - [x] Regression test that forces lag and asserts every revision
       arrives exactly once, in order; docs + changelog.
 
 ## Constraints & rules
