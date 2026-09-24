@@ -24,7 +24,7 @@ use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use fastetcd_storage::mvcc::{MutationResult, RangeResult, TxnOpResult, TxnResult};
 use tonic::{Request, Response, Status};
 
-use crate::authz::{authorize, RequiredPerm, UserIdentity};
+use crate::authz::{authorize, authorize_all, Access, RequiredPerm, UserIdentity};
 use crate::conv;
 use crate::state::{response_header, ServerState};
 
@@ -63,6 +63,50 @@ fn txn_consumes_space(req: &pb::TxnRequest) -> bool {
     req.success.iter().any(op_consumes) || req.failure.iter().any(op_consumes)
 }
 
+/// Every key access a put makes: write on the key, and read too when
+/// it asks for the previous value back (etcd `isPutPermitted`).
+fn put_accesses<'a>(p: &'a pb::PutRequest, out: &mut Vec<Access<'a>>) {
+    out.push(Access { perm: RequiredPerm::Write, key: &p.key, range_end: b"" });
+    if p.prev_kv {
+        out.push(Access { perm: RequiredPerm::Read, key: &p.key, range_end: b"" });
+    }
+}
+
+/// Every key access a delete makes: write on the range, and read too
+/// when it returns the deleted pairs (etcd `isDeleteRangePermitted`).
+fn delete_accesses<'a>(d: &'a pb::DeleteRangeRequest, out: &mut Vec<Access<'a>>) {
+    out.push(Access { perm: RequiredPerm::Write, key: &d.key, range_end: &d.range_end });
+    if d.prev_kv {
+        out.push(Access { perm: RequiredPerm::Read, key: &d.key, range_end: &d.range_end });
+    }
+}
+
+/// Every key access a txn can make, whichever branch it takes: read on
+/// each compare target, and the accesses of every op in *both* the
+/// success and failure lists, recursing into nested txns. Both branches
+/// are checked because which one runs is decided at apply time, after
+/// authorization; checking only the taken branch would let a compare
+/// the client controls choose an op the role does not cover. This is
+/// etcd's `checkTxnReqsPermission` (fastetcd#22).
+fn txn_accesses<'a>(t: &'a pb::TxnRequest, out: &mut Vec<Access<'a>>) {
+    for c in &t.compare {
+        out.push(Access { perm: RequiredPerm::Read, key: &c.key, range_end: &c.range_end });
+    }
+    for op in t.success.iter().chain(t.failure.iter()) {
+        match &op.request {
+            Some(pb::request_op::Request::RequestRange(r)) => out.push(Access {
+                perm: RequiredPerm::Read,
+                key: &r.key,
+                range_end: &r.range_end,
+            }),
+            Some(pb::request_op::Request::RequestPut(p)) => put_accesses(p, out),
+            Some(pb::request_op::Request::RequestDeleteRange(d)) => delete_accesses(d, out),
+            Some(pb::request_op::Request::RequestTxn(n)) => txn_accesses(n, out),
+            None => {}
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl Kv for KvService {
     async fn range(
@@ -92,15 +136,10 @@ impl Kv for KvService {
     ) -> Result<Response<pb::PutResponse>, Status> {
         let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
-        authorize(
-            self.state.sm.mvcc().engine(),
-            &self.state.auth,
-            user.as_ref(),
-            RequiredPerm::Write,
-            &req.key,
-            b"",
-        )
-        .await?;
+        let mut accesses = Vec::with_capacity(2);
+        put_accesses(&req, &mut accesses);
+        authorize_all(self.state.sm.mvcc().engine(), &self.state.auth, user.as_ref(), &accesses)
+            .await?;
         // Under the NOSPACE alarm a put is refused so the store keeps
         // enough room to compact, snapshot and defragment its way out.
         // Reads and deletes are deliberately still served (fastetcd#14).
@@ -132,15 +171,10 @@ impl Kv for KvService {
     ) -> Result<Response<pb::DeleteRangeResponse>, Status> {
         let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
-        authorize(
-            self.state.sm.mvcc().engine(),
-            &self.state.auth,
-            user.as_ref(),
-            RequiredPerm::Write,
-            &req.key,
-            &req.range_end,
-        )
-        .await?;
+        let mut accesses = Vec::with_capacity(2);
+        delete_accesses(&req, &mut accesses);
+        authorize_all(self.state.sm.mvcc().engine(), &self.state.auth, user.as_ref(), &accesses)
+            .await?;
         let mutation = conv::delete_request_to_mutation(&req);
         let resp = self
             .propose(FastetcdLogEntry::Apply {
@@ -167,7 +201,14 @@ impl Kv for KvService {
         &self,
         request: Request<pb::TxnRequest>,
     ) -> Result<Response<pb::TxnResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        // Authorize every compare and every op in both branches before
+        // anything is proposed; one denied access fails the whole txn.
+        let mut accesses = Vec::new();
+        txn_accesses(&req, &mut accesses);
+        authorize_all(self.state.sm.mvcc().engine(), &self.state.auth, user.as_ref(), &accesses)
+            .await?;
         if txn_consumes_space(&req) {
             self.state.space.check_write()?;
         }

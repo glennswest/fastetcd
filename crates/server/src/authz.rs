@@ -44,8 +44,30 @@ pub async fn authorize(
     key: &[u8],
     range_end: &[u8],
 ) -> Result<(), Status> {
+    authorize_all(engine, auth, user, &[Access { perm, key, range_end }]).await
+}
+
+/// One access a request makes: a permission over `[key, range_end)`
+/// (etcd range convention, as for [`authorize`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Access<'a> {
+    pub perm: RequiredPerm,
+    pub key: &'a [u8],
+    pub range_end: &'a [u8],
+}
+
+/// Authorize every access a request makes, all-or-nothing: the first
+/// access no role covers denies the whole request. The user and their
+/// roles are read once, from one engine snapshot, so a multi-op `Txn`
+/// is checked against a single consistent view of the auth tables.
+pub async fn authorize_all(
+    engine: &Arc<dyn KvStore>,
+    auth: &AuthState,
+    user: Option<&UserIdentity>,
+    accesses: &[Access<'_>],
+) -> Result<(), Status> {
     // Auth disabled => everything allowed.
-    if !auth.is_enabled() {
+    if !auth.is_enabled() || accesses.is_empty() {
         return Ok(());
     }
     let user = match user {
@@ -80,8 +102,8 @@ pub async fn authorize(
         return Ok(());
     }
 
-    // For every role the user has, check whether any permission
-    // covers the request.
+    // Every permission the user holds through any role.
+    let mut perms: Vec<StoredPermission> = Vec::new();
     for role_name in &user_rec.roles {
         let Some(role_bytes) = snap
             .get(TABLE_AUTH_ROLES, role_name.as_bytes())
@@ -92,19 +114,20 @@ pub async fn authorize(
         };
         let role: StoredRole = bincode::deserialize(&role_bytes)
             .map_err(|e| Status::internal(format!("authz: decode role: {e}")))?;
-        for p in &role.permissions {
-            if perm_covers(p, perm, key, range_end) {
-                return Ok(());
-            }
-        }
+        perms.extend(role.permissions);
     }
 
-    Err(Status::permission_denied(format!(
-        "authz: user {} lacks {:?} on key {:?}",
-        user.name,
-        perm,
-        String::from_utf8_lossy(key)
-    )))
+    for a in accesses {
+        if !perms.iter().any(|p| perm_covers(p, a.perm, a.key, a.range_end)) {
+            return Err(Status::permission_denied(format!(
+                "authz: user {} lacks {:?} on key {:?}",
+                user.name,
+                a.perm,
+                String::from_utf8_lossy(a.key)
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn perm_covers(p: &StoredPermission, required: RequiredPerm, key: &[u8], range_end: &[u8]) -> bool {
