@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.2.1`** — Watch never silently skips a revision (#16). A watch
+**`1.2.2`** — `Txn` is authorized (#22). With auth enabled, `Txn` had
+no permission check at all, so any authenticated user could read or
+write any key by wrapping the operation in a transaction. A txn now
+needs read on every compare target, plus the permission of every op in
+*both* branches (nested txns included), checked all-or-nothing against
+one snapshot of the auth tables before anything is proposed (etcd's
+`checkTxnReqsPermission`). `prev_kv` on `Put`/`DeleteRange` now also
+needs read, as in etcd. Tests: `crates/server/tests/authz_txn.rs`.
+Auth is still **not** a security boundary. Three gaps found while doing
+this are filed as P1: #31 (admin RPCs don't require root, so any user
+can grant itself root or `AuthDisable`), #32 (auth state is written
+locally, not through Raft), #33 (Watch is unauthorized).
+
+Previous: **`1.2.1`** — Watch never silently skips a revision (#16). A watch
 stream that fell behind the 1024-batch event broadcast logged `Lagged`
 and kept going, dropping events with no error, so consumer caches
 (Cilium/flowsdn-style) drifted forever. Each watcher now has a
@@ -431,18 +444,19 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Regression test that forces lag and asserts every revision
       arrives exactly once, in order; docs + changelog.
 
-17. **Txn is authorized like every other KV path (#22) — in progress.**
+17. **Txn is authorized like every other KV path (#22) — done, shipped in v1.2.2.**
     `Txn` had no authorization check, so RBAC could be bypassed by
     wrapping any read or write in a transaction. Work items:
-    - [ ] `authorize_all`: check a list of accesses against one
+    - [x] `authorize_all`: check a list of accesses against one
       snapshot of the auth tables, all-or-nothing.
-    - [ ] `Txn` authorizes read on every compare and every op in *both*
+    - [x] `Txn` authorizes read on every compare and every op in *both*
       branches (recursing into nested txns), as etcd's
       `checkTxnReqsPermission` does.
-    - [ ] `prev_kv` on `Put`/`DeleteRange` (standalone and in a txn)
+    - [x] `prev_kv` on `Put`/`DeleteRange` (standalone and in a txn)
       also needs read, as in etcd.
-    - [ ] Regression tests (`crates/server/tests/authz_txn.rs`); docs +
-      changelog. Watch has the same gap — file separately.
+    - [x] Regression tests (`crates/server/tests/authz_txn.rs`); docs +
+      changelog. Remaining auth gaps filed: #31 (admin RPCs not root-only), #32 (auth
+      state not replicated), #33 (Watch unauthorized).
 
 ## Constraints & rules
 
