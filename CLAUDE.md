@@ -431,6 +431,19 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Regression test that forces lag and asserts every revision
       arrives exactly once, in order; docs + changelog.
 
+17. **Txn is authorized like every other KV path (#22) — in progress.**
+    `Txn` had no authorization check, so RBAC could be bypassed by
+    wrapping any read or write in a transaction. Work items:
+    - [ ] `authorize_all`: check a list of accesses against one
+      snapshot of the auth tables, all-or-nothing.
+    - [ ] `Txn` authorizes read on every compare and every op in *both*
+      branches (recursing into nested txns), as etcd's
+      `checkTxnReqsPermission` does.
+    - [ ] `prev_kv` on `Put`/`DeleteRange` (standalone and in a txn)
+      also needs read, as in etcd.
+    - [ ] Regression tests (`crates/server/tests/authz_txn.rs`); docs +
+      changelog. Watch has the same gap — file separately.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
