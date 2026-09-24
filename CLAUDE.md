@@ -10,7 +10,17 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.2.0`** — Volume sizing you can provision against. "How big should the
+**`1.2.1`** — Watch never silently skips a revision (#16). A watch
+stream that fell behind the 1024-batch event broadcast logged `Lagged`
+and kept going, dropping events with no error, so consumer caches
+(Cilium/flowsdn-style) drifted forever. Each watcher now has a
+`next_rev` cursor; on lag, or on a gap in batch revisions (a follower
+installing a raft snapshot emits no events), it is caught up from MVCC
+history, or cancelled with `compact_revision` if that history is gone.
+The cursor also fixed create-time replay racing live delivery.
+Regression test `crates/server/tests/watch_lag.rs` forces real lag.
+
+Previous: **`1.2.0`** — Volume sizing you can provision against. "How big should the
 volume be?" had no answer, and getting it wrong deadlocks the store
 (#14). `fastetcd sizing --nodes N [--pods-per-node P]` turns a cluster
 shape into a number *and shows its arithmetic*, so the estimate can be

@@ -2,8 +2,10 @@
 
 ## [Unreleased]
 
-### 2026-09-24
-- **fix:** A watch no longer silently drops revisions when it falls
+## [v1.2.1] — 2026-09-24
+
+### Fixed
+- **watch:** A watch no longer silently drops revisions when it falls
   behind (#16). A stream whose client read too slowly overflowed the
   1024-batch event broadcast; the forwarder logged `Lagged` and carried
   on, so consumer caches drifted with no error. Each watcher now keeps a
@@ -12,11 +14,18 @@
   to the current revision. If that history has been compacted the watch
   is cancelled with `compact_revision` set (etcd `ErrCompacted`), so the
   client re-lists. Consumers no longer need a periodic full re-list.
-- **fix:** Creating a watch with a past `start_revision` could deliver
+- **watch:** Creating a watch with a past `start_revision` could deliver
   live events ahead of, or duplicated in, the history replay; replay now
   runs under the stream lock and hands off at an exact revision. A
   future `start_revision` now withholds events below it.
-- **docs:** #15 (stream snapshots from a pinned read transaction to drop the on-disk copy) declined — safety first, performance next, disk savings last; the saving is ~14% of the minimum volume, not ~40%. Performance follow-up filed as #30 (file-backed snapshot transfer, no RAM-whole buffering).
+
+### Documentation
+- #15 (stream snapshots from a pinned read transaction to drop the
+  on-disk copy) declined — safety first, performance next, disk savings
+  last; the saving is ~14% of the minimum volume, not ~40%. Performance
+  follow-up filed as #30 (file-backed snapshot transfer, no RAM-whole
+  buffering).
+- `docs/00-design.md`: "Watch delivery guarantee".
 
 ## [v1.2.0] — 2026-09-02
 
