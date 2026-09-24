@@ -3,14 +3,20 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-09-24
-- **fix:** Each op in a `TxnResponse` now has the variant of the
-  request op at the same position in the branch that ran (#18). The
-  variant used to be guessed from the result's shape, so a `DeleteRange`
-  that removed exactly one key came back as a `ResponsePut` (with no
-  `deleted` count), misleading any client that switches on the variant.
-  A mismatch between request and result is now an internal error
-  instead of a guess.
+## [v1.2.3] — 2026-09-24
+
+### Fixed
+- **kv:** Each op in a `TxnResponse` now has the variant of the request
+  op at the same position in the branch that ran (#18). The variant
+  used to be guessed from the result's shape, so a `DeleteRange` that
+  removed exactly one key came back as a `ResponsePut` (with no
+  `deleted` count), misleading any client that switches on the
+  variant. A mismatch between request and result is now an internal
+  error instead of a guess.
+
+### Known issues
+- A `Range` inside a txn reads the state from before the txn, not the
+  txn's own earlier writes as etcd does (#35).
 
 ## [v1.2.2] — 2026-09-24
 
