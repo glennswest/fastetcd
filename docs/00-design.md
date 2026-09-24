@@ -142,6 +142,24 @@ the etcd Auth subsystem.
 4. Apply thread executes against MVCC store, assigns new global
    revision, durably writes redb txn, returns response.
 
+## Watch delivery guarantee
+
+A watch never silently skips a revision in its range. Each watcher has a
+cursor (the first revision it has not yet been sent); live events below
+it are skipped, which also keeps create-time history replay from racing
+live delivery. When a stream cannot see every committed batch — its
+client reads too slowly and the in-memory event broadcast (1024
+batches) overflows, or a follower installs a raft snapshot, which
+applies revisions without emitting events — the watcher is caught up
+from MVCC history to the current revision, as etcd does for unsynced
+watchers. If the history it needs has been compacted, the watch is
+cancelled with `compact_revision` set (etcd's `ErrCompacted`), and the
+client re-lists and re-watches from there. Clients can therefore rely on
+"no cancel" meaning "my cache is current", with no periodic re-list.
+
+Resyncs and lag cancellations are logged at `warn` on the
+`fastetcd::watch` target.
+
 ## Migration from etcd
 
 `crates/migrate` reads an etcd v3 snapshot (BoltDB file). The relevant
@@ -166,6 +184,8 @@ buckets are `key` (MVCC), `lease`, `auth`, `meta`. We:
   semantics. Document both.
 - Watch event ordering across compaction boundaries — etcd has specific
   guarantees for `ErrCompacted`; match exactly across both engines.
+  (A lagging watcher whose history is compacted is cancelled with
+  `ErrCompacted` semantics — see "Watch delivery guarantee".)
 - Default cargo features for the `storage` crate: `iouring` enabled on
   Linux, disabled elsewhere. Verify CI matrix covers both engines on
   Linux.
