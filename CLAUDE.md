@@ -10,7 +10,25 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.2.3`** — Txn response ops have the variant of their request op
+**`1.2.4`** — Raft snapshots move through files, not RAM (#30).
+`SnapshotData` was `Cursor<Vec<u8>>`, so a lagging follower cost the
+leader a full database copy of RAM per transfer and the follower up to
+~3x. It is now `SnapshotFile` (`crates/raft/src/snapshot_data.rs`): a
+retained `.snap` opened read-only (send), a temp file chunks are
+received into (renamed into place on install, deleted on drop), or an
+in-memory fallback used only when the disk cannot hold it. Build
+serializes straight into the file. Install decodes from the file. The
+on-disk and wire formats are unchanged. Chunk I/O is synchronous on
+purpose: `tokio::fs::File` reports a failed write on a *later* call,
+which would make the ENOSPC fallback lose a chunk. Also fixed along the
+way: `get_current_snapshot` returned `None` after a failed persist,
+but openraft had already purged the log against that snapshot, and its
+replication turns `None` into a storage error. A node with applied
+state now always serves a snapshot, rebuilt on demand. Still in RAM
+during build and install: the decoded tables (needs a record-streamed
+format, a separate change).
+
+Previous: **`1.2.3`** — Txn response ops have the variant of their request op
 (#18). The kind of each `ResponseOp` used to be guessed from the
 result's shape (`n == 1` → Put), so a `DeleteRange` that removed one
 key came back as a `ResponsePut`. The handler now builds the response
@@ -480,30 +498,35 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Found alongside: a `Range` in a txn doesn't see the txn's own
       earlier writes (etcd's does) — #35.
 
-19. **Snapshots move through files, not RAM (#30) — in progress.**
+19. **Snapshots move through files, not RAM (#30) — done, shipped in v1.2.4.**
     `SnapshotData` was `Cursor<Vec<u8>>`, so every build, send, receive
     and install held a whole database copy (or three) in RAM. The
     on-disk `.snap` format and the wire format stay exactly as they are.
     Work items:
-    - [ ] `SnapshotData` = `SnapshotFile`: a retained `.snap` opened
+    - [x] `SnapshotData` = `SnapshotFile`: a retained `.snap` opened
       read-only (send), an incoming temp file (receive, removed on drop
       unless installed), or an in-memory fallback. Synchronous chunk I/O
       so a write error is exact, never deferred.
-    - [ ] Build: `bincode::serialize_into` a temp file, fsync, rename,
+    - [x] Build: `bincode::serialize_into` a temp file, fsync, rename,
       then meta; the serialized `Vec` never exists. Roll off before
       writing, ENOSPC → discard all and retry, then fall back to memory.
-    - [ ] Receive: roll off before writing, chunks into a temp file;
+    - [x] Receive: roll off before writing, chunks into a temp file;
       ENOSPC → discard all and retry, then switch to memory. A receive
       never surfaces a `StorageError`.
-    - [ ] Install: fsync, `deserialize_from` the file, apply, rename the
+    - [x] Install: fsync, `deserialize_from` the file, apply, rename the
       file into place as the retained snapshot (no second write).
-    - [ ] `get_current_snapshot` never answers "none" while the state
+    - [x] `get_current_snapshot` never answers "none" while the state
       machine has applied state: a missing file → rebuild on demand
       (openraft's replication treats `None` as a storage error).
-    - [ ] `Maintenance.Snapshot` streams from the file.
-    - [ ] Tests: build/send/receive/install round trip through files,
+    - [x] `Maintenance.Snapshot` streams from the file.
+    - [x] Tests: build/send/receive/install round trip through files,
       cut-off transfer leaves no temp file and the live DB untouched,
       missing-file fallback, memory fallback; docs + changelog.
+    - [x] End-to-end: a late learner caught up by a real chunked
+      `InstallSnapshot` over gRPC (`snapshot_transfer_grpc.rs`).
+    - Not done (needs a new on-disk format + automatic upgrade): a
+      record-streamed snapshot, so build and install stop holding the
+      decoded tables as `Vec`s.
 
 ## Constraints & rules
 
