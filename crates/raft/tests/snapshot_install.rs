@@ -47,8 +47,14 @@ fn put_entry(index: u64, key: &str, value: &str) -> Entry<TypeConfig> {
 async fn open_sm(path: &std::path::Path) -> (FastetcdStateMachine, MvccStore) {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(path).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc.clone(), path.parent().unwrap().join("snapshots")).await.unwrap();
+    // Each node gets its own snapshot directory, as on a real host:
+    // `s.redb` keeps its snapshots in `s.snapshots/`.
+    let sm = FastetcdStateMachine::open(mvcc.clone(), snap_dir_of(path)).await.unwrap();
     (sm, mvcc)
+}
+
+fn snap_dir_of(path: &std::path::Path) -> std::path::PathBuf {
+    path.with_extension("snapshots")
 }
 
 /// Count keys visible through a full-range read — this is what the
@@ -175,7 +181,7 @@ async fn installed_snapshot_survives_restart() {
 async fn snapshot_persists_to_disk_and_survives_restart() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.redb");
-    let snap_dir = path.parent().unwrap().join("snapshots");
+    let snap_dir = snap_dir_of(&path);
     // Snapshots are named by the log index they cover, zero-padded.
     let snap_file = snap_dir.join("00000000000000000002.snap");
 
@@ -208,7 +214,7 @@ async fn snapshot_persists_to_disk_and_survives_restart() {
 async fn repeated_snapshots_do_not_accumulate_on_disk() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.redb");
-    let snap_dir = path.parent().unwrap().join("snapshots");
+    let snap_dir = snap_dir_of(&path);
 
     let (mut sm, _mvcc) = open_sm(&path).await;
     let mut sizes = Vec::new();
@@ -301,15 +307,18 @@ async fn retention_above_one_keeps_that_many_snapshots() {
 /// it comes back out of the linearizable read barrier *and* out of
 /// every proposal, so on the reported node a full volume made reads and
 /// writes fail together — and deleting keys to make room failed for the
-/// same reason. The snapshot body is a durability convenience; the
-/// state machine's data and `last_applied` are already committed. So a
-/// failed write must degrade to "no current snapshot" (the log just
-/// isn't purged yet), not to a dead node.
+/// same reason. The state machine's data and `last_applied` are already
+/// committed, so a failed write degrades to a snapshot held in memory.
+///
+/// It must still be *served*: openraft purges the log against the
+/// snapshot it was handed whether or not it reached disk, and when a
+/// lagging follower then needs it, a `None` from `get_current_snapshot`
+/// fails replication with a storage error (fastetcd#30).
 #[tokio::test]
 async fn a_snapshot_that_cannot_be_written_does_not_fail_the_node() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s.redb");
-    let snap_dir = path.parent().unwrap().join("snapshots");
+    let snap_dir = snap_dir_of(&path);
 
     let (mut sm, mvcc) = open_sm(&path).await;
     sm.apply(vec![put_entry(1, "a", "1"), put_entry(2, "b", "2")])
@@ -328,12 +337,24 @@ async fn a_snapshot_that_cannot_be_written_does_not_fail_the_node() {
         .await
         .expect("an unwritable snapshot must not surface as a storage error");
     assert_eq!(built.meta.last_log_id.map(|l| l.index), Some(2));
+    assert!(built.snapshot.is_in_memory(), "the fallback holds it in memory");
 
-    // No snapshot is reported, so openraft simply doesn't purge yet.
-    assert!(
-        sm.get_current_snapshot().await.unwrap().is_none(),
-        "a snapshot that was not persisted must not be reported as current"
-    );
+    // Nothing but the parked directory is on disk: no body, no meta, no
+    // temp file left holding space.
+    let files: Vec<_> = std::fs::read_dir(&snap_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, vec!["00000000000000000002.snap".to_string()]);
+
+    // Served anyway, rebuilt on demand, rather than `None`.
+    let current = sm
+        .get_current_snapshot()
+        .await
+        .expect("a missing snapshot must not be a storage error")
+        .expect("a node with applied state must always be able to serve a snapshot");
+    assert_eq!(current.meta.last_log_id.map(|l| l.index), Some(2));
 
     // And the state machine keeps working — which is the whole point.
     sm.apply(vec![put_entry(3, "c", "3")])

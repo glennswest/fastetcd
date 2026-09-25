@@ -6,8 +6,6 @@
 //! after `apply()`. Both are versioned (via the enum tag) so we can
 //! add new variants without breaking existing logs.
 
-use std::io::Cursor;
-
 use openraft::BasicNode;
 use openraft::TokioRuntime;
 use serde::{Deserialize, Serialize};
@@ -34,7 +32,9 @@ impl openraft::RaftTypeConfig for TypeConfig {
     type NodeId = NodeId;
     type Node = BasicNode;
     type Entry = openraft::Entry<Self>;
-    type SnapshotData = Cursor<Vec<u8>>;
+    /// A snapshot body in a file, never whole in RAM (fastetcd#30). See
+    /// [`crate::snapshot_data`].
+    type SnapshotData = crate::snapshot_data::SnapshotFile;
     type AsyncRuntime = TokioRuntime;
     type Responder = openraft::impls::OneshotResponder<Self>;
 }

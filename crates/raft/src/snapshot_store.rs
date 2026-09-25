@@ -28,8 +28,10 @@
 //!   always rebuild a snapshot from the state machine, so a node with no
 //!   snapshot is recoverable while a node that cannot write one is not.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use openraft::SnapshotMeta;
 
@@ -40,6 +42,10 @@ type Meta = SnapshotMeta<NodeId, openraft::BasicNode>;
 const SNAP_EXT: &str = "snap";
 const META_EXT: &str = "meta";
 const TMP_SUFFIX: &str = ".tmp";
+
+/// Prefix of the temp file a snapshot is received into. It ends in
+/// `TMP_SUFFIX`, so a transfer cut off by a crash is reclaimed on open.
+const INCOMING_PREFIX: &str = "incoming-";
 
 /// Pre-v1.1 layout: a single snapshot overwritten in place. Migrated
 /// into the indexed layout on open.
@@ -135,9 +141,12 @@ impl SnapshotStore {
         std::fs::read(self.snap_path(index))
     }
 
-    /// Body of the snapshot described by `meta`.
-    pub fn read_body_for(&self, meta: &Meta) -> io::Result<Vec<u8>> {
-        self.read_body(Self::index_of(meta))
+    /// Open the body of the snapshot described by `meta` for reading.
+    /// The file is never modified once written, so a reader needs no
+    /// lock: if roll-off deletes it mid-read, the open handle still
+    /// reads the old contents.
+    pub fn open_body(&self, meta: &Meta) -> io::Result<File> {
+        File::open(self.snap_path(Self::index_of(meta)))
     }
 
     /// Persist a snapshot, rolling off older ones first.
@@ -146,37 +155,104 @@ impl SnapshotStore {
     /// every retained snapshot to make room — the caller must then treat
     /// the previous snapshots as gone.
     pub fn store(&self, meta: &Meta, data: &[u8]) -> io::Result<bool> {
+        self.store_with(meta, |f| f.write_all(data))
+    }
+
+    /// Persist a snapshot whose body `write` produces straight into the
+    /// file, so the serialized snapshot never has to exist in memory
+    /// (fastetcd#30). `write` may be called twice: once more after an
+    /// out-of-space failure has discarded every retained snapshot.
+    ///
+    /// Returns `Ok(true)` if the write only succeeded after that discard.
+    pub fn store_with(
+        &self,
+        meta: &Meta,
+        write: impl Fn(&mut File) -> io::Result<()>,
+    ) -> io::Result<bool> {
         // Roll off oldest-first *before* the write, leaving room for the
         // copy about to land. `retain - 1` because this new one takes
         // the last slot.
-        self.prune_to(self.retain.saturating_sub(1));
+        self.make_room_for_one();
 
-        match self.write_pair(meta, data) {
+        match self.write_pair_with(meta, &write) {
             Ok(()) => Ok(false),
             Err(e) if is_out_of_space(&e) => {
                 tracing::warn!(
                     target: "fastetcd::snapshot",
                     error = %e,
-                    bytes = data.len(),
                     dir = %self.dir.display(),
                     "no space for a new snapshot — discarding every retained \
                      snapshot and retrying"
                 );
                 self.discard_all();
-                self.write_pair(meta, data)?;
+                self.write_pair_with(meta, &write)?;
                 Ok(true)
             }
             Err(e) => Err(e),
         }
     }
 
-    /// Write the body then the meta, each through a temp file, so a meta
-    /// never names a partial body.
-    fn write_pair(&self, meta: &Meta, data: &[u8]) -> io::Result<()> {
+    /// Create the temp file a snapshot from the leader is received into.
+    ///
+    /// Retention is enforced first, exactly as before any other snapshot
+    /// write, so receiving never needs room for `retain + 1` copies.
+    pub fn begin_incoming(&self) -> io::Result<(File, PathBuf)> {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        self.make_room_for_one();
+        let path = self.dir.join(format!(
+            "{INCOMING_PREFIX}{}-{}.{SNAP_EXT}{TMP_SUFFIX}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok((file, path))
+    }
+
+    /// Make a fully received snapshot the retained one: fsync it, rename
+    /// it into place, then write its meta. The body is not written a
+    /// second time. Meta goes last, so a meta never names a partial or
+    /// missing body.
+    pub fn adopt(&self, meta: &Meta, file: &File, received: &Path) -> io::Result<()> {
+        file.sync_all()?;
+        // A snapshot built locally while this one was arriving may have
+        // taken the slot.
+        self.make_room_for_one();
+        let index = Self::index_of(meta);
+        std::fs::rename(received, self.snap_path(index))?;
+        let meta_bytes = bincode::serialize(meta).map_err(io::Error::other)?;
+        let written = write_atomic(&self.meta_path(index), &meta_bytes);
+        if written.is_err() {
+            // A body without a meta is unusable; don't leave it holding
+            // space until the next start.
+            let _ = std::fs::remove_file(self.snap_path(index));
+        }
+        written?;
+        sync_dir(&self.dir);
+        Ok(())
+    }
+
+    /// Roll off until one more snapshot fits within retention.
+    fn make_room_for_one(&self) {
+        self.prune_to(self.retain.saturating_sub(1));
+    }
+
+    /// Write the body then the meta, each through a temp file and fsync,
+    /// so a meta never names a partial body.
+    fn write_pair_with(
+        &self,
+        meta: &Meta,
+        write: &impl Fn(&mut File) -> io::Result<()>,
+    ) -> io::Result<()> {
         let index = Self::index_of(meta);
         let meta_bytes = bincode::serialize(meta).map_err(io::Error::other)?;
-        write_atomic(&self.snap_path(index), data)?;
-        write_atomic(&self.meta_path(index), &meta_bytes)
+        write_atomic_with(&self.snap_path(index), write)?;
+        write_atomic(&self.meta_path(index), &meta_bytes)?;
+        sync_dir(&self.dir);
+        Ok(())
     }
 
     /// Delete every retained snapshot.
@@ -316,25 +392,44 @@ impl SnapshotStore {
     }
 }
 
-/// Write via a temp file and rename. A failed write cleans up its own
-/// temp file — on a full volume that partial file is holding exactly the
-/// space a retry needs.
+/// Write via a temp file, fsync and rename. A failed write cleans up
+/// its own temp file — on a full volume that partial file is holding
+/// exactly the space a retry needs.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, &|f: &mut File| f.write_all(bytes))
+}
+
+fn write_atomic_with(path: &Path, write: &impl Fn(&mut File) -> io::Result<()>) -> io::Result<()> {
     let tmp = path.with_extension(format!(
         "{}{TMP_SUFFIX}",
         path.extension().and_then(|e| e.to_str()).unwrap_or("")
     ));
-    if let Err(e) = std::fs::write(&tmp, bytes) {
+    let written = File::create(&tmp).and_then(|mut f| {
+        write(&mut f)?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    std::fs::rename(&tmp, path)
+    Ok(())
+}
+
+/// Make renames in `dir` durable. Best-effort: not every platform can
+/// open a directory, and the data itself is already fsynced.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// True when an I/O error is "the volume is full". `ErrorKind::StorageFull`
 /// is still unstable, so match the OS codes directly: ENOSPC on unix,
 /// ERROR_HANDLE_DISK_FULL / ERROR_DISK_FULL on Windows.
-fn is_out_of_space(e: &io::Error) -> bool {
+pub(crate) fn is_out_of_space(e: &io::Error) -> bool {
     #[cfg(unix)]
     const CODES: &[i32] = &[28];
     #[cfg(windows)]
@@ -433,6 +528,59 @@ mod tests {
         assert_eq!(store.indices(), vec![77], "the existing snapshot is kept");
         assert_eq!(store.read_body(77).unwrap(), vec![7u8; 64]);
         assert!(!dir.path().join(LEGACY_SNAP).exists());
+    }
+
+    #[test]
+    fn a_received_snapshot_is_adopted_by_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::open(dir.path(), 1).unwrap();
+        store.store(&meta_at(1), &[1u8; 16]).unwrap();
+
+        // Receiving rolls the retained snapshot off first.
+        let (mut file, path) = store.begin_incoming().unwrap();
+        assert!(store.indices().is_empty());
+        file.write_all(&[9u8; 64]).unwrap();
+
+        store.adopt(&meta_at(9), &file, &path).unwrap();
+        assert!(!path.exists(), "the temp file is renamed, not copied");
+        assert_eq!(store.indices(), vec![9]);
+        assert_eq!(store.read_body(9).unwrap(), vec![9u8; 64]);
+        assert_eq!(store.latest_meta().unwrap().snapshot_id, "snap-9");
+    }
+
+    #[test]
+    fn an_unfinished_receive_is_reclaimed_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::open(dir.path(), 1).unwrap();
+        let (_file, path) = store.begin_incoming().unwrap();
+        assert!(path.exists());
+        // Crash: nothing adopted or removed it.
+        let _reopened = SnapshotStore::open(dir.path(), 1).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn store_with_streams_the_body_and_cleans_up_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::open(dir.path(), 1).unwrap();
+        store
+            .store_with(&meta_at(3), |f| {
+                for _ in 0..4 {
+                    f.write_all(&[3u8; 8])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.read_body(3).unwrap(), vec![3u8; 32]);
+
+        let failed = store.store_with(&meta_at(4), |_| Err(io::Error::other("boom")));
+        assert!(failed.is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(TMP_SUFFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "a failed write leaves no temp file");
     }
 
     #[test]

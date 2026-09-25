@@ -28,6 +28,7 @@ use fastetcd_proto::etcdserverpb::maintenance_server::Maintenance;
 use openraft::storage::RaftStateMachine;
 use openraft::RaftSnapshotBuilder;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -255,19 +256,33 @@ impl Maintenance for MaintenanceService {
             .build_snapshot()
             .await
             .map_err(|e| Status::internal(format!("snapshot build: {e}")))?;
-        let data: Vec<u8> = snap.snapshot.into_inner();
+        // Stream the body from its file a chunk at a time; it is never
+        // read into memory whole (fastetcd#30).
+        let mut body = snap.snapshot;
+        let total = body
+            .seek(std::io::SeekFrom::End(0))
+            .await
+            .and_then(|end| usize::try_from(end).map_err(std::io::Error::other))
+            .map_err(|e| Status::internal(format!("snapshot size: {e}")))?;
+        body.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|e| Status::internal(format!("snapshot seek: {e}")))?;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<pb::SnapshotResponse, Status>>(4);
         tokio::spawn(async move {
             const CHUNK: usize = 64 * 1024;
-            let total = data.len();
             let mut sent = 0usize;
             while sent < total {
-                let end = (sent + CHUNK).min(total);
-                let blob = data[sent..end].to_vec();
-                sent = end;
+                let mut blob = vec![0u8; CHUNK.min(total - sent)];
+                if let Err(e) = body.read_exact(&mut blob).await {
+                    let _ = tx
+                        .send(Err(Status::internal(format!("snapshot read: {e}"))))
+                        .await;
+                    return;
+                }
+                sent += blob.len();
                 let resp = pb::SnapshotResponse {
                     header: Some(header),
                     remaining_bytes: (total - sent) as u64,

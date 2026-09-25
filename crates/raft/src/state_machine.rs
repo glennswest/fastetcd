@@ -9,14 +9,17 @@
 //! - `last_membership` — also required by openraft.
 //! - The current MVCC snapshot for serving `get_current_snapshot()`.
 //!
-//! Snapshot strategy: serialize the entire MVCC state plus
-//! `last_applied_log_id` + `last_membership` into a single
-//! `bincode`-encoded byte vector wrapped in `Cursor<Vec<u8>>` (the
-//! `TypeConfig::SnapshotData` type). This is simple and correct for
-//! datasets up to several hundred MB; production-scale clusters will
-//! want a streaming snapshot replaced in a follow-up.
+//! Snapshot strategy: the entire MVCC state plus `last_applied_log_id`
+//! + `last_membership`, `bincode`-encoded into one file per snapshot.
+//! A snapshot moves between memory, disk and the network as a
+//! [`SnapshotFile`]: it is serialized straight into its file, sent by
+//! reading that file chunk by chunk, received into a temp file and
+//! decoded from it, so no step holds the encoded snapshot in RAM
+//! (fastetcd#30). Building still collects the three tables as `Vec`s,
+//! and install still decodes them whole — streaming those needs a new
+//! on-disk format.
 
-use std::io::Cursor;
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use openraft::storage::RaftStateMachine;
@@ -35,6 +38,7 @@ use tokio::sync::Mutex;
 
 use fastetcd_storage::mvcc::MvccStore;
 
+use crate::snapshot_data::{Content, SnapshotFile};
 use crate::snapshot_store::{self, SnapshotStore};
 use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
@@ -138,30 +142,64 @@ impl FastetcdStateMachine {
         })
     }
 
-    /// Persist a snapshot through the retained store, rolling older
-    /// snapshots off first.
+    /// Write a snapshot through the retained store and return a handle
+    /// to its body.
     ///
-    /// Writing through a temp file needs room for the new snapshot
-    /// alongside whatever is retained. On a volume sized for one copy
-    /// that is the deadlock in fastetcd#14: the snapshot write fails
-    /// with ENOSPC, openraft surfaces that storage error on every read
-    /// and write, and a client can no longer delete data to make room.
-    /// The store rolls off before it writes, and on ENOSPC discards
-    /// every retained snapshot and retries — openraft can always
-    /// rebuild one, and a node with no snapshot is worth more than a
-    /// node that cannot write one.
-    async fn persist_snapshot(
+    /// The payload is serialized straight into the snapshot file; the
+    /// encoded snapshot never exists as a `Vec` (fastetcd#30). The store
+    /// rolls older snapshots off before it writes and, on ENOSPC,
+    /// discards every retained snapshot and retries (fastetcd#14).
+    ///
+    /// If the snapshot still cannot be written, it is encoded into
+    /// memory instead and `persisted` is false. That is the pre-#30
+    /// behaviour, kept as the fallback so a full volume never becomes a
+    /// storage error: openraft treats one as fatal to the whole node,
+    /// and on the reported node that meant even deleting keys to make
+    /// room was refused.
+    async fn write_snapshot(
         &self,
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
-        data: &[u8],
-    ) -> std::io::Result<()> {
+        payload: SnapshotPayload,
+    ) -> Result<WrittenSnapshot, StorageError<NodeId>> {
         let snapshots = self.snapshots.clone();
         let meta = meta.clone();
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || snapshots.store(&meta, &data))
-            .await
-            .map_err(std::io::Error::other)??;
-        Ok(())
+        let signature = meta.signature();
+        tokio::task::spawn_blocking(move || -> Result<WrittenSnapshot, StorageError<NodeId>> {
+            let written = snapshots
+                .store_with(&meta, |f| serialize_payload(f, &payload))
+                .and_then(|_| snapshots.open_body(&meta));
+            match written {
+                Ok(file) => Ok(WrittenSnapshot {
+                    body: SnapshotFile::retained(file),
+                    persisted: true,
+                }),
+                Err(e) => {
+                    tracing::error!(
+                        target: "fastetcd::snapshot",
+                        error = %e,
+                        dir = %snapshots.dir().display(),
+                        "could not write the raft snapshot to disk — holding it in \
+                         memory instead. Free space on the data volume (delete keys, \
+                         `etcdctl compact`, `etcdctl defrag`, or `fastetcd defrag` \
+                         with the server stopped)."
+                    );
+                    let bytes = bincode::serialize(&payload).map_err(|e| {
+                        StorageIOError::write_snapshot(Some(meta.signature()), AnyError::new(&e))
+                    })?;
+                    Ok(WrittenSnapshot {
+                        body: SnapshotFile::memory(bytes),
+                        persisted: false,
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(|e| StorageIOError::write_snapshot(Some(signature), AnyError::new(&e)))?
+    }
+
+    /// Build a snapshot now, on behalf of `get_current_snapshot`.
+    async fn build_now(&self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
+        FastetcdSnapshotBuilder { sm: self.clone() }.build_snapshot().await
     }
 
     /// Bytes the retained snapshots occupy on the data volume. The space
@@ -240,6 +278,73 @@ impl FastetcdStateMachine {
         let mut g = self.inner.lock().await;
         g.last_membership = membership;
         Ok(())
+    }
+}
+
+/// A snapshot body just written, and whether it reached the disk.
+struct WrittenSnapshot {
+    body: SnapshotFile,
+    persisted: bool,
+}
+
+/// Unwrap bincode's error so an I/O failure keeps its OS error code:
+/// the store recognises a full volume by it (ENOSPC).
+fn bincode_io(e: bincode::Error) -> std::io::Error {
+    match *e {
+        bincode::ErrorKind::Io(io) => io,
+        other => std::io::Error::other(other),
+    }
+}
+
+fn serialize_payload(f: &mut std::fs::File, payload: &SnapshotPayload) -> std::io::Result<()> {
+    let mut w = BufWriter::with_capacity(1 << 20, f);
+    bincode::serialize_into(&mut w, payload).map_err(bincode_io)?;
+    w.flush()
+}
+
+/// Decode a snapshot body. A file is read through a buffer, never
+/// loaded whole.
+fn decode_payload(content: &Content) -> Result<SnapshotPayload, std::io::Error> {
+    let from_file = |mut f: &std::fs::File| -> std::io::Result<SnapshotPayload> {
+        f.seek(SeekFrom::Start(0))?;
+        bincode::deserialize_from(BufReader::with_capacity(1 << 20, f)).map_err(bincode_io)
+    };
+    match content {
+        Content::Incoming { file, .. } => {
+            // Durable before it is decoded and applied: it is about to
+            // become this node's retained snapshot.
+            file.sync_all()?;
+            from_file(file)
+        }
+        Content::Retained(file) => from_file(file),
+        Content::Memory(bytes) => bincode::deserialize(bytes).map_err(bincode_io),
+    }
+}
+
+/// Keep a copy of an installed snapshot as this node's retained one.
+fn retain_installed(
+    snapshots: &SnapshotStore,
+    meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
+    content: Content,
+) -> std::io::Result<()> {
+    match content {
+        // The received file becomes the retained snapshot as it is.
+        Content::Incoming { file, path } => {
+            let adopted = snapshots.adopt(meta, &file, &path);
+            if adopted.is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+            adopted
+        }
+        // Someone else's retained file (a local install, or tests):
+        // copy it, never move it.
+        Content::Retained(src) => snapshots
+            .store_with(meta, |f| {
+                (&src).seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut &src, f).map(|_| ())
+            })
+            .map(|_| ()),
+        Content::Memory(bytes) => snapshots.store(meta, &bytes).map(|_| ()),
     }
 }
 
@@ -346,75 +451,146 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
         }
     }
 
-    async fn begin_receiving_snapshot(
-        &mut self,
-    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    async fn begin_receiving_snapshot(&mut self) -> Result<Box<SnapshotFile>, StorageError<NodeId>> {
+        // Chunks go to a temp file, not a growing `Vec` (fastetcd#30).
+        // Retention is enforced first, as before any snapshot write, so
+        // with the default of one the old snapshot is rolled off now.
+        // That is safe: `get_current_snapshot` rebuilds on demand if this
+        // node needs one before the new snapshot lands.
+        let snapshots = self.snapshots.clone();
+        let opened = tokio::task::spawn_blocking(move || snapshots.begin_incoming()).await;
+        self.inner.lock().await.current_snapshot = self.snapshots.latest_meta();
+        let body = match opened {
+            Ok(Ok((file, path))) => SnapshotFile::incoming(file, path, self.snapshots.clone()),
+            Ok(Err(e)) => {
+                // Same fallback as a failed write: never refuse a snapshot
+                // because the disk is full.
+                tracing::warn!(
+                    target: "fastetcd::snapshot",
+                    error = %e,
+                    "cannot create a file to receive the snapshot into — receiving \
+                     it in memory. Free space on the data volume."
+                );
+                SnapshotFile::memory(Vec::new())
+            }
+            Err(e) => {
+                return Err(StorageIOError::write_snapshot(None, AnyError::new(&e)).into());
+            }
+        };
+        Ok(Box::new(body))
     }
 
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
-        snapshot: Box<Cursor<Vec<u8>>>,
+        snapshot: Box<SnapshotFile>,
     ) -> Result<(), StorageError<NodeId>> {
-        let data = snapshot.into_inner();
-        let payload: SnapshotPayload = bincode::deserialize(&data).map_err(|e| {
-            StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e))
-        })?;
+        let content = snapshot.into_content();
+
+        // Decode straight from the file (no raw-bytes copy in RAM). A
+        // received file that fails to decode is deleted here; the live
+        // database has not been touched.
+        let (payload, content) = tokio::task::spawn_blocking(move || {
+            let decoded = decode_payload(&content);
+            if decoded.is_err() {
+                if let Content::Incoming { path, .. } = &content {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            decoded.map(|p| (p, content))
+        })
+        .await
+        .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?
+        .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
 
         // Replace the MVCC engine contents.
-        rebuild_mvcc(&self.mvcc, &payload).await.map_err(|e| {
-            StorageIOError::write_snapshot(
+        let applied = rebuild_mvcc(&self.mvcc, &payload).await;
+        if let Err(e) = applied {
+            if let Content::Incoming { path, .. } = &content {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(StorageIOError::write_snapshot(
                 Some(meta.signature()),
                 AnyError::error(format!("rebuild mvcc from snapshot: {e}")),
             )
-        })?;
+            .into());
+        }
+        let SnapshotPayload {
+            last_applied_log_id,
+            last_membership,
+            ..
+        } = payload;
 
-        // Persist the installed snapshot to disk (body + meta) so it
-        // survives restart; keep only the meta in RAM. Best-effort: the
-        // data is already durable in the MVCC store above, so failing
-        // to keep a copy must not fail the install (see
-        // `build_snapshot` for why a storage error here is fatal to the
-        // whole node).
-        let persisted = self.persist_snapshot(meta, &data).await;
+        // Keep the installed snapshot as this node's retained one, so it
+        // survives restart; only the meta stays in RAM. A received file
+        // is renamed into place — not written a second time.
+        // Best-effort: the data is already durable in the MVCC store
+        // above, so failing to keep a copy must not fail the install
+        // (see `build_snapshot` for why a storage error here is fatal to
+        // the whole node). `get_current_snapshot` rebuilds if asked.
+        let snapshots = self.snapshots.clone();
+        let for_store = meta.clone();
+        let persisted =
+            tokio::task::spawn_blocking(move || retain_installed(&snapshots, &for_store, content))
+                .await
+                .map_err(std::io::Error::other)
+                .and_then(|r| r);
         if let Err(e) = &persisted {
             tracing::error!(
                 target: "fastetcd::snapshot",
                 error = %e,
-                "installed snapshot could not be persisted — the data is applied \
-                 and durable, but the log cannot be purged against it until a \
-                 snapshot lands. Free space on the data volume."
+                "installed snapshot could not be kept on disk — the data is applied \
+                 and durable; a snapshot will be rebuilt when one is needed. Free \
+                 space on the data volume."
             );
         }
 
         let mut g = self.inner.lock().await;
-        g.last_applied_log_id = payload.last_applied_log_id;
-        g.last_membership = payload.last_membership;
+        g.last_applied_log_id = last_applied_log_id;
+        g.last_membership = last_membership;
         g.current_snapshot = persisted.is_ok().then(|| meta.clone());
         Ok(())
     }
 
+    /// The newest retained snapshot, read from its file on demand.
+    ///
+    /// Never `None` while the state machine has applied anything. When
+    /// openraft's replication needs a snapshot for a lagging follower
+    /// and gets `None`, it fails with a storage error rather than asking
+    /// for one to be built (openraft only rebuilds a missing snapshot at
+    /// startup). So if there is no usable retained snapshot — it could
+    /// not be written, was rolled off to make room for an incoming one,
+    /// or was deleted — build one now.
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        let meta = {
+        let (meta, applied) = {
             let g = self.inner.lock().await;
-            match &g.current_snapshot {
-                Some(m) => m.clone(),
-                None => return Ok(None),
-            }
+            (g.current_snapshot.clone(), g.last_applied_log_id)
         };
-        // Read the body from disk on demand — never held in RAM.
-        let snapshots = self.snapshots.clone();
-        let for_read = meta.clone();
-        let data = tokio::task::spawn_blocking(move || snapshots.read_body_for(&for_read))
-            .await
-            .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?
-            .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
-        Ok(Some(Snapshot {
-            meta,
-            snapshot: Box::new(Cursor::new(data)),
-        }))
+        if let Some(meta) = meta {
+            match self.snapshots.open_body(&meta) {
+                Ok(file) => {
+                    return Ok(Some(Snapshot {
+                        meta,
+                        snapshot: Box::new(SnapshotFile::retained(file)),
+                    }))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastetcd::snapshot",
+                        error = %e,
+                        snapshot = %meta.snapshot_id,
+                        "the retained snapshot is gone — building a new one"
+                    );
+                    self.inner.lock().await.current_snapshot = None;
+                }
+            }
+        }
+        if applied.is_none() {
+            return Ok(None);
+        }
+        self.build_now().await.map(Some)
     }
 }
 
@@ -430,9 +606,6 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
                 "build snapshot payload: {e}"
             )))
         })?;
-        let data = bincode::serialize(&payload).map_err(|e| {
-            StorageIOError::read_state_machine(AnyError::new(&e))
-        })?;
 
         let meta = {
             let mut g = self.sm.inner.lock().await;
@@ -443,35 +616,24 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
                 snapshot_id: format!("snap-{}", g.snapshot_idx),
             }
         };
-        // Persist to disk (body + meta); keep only the meta in RAM so an
-        // idle node doesn't hold the whole serialized database (#13).
+        // Serialized straight to disk (body + meta); only the meta stays
+        // in RAM so an idle node doesn't hold the whole database (#13),
+        // and the encoded snapshot never exists as a `Vec` (#30).
         //
-        // A failure here must not become a `StorageError`. openraft
+        // A failure to write must not become a `StorageError`. openraft
         // treats a storage error as fatal to the whole node: it surfaces
         // on the linearizable read barrier and on every proposal, so a
         // full volume took the store down in both directions and even
         // deleting keys to make room was refused (fastetcd#14). The
-        // snapshot body is only a durability convenience — the state
-        // machine's data and `last_applied` are already committed — so
-        // when it cannot be written we log loudly, report no current
-        // snapshot (the log simply isn't purged yet) and keep serving.
-        let persisted = self.sm.persist_snapshot(&meta, &data).await;
-        if let Err(e) = &persisted {
-            tracing::error!(
-                target: "fastetcd::snapshot",
-                error = %e,
-                bytes = data.len(),
-                "could not persist the raft snapshot — continuing without one. \
-                 The raft log will not be purged until a snapshot lands, so free \
-                 space on the data volume (delete keys, `etcdctl compact`, \
-                 `etcdctl defrag`, or `fastetcd defrag` with the server stopped)."
-            );
-        }
+        // state machine's data and `last_applied` are already committed,
+        // so `write_snapshot` falls back to holding this snapshot in
+        // memory, and no current snapshot is recorded on disk.
+        let written = self.sm.write_snapshot(&meta, payload).await?;
         self.sm.inner.lock().await.current_snapshot =
-            persisted.is_ok().then(|| meta.clone());
+            written.persisted.then(|| meta.clone());
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Box::new(written.body),
         })
     }
 }
