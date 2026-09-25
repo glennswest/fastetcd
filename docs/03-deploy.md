@@ -237,7 +237,8 @@ etcdctl --endpoints=$ENDPOINT snapshot save snapshot.db
 ```
 
 `Maintenance.Snapshot` streams the entire engine state to the
-client in 64 KiB chunks. The snapshot file can be re-imported on a
+client in 64 KiB chunks, read from the snapshot file on disk rather
+than buffered in memory. The snapshot file can be re-imported on a
 fresh fastetcd via `fastetcd-migrate --from=snapshot.db
 --to=/var/lib/fastetcd-new`.
 

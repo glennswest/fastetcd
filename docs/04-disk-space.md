@@ -77,6 +77,30 @@ snapshot is discarded and the write is retried — openraft can always
 rebuild one, and a node with no snapshot is worth more than a node that
 cannot write one.
 
+**Moves snapshots through files, not memory.** A snapshot is serialized
+straight into its file and fsynced; sent to a lagging follower by
+reading that file a chunk at a time; received into a temp file in the
+follower's `snapshots/` directory; and installed by decoding from that
+file and renaming it into place as the follower's retained snapshot. At
+no step is the encoded database held in RAM, and a received snapshot is
+never written twice. Receiving follows the same rules as any other
+snapshot write: the follower's retained snapshots are rolled off before
+the first chunk lands, and on `ENOSPC` they are discarded and the chunk
+retried. If the disk still cannot take it, the snapshot is received,
+built or kept **in memory** instead. That was how every snapshot worked
+before 1.2.4, and it keeps a full volume from becoming a storage error.
+A transfer that is cut off leaves nothing behind: its temp file is
+deleted, or reclaimed on the next start, and the live database is not
+touched until install.
+
+Two transient costs to size for. A snapshot rolled off *while it is
+being sent* keeps its disk blocks until that transfer ends, because the
+sender still has it open. And a node asked for a snapshot when it has
+none on disk (it just rolled its own off to receive one, or could not
+write one) builds one on the spot rather than fail replication. Both are
+bounded by one extra snapshot, and both fall back to memory rather than
+fail if the disk cannot hold it.
+
 **Reclaims at the high-water mark** (default 80% of capacity), in the
 order that actually frees bytes:
 

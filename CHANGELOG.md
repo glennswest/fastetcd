@@ -3,6 +3,29 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-25
+- **perf:** Raft snapshots move through files instead of RAM (#30).
+  `SnapshotData` was a `Cursor<Vec<u8>>`, so a lagging follower cost the
+  leader a whole database copy of RAM per transfer and the follower up
+  to ~3x. Now a snapshot is serialized straight into its file, sent by
+  reading that file a chunk at a time, received into a temp file, and
+  installed by decoding from the file and renaming it into place. The
+  on-disk format and the wire format are unchanged, so there is no
+  upgrade step and mixed-version clusters keep working.
+- **fix:** A node never reports "no snapshot" while it has applied
+  state. openraft purges the log against every snapshot it is handed,
+  even one that could not be written to disk, and then fails
+  replication to a lagging follower with a storage error when the
+  snapshot is missing. A missing or unwritten snapshot is now rebuilt
+  on demand, and held in memory if the disk still cannot take it.
+- **perf:** `Maintenance.Snapshot` (`etcdctl snapshot save`) streams
+  from the snapshot file instead of copying it into memory first.
+- **fix:** Snapshot bodies and metas are fsynced before they are
+  renamed into place, and the directory after, so a snapshot that is
+  reported written survives a power loss.
+- **docs:** `docs/04-disk-space.md` describes how snapshots move and the
+  two transient disk costs.
+
 ## [v1.2.3] — 2026-09-24
 
 ### Fixed
