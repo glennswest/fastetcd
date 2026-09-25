@@ -480,6 +480,31 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Found alongside: a `Range` in a txn doesn't see the txn's own
       earlier writes (etcd's does) — #35.
 
+19. **Snapshots move through files, not RAM (#30) — in progress.**
+    `SnapshotData` was `Cursor<Vec<u8>>`, so every build, send, receive
+    and install held a whole database copy (or three) in RAM. The
+    on-disk `.snap` format and the wire format stay exactly as they are.
+    Work items:
+    - [ ] `SnapshotData` = `SnapshotFile`: a retained `.snap` opened
+      read-only (send), an incoming temp file (receive, removed on drop
+      unless installed), or an in-memory fallback. Synchronous chunk I/O
+      so a write error is exact, never deferred.
+    - [ ] Build: `bincode::serialize_into` a temp file, fsync, rename,
+      then meta; the serialized `Vec` never exists. Roll off before
+      writing, ENOSPC → discard all and retry, then fall back to memory.
+    - [ ] Receive: roll off before writing, chunks into a temp file;
+      ENOSPC → discard all and retry, then switch to memory. A receive
+      never surfaces a `StorageError`.
+    - [ ] Install: fsync, `deserialize_from` the file, apply, rename the
+      file into place as the retained snapshot (no second write).
+    - [ ] `get_current_snapshot` never answers "none" while the state
+      machine has applied state: a missing file → rebuild on demand
+      (openraft's replication treats `None` as a storage error).
+    - [ ] `Maintenance.Snapshot` streams from the file.
+    - [ ] Tests: build/send/receive/install round trip through files,
+      cut-off transfer leaves no temp file and the live DB untouched,
+      missing-file fallback, memory fallback; docs + changelog.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
