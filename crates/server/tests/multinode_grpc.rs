@@ -537,6 +537,8 @@ async fn linearizable_read_without_a_leader_fails_instead_of_serving_stale() {
     let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
     members.insert(1, format!("http://127.0.0.1:{p1}"));
     members.insert(2, format!("http://127.0.0.1:{p2}"));
+    // Node 2 is never started: release its port, so nothing listens there.
+    RESERVED.lock().unwrap().remove(&p2);
     let n1 = start_node(1, &members).await;
     sleep(Duration::from_millis(200)).await;
     assert!(
