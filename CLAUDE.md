@@ -10,7 +10,21 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.2.4`** — Raft snapshots move through files, not RAM (#30).
+**`1.3.0`** — A deployment-distinct, stable `cluster_id` (#17). The
+id in every `ResponseHeader` was `--cluster-id`, undocumented and
+defaulting to `1` for every deployment, so a client pinning it could
+not tell a mis-pointed endpoint from the right one. Now
+(`crates/server/src/cluster_id.rs`) it is chosen on a store's first
+start and persisted in a node-local `node_meta` table (not carried by
+raft snapshots): explicit `--cluster-id` (0 rejected), else FNV-1a-64
+of `--initial-cluster-token` masked to 63 bits and never 0, else `1`
+with a startup warning. Later starts use the persisted id. A store
+older than this keeps `1` unless `--cluster-id` is given, so an upgrade
+never changes the id clients see. Members still choose independently;
+replicating it (etcd-style, distinct by default) is #38. Also fixed a
+port race in the multinode test harness (#40).
+
+Previous: **`1.2.4`** — Raft snapshots move through files, not RAM (#30).
 `SnapshotData` was `Cursor<Vec<u8>>`, so a lagging follower cost the
 leader a full database copy of RAM per transfer and the follower up to
 ~3x. It is now `SnapshotFile` (`crates/raft/src/snapshot_data.rs`): a
@@ -528,21 +542,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       record-streamed snapshot, so build and install stop holding the
       decoded tables as `Vec`s.
 
-20. **A deployment-distinct, stable `cluster_id` (#17) — in progress.**
+20. **A deployment-distinct, stable `cluster_id` (#17) — done, shipped in v1.3.0.**
     `ResponseHeader.cluster_id` was `--cluster-id`, undocumented and
     defaulting to `1` for every deployment, so a client pinning it could
     not tell a mis-pointed endpoint from the right one. Decided
     (2026-09-26) rules, in order:
-    - [ ] Explicit `--cluster-id` wins; `0` is rejected at startup.
-    - [ ] Else FNV-1a-64 of `--initial-cluster-token`, masked to 63 bits,
+    - [x] Explicit `--cluster-id` wins; `0` is rejected at startup.
+    - [x] Else FNV-1a-64 of `--initial-cluster-token`, masked to 63 bits,
       never 0.
-    - [ ] Else `1`, with a startup warning.
-    - [ ] Persisted in the data dir (node-local `node_meta` table, not
+    - [x] Else `1`, with a startup warning.
+    - [x] Persisted in the data dir (node-local `node_meta` table, not
       in snapshots) on first start and used from then on. A store that
       pre-dates this keeps `1` unless `--cluster-id` is given, so an
       upgrade never changes the id clients see.
-    - [ ] Tests, docs (`--cluster-id` documented), changelog.
-    - [ ] File the replicated / distinct-by-default id as its own issue.
+    - [x] Tests, docs (`--cluster-id` documented), changelog.
+    - [x] Replicated / distinct-by-default id filed as #38.
 
 ## Constraints & rules
 
