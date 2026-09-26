@@ -528,6 +528,22 @@ Tracked live in the Claude task system. Snapshot of the order:
       record-streamed snapshot, so build and install stop holding the
       decoded tables as `Vec`s.
 
+20. **A deployment-distinct, stable `cluster_id` (#17) — in progress.**
+    `ResponseHeader.cluster_id` was `--cluster-id`, undocumented and
+    defaulting to `1` for every deployment, so a client pinning it could
+    not tell a mis-pointed endpoint from the right one. Decided
+    (2026-09-26) rules, in order:
+    - [ ] Explicit `--cluster-id` wins; `0` is rejected at startup.
+    - [ ] Else FNV-1a-64 of `--initial-cluster-token`, masked to 63 bits,
+      never 0.
+    - [ ] Else `1`, with a startup warning.
+    - [ ] Persisted in the data dir (node-local `node_meta` table, not
+      in snapshots) on first start and used from then on. A store that
+      pre-dates this keeps `1` unless `--cluster-id` is given, so an
+      upgrade never changes the id clients see.
+    - [ ] Tests, docs (`--cluster-id` documented), changelog.
+    - [ ] File the replicated / distinct-by-default id as its own issue.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
