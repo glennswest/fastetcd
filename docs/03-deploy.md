@@ -204,6 +204,32 @@ Each node calls `raft.initialize` with the same member set;
 openraft elects a leader among them. After bootstrap, `MemberAdd`
 adds new nodes; `MemberRemove` removes them.
 
+### Cluster id
+
+Every response header carries a `cluster_id`. Clients that talk to
+more than one cluster pin it: they record the id an endpoint first
+reported and treat a change as "this endpoint now points at a
+different store", draining and reconnecting instead of mixing two
+clusters' data. So **give every deployment its own id**, and every
+member of one deployment the same one:
+
+- `--cluster-id=<n>` (`FASTETCD_CLUSTER_ID`) sets it explicitly. `0`
+  is rejected.
+- Otherwise, a new store derives it from `--initial-cluster-token`
+  (`ETCD_INITIAL_CLUSTER_TOKEN` works too): FNV-1a-64 of the token,
+  masked to 63 bits, never 0. Pass the same token to every member,
+  including ones added later with `--initial-cluster-state=existing`.
+- With neither, the id is `1`, the same as every other unconfigured
+  deployment, and fastetcd warns at startup.
+
+The id is chosen on a store's first start and persisted in its data
+directory. Later starts use the persisted id whatever the token says,
+so a restart or an upgrade never changes it. A store created before
+v1.3.0 keeps reporting `1`. The one way to change a store's id is to
+pass `--cluster-id`, and clients pinned to the old id will reconnect.
+Members do not exchange their ids, so a member whose flags differ from
+the others' reports a different id (#38).
+
 ## Disk space
 
 fastetcd sizes itself against the volume it is on, not against a
