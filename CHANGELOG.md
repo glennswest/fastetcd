@@ -3,8 +3,10 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-09-26
-- **feat:** A deployment-distinct, stable `cluster_id` (#17). The
+## [v1.3.0] — 2026-09-26
+
+### Added
+- **cluster-id:** A deployment-distinct, stable `cluster_id` (#17). The
   `cluster_id` in every response header was `--cluster-id`, which
   defaulted to `1` for every deployment, so a client pinning it could
   not notice an endpoint repointed at a different store. It is now
@@ -14,10 +16,17 @@
   with a startup warning. Later starts use the persisted id, so a
   restart or an upgrade never changes it. Stores created before this
   keep reporting `1` unless `--cluster-id` is given.
-- **fix:** `--cluster-id 0` is rejected at startup; etcd treats 0 as
-  "no cluster id".
-- **docs:** `docs/03-deploy.md` documents `--cluster-id` and how the id
-  is chosen. Replicating it, so members cannot disagree and it is
+
+### Fixed
+- **cluster-id:** `--cluster-id 0` is rejected at startup; etcd treats
+  0 as "no cluster id".
+- **tests:** The multinode test harness keeps each reserved peer port
+  bound until its node takes it, instead of closing and rebinding it,
+  which another process could win on a shared build box (#40).
+
+### Documentation
+- `docs/03-deploy.md` documents `--cluster-id` and how the id is
+  chosen. Replicating it, so members cannot disagree and it is
   distinct by default, is #38.
 
 ## [v1.2.4] — 2026-09-25
