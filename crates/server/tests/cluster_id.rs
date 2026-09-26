@@ -64,13 +64,16 @@ async fn a_store_from_before_persisted_ids_keeps_reporting_1() {
         batch.put("mvcc_meta", b"some-key", b"some-value");
         engine.commit(batch, WriteOptions::default()).await.unwrap();
     }
-    let (engine, is_new) = open(&path);
-    assert!(!is_new);
-    // Even with a token now: deriving a new id would change it under
-    // clients mid-upgrade.
-    let got = resolve(&engine, None, is_new, Some("prod-east")).await.unwrap();
-    assert_eq!(got, (1, Source::Legacy));
-    // ...and that is persisted too.
+    {
+        let (engine, is_new) = open(&path);
+        assert!(!is_new);
+        // Even with a token now: deriving a new id would change it under
+        // clients mid-upgrade.
+        let got = resolve(&engine, None, is_new, Some("prod-east")).await.unwrap();
+        assert_eq!(got, (1, Source::Legacy));
+    }
+    // ...and that is persisted too. (Each open is scoped: redb allows
+    // one handle per file.)
     let (engine, is_new) = open(&path);
     let got = resolve(&engine, None, is_new, Some("prod-east")).await.unwrap();
     assert_eq!(got, (1, Source::Persisted));
