@@ -100,7 +100,13 @@ async fn start_node(
         .unwrap()
         .parse()
         .unwrap();
-    let peer_listener = tokio::net::TcpListener::bind(peer_addr).await.unwrap();
+    let reserved = RESERVED
+        .lock()
+        .unwrap()
+        .remove(&peer_addr.port())
+        .expect("peer port reserved by pick_free_port");
+    reserved.set_nonblocking(true).unwrap();
+    let peer_listener = tokio::net::TcpListener::from_std(reserved).unwrap();
     let peer_addr_bound = peer_listener.local_addr().unwrap();
     let peer_incoming = tokio_stream::wrappers::TcpListenerStream::new(peer_listener);
     tokio::spawn(async move {
@@ -135,10 +141,20 @@ async fn start_node(
     }
 }
 
+/// Peer listeners reserved by [`pick_free_port`], waiting for their
+/// node to start.
+static RESERVED: std::sync::Mutex<BTreeMap<u16, std::net::TcpListener>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Reserve a free port for a node's peer listener. The listener stays
+/// bound until [`start_node`] takes it. Closing it and binding the port
+/// again later let another process on a shared build box take it in
+/// between (`AddrInUse`, #40). A std listener, because each test runs
+/// its own tokio runtime.
 async fn pick_free_port() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
-    drop(l);
+    RESERVED.lock().unwrap().insert(port, l);
     port
 }
 
