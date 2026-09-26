@@ -46,8 +46,17 @@ struct Args {
     #[arg(long, env = "FASTETCD_NODE_ID")]
     node_id: Option<u64>,
 
-    #[arg(long, env = "FASTETCD_CLUSTER_ID", default_value_t = 1)]
-    cluster_id: u64,
+    /// Cluster id reported in every response header. Clients pin it to
+    /// notice an endpoint repointed at a different store, so give each
+    /// deployment its own. Unset: derived from `--initial-cluster-token`
+    /// on a new store, else 1. Chosen once and persisted in the data dir;
+    /// setting this flag later replaces it (fastetcd#17). Never 0.
+    #[arg(
+        long,
+        env = "FASTETCD_CLUSTER_ID",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    cluster_id: Option<u64>,
 
     #[arg(long, env = "FASTETCD_DATA_DIR", default_value = "default.fastetcd")]
     data_dir: PathBuf,
@@ -126,9 +135,10 @@ struct Args {
     #[arg(long, env = "FASTETCD_UPGRADE_BACKUP_RETAIN", default_value_t = 2)]
     upgrade_backup_retain: usize,
 
-    /// Cluster ID token (etcd compatibility — used by etcd to
-    /// detect cross-cluster member confusion). Accepted; fastetcd's
-    /// cluster_id flag takes precedence if both are set.
+    /// Cluster token, as etcd's. On a new store, and without
+    /// `--cluster-id`, the cluster id is derived from it (FNV-1a-64,
+    /// masked to 63 bits), so give each deployment its own token and
+    /// every member of one deployment the same one.
     #[arg(long = "initial-cluster-token", env = "FASTETCD_INITIAL_CLUSTER_TOKEN")]
     initial_cluster_token: Option<String>,
 
@@ -621,7 +631,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         name = %args.name,
         node_id,
-        cluster_id = args.cluster_id,
         data_dir = %args.data_dir.display(),
         listen_client = %client_listen_url,
         listen_peer = %peer_listen_url,
@@ -643,7 +652,6 @@ async fn main() -> anyhow::Result<()> {
         &args.log_outputs,
         &args.logger,
         &args.metrics,
-        &args.initial_cluster_token,
         &args.initial_advertise_peer_urls,
         &args.advertise_client_urls,
         &args.peer_cert_file,
@@ -653,8 +661,28 @@ async fn main() -> anyhow::Result<()> {
     );
 
     std::fs::create_dir_all(&args.data_dir)?;
-    let engine: Arc<dyn fastetcd_storage::KvStore> =
-        Arc::new(RedbEngine::open(args.data_dir.join("fastetcd.redb"))?);
+    let data_file = args.data_dir.join("fastetcd.redb");
+    let store_is_new = !data_file.exists();
+    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&data_file)?);
+
+    // Chosen once per store and persisted, so a restart or an upgrade
+    // never changes the id clients have pinned (fastetcd#17).
+    let (cluster_id, cluster_id_source) = fastetcd_server::cluster_id::resolve(
+        &engine,
+        args.cluster_id,
+        store_is_new,
+        args.initial_cluster_token.as_deref(),
+    )
+    .await?;
+    tracing::info!(cluster_id, source = ?cluster_id_source, "cluster id");
+    if cluster_id_source == fastetcd_server::cluster_id::Source::Default {
+        tracing::warn!(
+            cluster_id,
+            "no --cluster-id or --initial-cluster-token: this store reports cluster id 1, \
+             like every other unconfigured deployment, so clients cannot tell it apart \
+             from another. Set a distinct --cluster-id or --initial-cluster-token."
+        );
+    }
     let mvcc = MvccStore::open(engine.clone()).await?;
     let sm = FastetcdStateMachine::open_with_retention(
         mvcc,
@@ -904,7 +932,7 @@ async fn main() -> anyhow::Result<()> {
         ServerState::new(
             raft.clone(),
             sm,
-            args.cluster_id,
+            cluster_id,
             node_id,
             auth_state.clone(),
             forwarder,
