@@ -637,6 +637,34 @@ Tracked live in the Claude task system. Snapshot of the order:
       differ), so a mixed-version cluster cannot diverge.
     - Shipped with #37 in v1.4.0.
 
+23. **Peer TLS is honoured, with its own identity and trust root (#23) — in progress.**
+    `--peer-cert-file`/`--peer-key-file`/`--peer-trusted-ca-file`/
+    `--peer-client-cert-auth` were parsed and discarded; the peer port
+    served the *client* identity whenever `--cert-file` was set, and
+    peers dialled each other with no TLS at all, so a multi-node cluster
+    with `--cert-file` could not form. flowsdn#275: raft peers span pods,
+    so this is not "within one pod". Decided (etcd semantics):
+    - Peer TLS comes only from the `--peer-*` flags; `--cert-file` no
+      longer leaks onto the peer port. Client TLS on with peer TLS off
+      logs a warning that peer traffic is plaintext.
+    - Peer TLS on: `--peer-trusted-ca-file` is required (peers verify
+      each other against it); outbound peer dials present the peer
+      cert as their client cert. `--peer-client-cert-auth` makes the
+      peer port refuse any caller without a cert from that CA.
+    - Scheme must match: with peer TLS every listen/advertise/
+      initial-cluster peer URL is `https://`, without it `http://`;
+      anything else is a startup error, and a runtime dial to a
+      mismatched URL fails with an error naming it. Never silent.
+    Work items:
+    - [ ] `crates/server/src/tls.rs`: server + peer-client TLS builders
+      and URL-scheme check, in the lib so tests use the same code.
+    - [ ] raft crate: `GrpcNetworkFactory`/`WriteForwarder` take the
+      peer `ClientTlsConfig`; one shared dial helper.
+    - [ ] main.rs: separate client and peer server TLS; drop the discard.
+    - [ ] Tests: peer mTLS cluster replicates; peer port rejects a
+      certless caller and one with a client-CA cert; config errors.
+    - [ ] Docs (flags, chart values), changelog; release; close #23.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
