@@ -3,6 +3,17 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27
+- **fix:** A `Range` inside a `Txn` now sees the txn's own earlier
+  writes, as in etcd (#35). The ops of the branch that runs are applied
+  strictly in order, and once the txn has changed anything a range
+  reads at the txn's pending revision (etcd's `storeTxnWrite.Range`),
+  so `[Put(b, "v"), Range(b)]` returns `v` with `mod_revision` equal to
+  the txn's revision, and `[DeleteRange(b), Range(b)]` returns nothing.
+  A range with an explicit older `revision` still reads history. Stored
+  state, sub-revisions and the raft wire format are unchanged; only the
+  range results in a `TxnResponse` differ.
+
 ## [v1.3.0] — 2026-09-26
 
 ### Added

@@ -1047,8 +1047,10 @@ impl MvccStore {
     /// Transactional execute: evaluate `compares` against the current
     /// snapshot; based on the AND of those results, execute either
     /// `success` or `failure` ops in order. All writes share one
-    /// `main` revision (with distinct `sub`); reads within the txn
-    /// observe the pre-mutation state.
+    /// `main` revision (with distinct `sub`). Ops run strictly in
+    /// order, so a `Range` sees the txn's own earlier writes: once the
+    /// txn has changed anything it reads at the pending revision
+    /// (`current_rev + 1`), as etcd's `storeTxnWrite.Range` does (#35).
     pub async fn txn(
         &self,
         compares: &[Compare],
@@ -1063,24 +1065,23 @@ impl MvccStore {
 
         let mut ctx = ApplyContext::default();
         let mut op_results: Vec<TxnOpResult> = Vec::with_capacity(ops.len());
-        let mut mutations: Vec<Mutation> = Vec::new();
         let mut produced_any = false;
-        let proposed_main = state.current_rev + 1;
-        let state_copy = *state;
+        let main = state.current_rev + 1;
+        // Sub-revisions count mutations only, as `apply` does.
+        let mut sub: i64 = 0;
 
-        // First pass: separate reads from writes; reads run now against
-        // the pre-mutation snapshot, writes are collected for the
-        // post-pass apply. Op order is preserved by interleaving the
-        // results vector with placeholders for writes.
-        let mut write_slots: Vec<Option<usize>> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
                 TxnOp::Range(r) => {
+                    let mut read_state = *state;
+                    if produced_any {
+                        read_state.current_rev = main;
+                    }
                     let res = self
                         .range_inner(
                             &*snap,
-                            &ctx, // reads still see pre-mutation cache state
-                            state_copy,
+                            &ctx,
+                            read_state,
                             &r.key,
                             &r.range_end,
                             r.limit,
@@ -1090,38 +1091,22 @@ impl MvccStore {
                         )
                         .await?;
                     op_results.push(TxnOpResult::Range(res));
-                    write_slots.push(None);
                 }
                 TxnOp::Mutation(m) => {
-                    mutations.push(m.clone());
-                    write_slots.push(Some(op_results.len()));
-                    op_results.push(TxnOpResult::Mutation(MutationResult::default()));
+                    let (res, produced) = self
+                        .apply_one(&*snap, &mut ctx, Revision::new(main, sub), m)
+                        .await?;
+                    sub += 1;
+                    produced_any |= produced;
+                    op_results.push(TxnOpResult::Mutation(res));
                 }
             }
         }
 
-        // Second pass: run the mutations as one atomic apply.
-        if !mutations.is_empty() {
-            // We need to fill in mutation results back into the
-            // op_results slots in their original positions, so we
-            // run apply_inner directly and walk the result list.
-            let (revision, mut results, produced) = self
-                .apply_inner(&*snap, &mut ctx, &mut state, &mutations)
-                .await?;
-            produced_any = produced;
-            if produced {
-                self.commit_ctx(&mut state, revision, ctx).await?;
-            }
-            // Restore back into op order.
-            results.reverse();
-            for idx in write_slots.into_iter().flatten() {
-                if let Some(res) = results.pop() {
-                    op_results[idx] = TxnOpResult::Mutation(res);
-                }
-            }
+        if produced_any {
+            self.commit_ctx(&mut state, main, ctx).await?;
         }
-
-        let revision = if produced_any { proposed_main } else { state.current_rev };
+        let revision = if produced_any { main } else { state.current_rev };
         Ok(TxnResult {
             succeeded,
             revision,
@@ -1143,199 +1128,211 @@ impl MvccStore {
         let mut produced_any = false;
 
         for (sub_zero_based, mutation) in mutations.iter().enumerate() {
-            let sub = sub_zero_based as i64;
-            let rev = Revision::new(main, sub);
-            match mutation {
-                Mutation::Put {
-                    key,
-                    value,
-                    lease,
-                    ignore_value,
-                    ignore_lease,
-                    prev_kv,
-                } => {
-                    let mut idx =
-                        load_or_init_index(snap, &ctx.idx_cache, key.as_slice()).await?;
+            let rev = Revision::new(main, sub_zero_based as i64);
+            let (result, produced) = self.apply_one(snap, ctx, rev, mutation).await?;
+            produced_any |= produced;
+            results.push(result);
+        }
+        Ok((main, results, produced_any))
+    }
+
+    /// Apply one mutation at `rev` into `ctx`. Returns its result and
+    /// whether it changed anything. The index and record caches in
+    /// `ctx` are updated, so later ops in the same batch see it.
+    async fn apply_one(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &mut ApplyContext,
+        rev: Revision,
+        mutation: &Mutation,
+    ) -> MvccResult<(MutationResult, bool)> {
+        match mutation {
+            Mutation::Put {
+                key,
+                value,
+                lease,
+                ignore_value,
+                ignore_lease,
+                prev_kv,
+            } => {
+                let mut idx =
+                    load_or_init_index(snap, &ctx.idx_cache, key.as_slice()).await?;
+                let prev = if idx.is_live() {
+                    load_latest_record(
+                        snap,
+                        &ctx.latest_record_cache,
+                        key.as_slice(),
+                        &idx,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+
+                if *ignore_value && prev.is_none() {
+                    return Err(MvccError::Internal(
+                        "ignore_value set on Put for a non-existent key".into(),
+                    ));
+                }
+                if *ignore_lease && prev.is_none() {
+                    return Err(MvccError::Internal(
+                        "ignore_lease set on Put for a non-existent key".into(),
+                    ));
+                }
+
+                let effective_value = if *ignore_value {
+                    prev.as_ref().expect("checked").value.clone()
+                } else {
+                    value.clone()
+                };
+                let effective_lease = if *ignore_lease {
+                    prev.as_ref().expect("checked").lease
+                } else {
+                    *lease
+                };
+
+                let (version, created) = idx.record_put(rev);
+                let record = KvRecord {
+                    key: key.clone(),
+                    value: effective_value,
+                    create_revision: created.main,
+                    mod_revision: rev.main,
+                    version,
+                    lease: effective_lease,
+                    deleted: false,
+                };
+
+                let kv_key = make_kv_key(key, rev);
+                let record_bytes = bincode::serialize(&record)
+                    .map_err(|e| MvccError::Internal(format!("serialize KvRecord: {e}")))?;
+                ctx.batch.put(TABLE_KV, &kv_key, &record_bytes);
+
+                let idx_bytes = bincode::serialize(&idx)
+                    .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
+                ctx.batch.put(TABLE_IDX, key, &idx_bytes);
+
+                // If the lease association changed, update the
+                // lease_keys reverse index. The previous lease (if
+                // any) needs its entry removed; the new lease (if
+                // non-zero) needs an entry added.
+                let old_lease = prev.as_ref().map(|p| p.lease).unwrap_or(0);
+                if old_lease != record.lease {
+                    if old_lease != 0 {
+                        ctx.batch.delete(
+                            TABLE_LEASE_KEYS,
+                            &lease_key_index(old_lease, key),
+                        );
+                    }
+                    if record.lease != 0 {
+                        ctx.batch
+                            .put(TABLE_LEASE_KEYS, &lease_key_index(record.lease, key), &[]);
+                    }
+                }
+
+                ctx.idx_cache.insert(key.clone(), idx);
+                ctx.latest_record_cache.insert(key.clone(), record.clone());
+
+                ctx.pending_events.push(MvccEvent {
+                    kind: EventKind::Put,
+                    kv: record,
+                    prev_kv: prev.clone(),
+                });
+
+                let result = MutationResult {
+                    n: 1,
+                    prev_kvs: if *prev_kv {
+                        prev.into_iter().collect()
+                    } else {
+                        Vec::new()
+                    },
+                };
+                Ok((result, true))
+            }
+            Mutation::DeleteRange {
+                key,
+                range_end,
+                prev_kv,
+            } => {
+                let live_keys = live_keys_in_range(
+                    snap,
+                    &ctx.idx_cache,
+                    key.as_slice(),
+                    range_end.as_slice(),
+                )
+                .await?;
+                let mut result = MutationResult::default();
+                for live_key in live_keys {
+                    let mut idx = load_or_init_index(
+                        snap,
+                        &ctx.idx_cache,
+                        live_key.as_slice(),
+                    )
+                    .await?;
+                    // Always load the prev record (regardless of
+                    // the request's prev_kv flag) so the broadcast
+                    // event carries it for watchers that want it.
                     let prev = if idx.is_live() {
                         load_latest_record(
                             snap,
                             &ctx.latest_record_cache,
-                            key.as_slice(),
+                            live_key.as_slice(),
                             &idx,
                         )
                         .await?
                     } else {
                         None
                     };
-
-                    if *ignore_value && prev.is_none() {
-                        return Err(MvccError::Internal(
-                            "ignore_value set on Put for a non-existent key".into(),
-                        ));
+                    let closed = idx.record_delete(rev);
+                    if !closed {
+                        continue;
                     }
-                    if *ignore_lease && prev.is_none() {
-                        return Err(MvccError::Internal(
-                            "ignore_lease set on Put for a non-existent key".into(),
-                        ));
-                    }
-
-                    let effective_value = if *ignore_value {
-                        prev.as_ref().expect("checked").value.clone()
-                    } else {
-                        value.clone()
-                    };
-                    let effective_lease = if *ignore_lease {
-                        prev.as_ref().expect("checked").lease
-                    } else {
-                        *lease
-                    };
-
-                    let (version, created) = idx.record_put(rev);
-                    let record = KvRecord {
-                        key: key.clone(),
-                        value: effective_value,
-                        create_revision: created.main,
+                    let tombstone = KvRecord {
+                        key: live_key.clone(),
+                        value: Vec::new(),
+                        create_revision: 0,
                         mod_revision: rev.main,
-                        version,
-                        lease: effective_lease,
-                        deleted: false,
+                        version: 0,
+                        lease: 0,
+                        deleted: true,
                     };
-
-                    let kv_key = make_kv_key(key, rev);
-                    let record_bytes = bincode::serialize(&record)
-                        .map_err(|e| MvccError::Internal(format!("serialize KvRecord: {e}")))?;
-                    ctx.batch.put(TABLE_KV, &kv_key, &record_bytes);
-
+                    let kv_key = make_kv_key(&live_key, rev);
+                    let bytes = bincode::serialize(&tombstone)
+                        .map_err(|e| MvccError::Internal(format!("serialize tombstone: {e}")))?;
+                    ctx.batch.put(TABLE_KV, &kv_key, &bytes);
                     let idx_bytes = bincode::serialize(&idx)
                         .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                    ctx.batch.put(TABLE_IDX, key, &idx_bytes);
-
-                    // If the lease association changed, update the
-                    // lease_keys reverse index. The previous lease (if
-                    // any) needs its entry removed; the new lease (if
-                    // non-zero) needs an entry added.
-                    let old_lease = prev.as_ref().map(|p| p.lease).unwrap_or(0);
-                    if old_lease != record.lease {
-                        if old_lease != 0 {
+                    ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
+                    // Drop the lease_keys reverse index entry if the
+                    // deleted key was attached to a lease.
+                    if let Some(p) = &prev {
+                        if p.lease != 0 {
                             ctx.batch.delete(
                                 TABLE_LEASE_KEYS,
-                                &lease_key_index(old_lease, key),
+                                &lease_key_index(p.lease, &live_key),
                             );
                         }
-                        if record.lease != 0 {
-                            ctx.batch
-                                .put(TABLE_LEASE_KEYS, &lease_key_index(record.lease, key), &[]);
-                        }
                     }
-
-                    ctx.idx_cache.insert(key.clone(), idx);
-                    ctx.latest_record_cache.insert(key.clone(), record.clone());
+                    ctx.idx_cache.insert(live_key.clone(), idx);
+                    ctx.latest_record_cache
+                        .insert(live_key.clone(), tombstone.clone());
 
                     ctx.pending_events.push(MvccEvent {
-                        kind: EventKind::Put,
-                        kv: record,
+                        kind: EventKind::Delete,
+                        kv: tombstone,
                         prev_kv: prev.clone(),
                     });
 
-                    results.push(MutationResult {
-                        n: 1,
-                        prev_kvs: if *prev_kv {
-                            prev.into_iter().collect()
-                        } else {
-                            Vec::new()
-                        },
-                    });
-                    produced_any = true;
-                }
-                Mutation::DeleteRange {
-                    key,
-                    range_end,
-                    prev_kv,
-                } => {
-                    let live_keys = live_keys_in_range(
-                        snap,
-                        &ctx.idx_cache,
-                        key.as_slice(),
-                        range_end.as_slice(),
-                    )
-                    .await?;
-                    let mut result = MutationResult::default();
-                    for live_key in live_keys {
-                        let mut idx = load_or_init_index(
-                            snap,
-                            &ctx.idx_cache,
-                            live_key.as_slice(),
-                        )
-                        .await?;
-                        // Always load the prev record (regardless of
-                        // the request's prev_kv flag) so the broadcast
-                        // event carries it for watchers that want it.
-                        let prev = if idx.is_live() {
-                            load_latest_record(
-                                snap,
-                                &ctx.latest_record_cache,
-                                live_key.as_slice(),
-                                &idx,
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        let closed = idx.record_delete(rev);
-                        if !closed {
-                            continue;
-                        }
-                        let tombstone = KvRecord {
-                            key: live_key.clone(),
-                            value: Vec::new(),
-                            create_revision: 0,
-                            mod_revision: rev.main,
-                            version: 0,
-                            lease: 0,
-                            deleted: true,
-                        };
-                        let kv_key = make_kv_key(&live_key, rev);
-                        let bytes = bincode::serialize(&tombstone)
-                            .map_err(|e| MvccError::Internal(format!("serialize tombstone: {e}")))?;
-                        ctx.batch.put(TABLE_KV, &kv_key, &bytes);
-                        let idx_bytes = bincode::serialize(&idx)
-                            .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                        ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
-                        // Drop the lease_keys reverse index entry if the
-                        // deleted key was attached to a lease.
-                        if let Some(p) = &prev {
-                            if p.lease != 0 {
-                                ctx.batch.delete(
-                                    TABLE_LEASE_KEYS,
-                                    &lease_key_index(p.lease, &live_key),
-                                );
-                            }
-                        }
-                        ctx.idx_cache.insert(live_key.clone(), idx);
-                        ctx.latest_record_cache
-                            .insert(live_key.clone(), tombstone.clone());
-
-                        ctx.pending_events.push(MvccEvent {
-                            kind: EventKind::Delete,
-                            kv: tombstone,
-                            prev_kv: prev.clone(),
-                        });
-
-                        result.n += 1;
-                        if *prev_kv {
-                            if let Some(p) = prev {
-                                result.prev_kvs.push(p);
-                            }
+                    result.n += 1;
+                    if *prev_kv {
+                        if let Some(p) = prev {
+                            result.prev_kvs.push(p);
                         }
                     }
-                    if result.n > 0 {
-                        produced_any = true;
-                    }
-                    results.push(result);
                 }
+                let produced = result.n > 0;
+                Ok((result, produced))
             }
         }
-        Ok((main, results, produced_any))
     }
 
     async fn commit_ctx(
@@ -1469,9 +1466,11 @@ impl MvccStore {
         if count_only {
             return Ok(());
         }
-        // Prefer ctx cache for fresh-in-batch records.
+        // A record written earlier in this batch is only in the cache,
+        // not yet in `snap`. Use it only when it is the revision being
+        // read: a range at an older revision must read history.
         if let Some(rec) = ctx.latest_record_cache.get(idx_key) {
-            if !rec.is_tombstone() {
+            if !rec.is_tombstone() && rec.mod_revision == rec_rev.main {
                 let mut r = rec.clone();
                 if keys_only {
                     r.value.clear();
@@ -2214,13 +2213,140 @@ mod tests {
             TxnOpResult::Mutation(m) => assert_eq!(m.n, 1),
             _ => panic!("expected Mutation"),
         };
-        // Second range — etcd's behavior: reads inside the txn see the
-        // pre-mutation snapshot. So "c" should NOT be observable here.
+        // Second range sees the txn's own put, as etcd's does (#35).
         let second = match &r.op_results[2] {
             TxnOpResult::Range(rr) => rr.kvs.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
             _ => panic!("expected Range"),
         };
-        assert_eq!(second, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(second, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    fn range_kvs(r: &TxnOpResult) -> &RangeResult {
+        match r {
+            TxnOpResult::Range(rr) => rr,
+            other => panic!("expected Range, got {other:?}"),
+        }
+    }
+
+    fn txn_delete(key: &[u8], range_end: &[u8]) -> TxnOp {
+        TxnOp::Mutation(Mutation::DeleteRange {
+            key: key.to_vec(),
+            range_end: range_end.to_vec(),
+            prev_kv: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn txn_range_after_put_sees_the_put() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"b", b"v0")]).await.unwrap();
+        let r = s
+            .txn(&[], &[txn_put(b"b", b"v"), txn_range(b"b", b"")], &[])
+            .await
+            .unwrap();
+        assert_eq!(r.revision, 2);
+        let rr = range_kvs(&r.op_results[1]);
+        assert_eq!(rr.count, 1);
+        assert_eq!(rr.kvs[0].value, b"v");
+        assert_eq!(rr.kvs[0].mod_revision, 2);
+        assert_eq!(rr.kvs[0].create_revision, 1);
+        assert_eq!(rr.kvs[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn txn_range_after_delete_sees_nothing() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"b", b"v0"), put(b"c", b"v0")]).await.unwrap();
+        let r = s
+            .txn(
+                &[],
+                &[txn_delete(b"b", b""), txn_range(b"a", b"z")],
+                &[],
+            )
+            .await
+            .unwrap();
+        let rr = range_kvs(&r.op_results[1]);
+        assert_eq!(rr.count, 1);
+        assert_eq!(rr.kvs.len(), 1);
+        assert_eq!(rr.kvs[0].key, b"c");
+    }
+
+    #[tokio::test]
+    async fn txn_range_put_range_sees_before_then_after() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"b", b"v0")]).await.unwrap();
+        let r = s
+            .txn(
+                &[],
+                &[
+                    txn_range(b"b", b""),
+                    txn_put(b"b", b"v1"),
+                    txn_put(b"new", b"n"),
+                    txn_range(b"b", b""),
+                    txn_range(b"a", b"z"),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(range_kvs(&r.op_results[0]).kvs[0].value, b"v0");
+        assert_eq!(range_kvs(&r.op_results[0]).kvs[0].mod_revision, 1);
+        assert_eq!(range_kvs(&r.op_results[3]).kvs[0].value, b"v1");
+        let all = range_kvs(&r.op_results[4]);
+        assert_eq!(all.count, 2);
+        let keys: Vec<_> = all.kvs.iter().map(|k| k.key.clone()).collect();
+        assert_eq!(keys, vec![b"b".to_vec(), b"new".to_vec()]);
+        assert!(all.kvs.iter().all(|k| k.mod_revision == 2));
+    }
+
+    #[tokio::test]
+    async fn txn_range_at_explicit_older_revision_reads_history() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"b", b"v0")]).await.unwrap(); // rev 1
+        let r = s
+            .txn(
+                &[],
+                &[
+                    txn_put(b"b", b"v1"),
+                    TxnOp::Range(RangeOp {
+                        key: b"b".to_vec(),
+                        revision: 1,
+                        ..Default::default()
+                    }),
+                    // The pending revision is readable once the txn
+                    // has changes, as in etcd.
+                    TxnOp::Range(RangeOp {
+                        key: b"b".to_vec(),
+                        revision: 2,
+                        ..Default::default()
+                    }),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(range_kvs(&r.op_results[1]).kvs[0].value, b"v0");
+        assert_eq!(range_kvs(&r.op_results[2]).kvs[0].value, b"v1");
+    }
+
+    #[tokio::test]
+    async fn txn_range_before_any_change_cannot_read_pending_revision() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"b", b"v0")]).await.unwrap(); // rev 1
+        let err = s
+            .txn(
+                &[],
+                &[TxnOp::Range(RangeOp {
+                    key: b"b".to_vec(),
+                    revision: 2,
+                    ..Default::default()
+                })],
+                &[],
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, MvccError::FutureRevision { .. }));
     }
 
     #[tokio::test]

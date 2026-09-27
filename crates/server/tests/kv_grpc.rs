@@ -369,8 +369,8 @@ async fn txn_response_ops_match_request_ops() {
                 put_op(b"b", true),         // overwrite, with prev_kv
                 delete_op(b"missing", b"", false), // zero hits
                 delete_op(b"c", b"d", false),      // range, two hits
-                // A key no earlier op touches: whether a range sees the
-                // txn's own writes is #35, not what this test is about.
+                // A key no earlier op touches; a range seeing the txn's
+                // own writes is tested in `txn_range_sees_own_writes`.
                 range_op(b"r", b""),
             ],
             failure: vec![],
@@ -446,6 +446,62 @@ async fn txn_failure_branch_response_ops_match_failure_ops() {
         R::ResponseDeleteRange(d) => assert_eq!(d.deleted, 1),
         other => panic!("failure-branch delete read back as {other:?}"),
     }
+}
+
+/// fastetcd#35: a Range in a txn sees the txn's own earlier writes, as
+/// in etcd. With `b = v0`: `[Range(b), Put(b, "v"), Range(b),
+/// DeleteRange(c), Range(c)]` returns `v0`, then `v` at the txn's
+/// revision, then nothing.
+#[tokio::test]
+async fn txn_range_sees_own_writes() {
+    use pb::response_op::Response as R;
+    let (mut client, _dir) = start_test_server().await;
+    for k in [&b"b"[..], b"c"] {
+        client
+            .put(pb::PutRequest { key: k.to_vec(), value: b"v0".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+    }
+    let resp = client
+        .txn(pb::TxnRequest {
+            compare: vec![],
+            success: vec![
+                range_op(b"b", b""),
+                put_op(b"b", false),
+                range_op(b"b", b""),
+                delete_op(b"c", b"", false),
+                range_op(b"c", b""),
+            ],
+            failure: vec![],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let txn_rev = resp.header.as_ref().unwrap().revision;
+    let ops: Vec<R> = resp.responses.into_iter().map(|r| r.response.unwrap()).collect();
+    let range = |i: usize| match &ops[i] {
+        R::ResponseRange(r) => r.clone(),
+        other => panic!("op {i}: expected a range, got {other:?}"),
+    };
+    let before = range(0);
+    assert_eq!(before.kvs[0].value, b"v0");
+    assert!(before.kvs[0].mod_revision < txn_rev);
+    let after = range(2);
+    assert_eq!(after.count, 1);
+    assert_eq!(after.kvs[0].value, b"v");
+    assert_eq!(after.kvs[0].mod_revision, txn_rev);
+    let deleted = range(4);
+    assert_eq!(deleted.count, 0);
+    assert!(deleted.kvs.is_empty());
+
+    // Outside the txn the store agrees.
+    let b = client
+        .range(pb::RangeRequest { key: b"b".to_vec(), ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(b.kvs[0].value, b"v");
+    assert_eq!(b.kvs[0].mod_revision, txn_rev);
 }
 
 #[tokio::test]
