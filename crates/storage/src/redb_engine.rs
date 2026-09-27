@@ -54,12 +54,42 @@ struct RedbInner {
     defrag_done: Arc<Notify>,
 }
 
+/// Classify an error from opening the database file.
+fn open_error(e: redb::DatabaseError) -> StorageError {
+    match e {
+        redb::DatabaseError::Storage(redb::StorageError::Corrupted(msg)) => {
+            StorageError::Corrupted(msg)
+        }
+        // An existing file whose magic number is wrong: the header was
+        // lost or overwritten.
+        redb::DatabaseError::Storage(redb::StorageError::Io(io))
+            if io.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            StorageError::Corrupted(format!("unreadable database header: {io}"))
+        }
+        other => StorageError::io(other),
+    }
+}
+
 impl RedbEngine {
     /// Open or create a redb-backed engine at `path`. Parent directory
     /// must already exist.
+    ///
+    /// A damaged file is reported as [`StorageError::Corrupted`]: redb's
+    /// own corruption error (e.g. "All roots are corrupted" after a power
+    /// cut on a device that lost fsync'd writes), an unreadable header,
+    /// or an existing file of zero bytes. redb would initialise a fresh,
+    /// empty database over the last one, silently discarding the store
+    /// and, on a cluster member, its raft vote.
     pub fn open<P: AsRef<Path>>(path: P) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let db = Database::create(&path).map_err(StorageError::io)?;
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+            return Err(StorageError::Corrupted(format!(
+                "{} exists but is empty",
+                path.display()
+            )));
+        }
+        let db = Database::create(&path).map_err(open_error)?;
         Ok(Self {
             inner: Arc::new(RedbInner {
                 db: RwLock::new(db),
@@ -333,6 +363,20 @@ impl Snapshot for RedbSnapshot {
                 Some(v) => Ok(Some(v.value().to_vec())),
                 None => Ok(None),
             }
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?
+    }
+
+    async fn table_names(&self) -> StorageResult<Vec<String>> {
+        use redb::TableHandle;
+        let txn = self.txn.clone();
+        task::spawn_blocking(move || -> StorageResult<Vec<String>> {
+            Ok(txn
+                .list_tables()
+                .map_err(StorageError::io)?
+                .map(|t| t.name().to_string())
+                .collect())
         })
         .await
         .map_err(|e| StorageError::Io(Box::new(e)))?

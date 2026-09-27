@@ -55,6 +55,15 @@ pub enum StorageError {
     /// Engine has been closed or is shutting down.
     #[error("storage closed")]
     Closed,
+
+    /// The store's file is damaged and cannot be opened: its roots fail
+    /// their checksums, its header is unreadable, or it is empty where a
+    /// database was expected. Distinct from [`StorageError::Io`] so the
+    /// server can recover from a backup instead of crash-looping
+    /// (fastetcd#37), and never mistake a lock or permission error for
+    /// damage.
+    #[error("storage corrupted: {0}")]
+    Corrupted(String),
 }
 
 impl StorageError {
@@ -206,6 +215,16 @@ pub trait Snapshot: Send + Sync {
             .range(table, Bound::Unbounded, Bound::Unbounded, 0)
             .await?
             .pop())
+    }
+
+    /// Names of every table that exists in this view. An online backup
+    /// copies all of them, so a table added later is never silently left
+    /// out (fastetcd#37). Engines that cannot enumerate their tables
+    /// return an error, and backups are unavailable on them.
+    async fn table_names(&self) -> StorageResult<Vec<String>> {
+        Err(StorageError::Misuse(
+            "this engine cannot list its tables".to_string(),
+        ))
     }
 }
 

@@ -429,7 +429,7 @@ fn sync_dir(dir: &Path) {
 /// True when an I/O error is "the volume is full". `ErrorKind::StorageFull`
 /// is still unstable, so match the OS codes directly: ENOSPC on unix,
 /// ERROR_HANDLE_DISK_FULL / ERROR_DISK_FULL on Windows.
-pub(crate) fn is_out_of_space(e: &io::Error) -> bool {
+pub fn is_out_of_space(e: &io::Error) -> bool {
     #[cfg(unix)]
     const CODES: &[i32] = &[28];
     #[cfg(windows)]
