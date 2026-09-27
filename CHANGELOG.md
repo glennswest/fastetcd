@@ -28,6 +28,7 @@
     fresh store over it) and a file whose repair makes redb 2.6.3
     **panic** (`unreachable!` walking a zeroed page), which it does
     rather than returning an error when a device loses whole pages.
+    The reason recorded with the recovery says "corrupt" in both cases.
   - The restore is crash-safe: the new store, recovery record included,
     is complete before anything is renamed, and a restore cut short
     between renames is finished on the next start rather than leaving

@@ -103,7 +103,9 @@ impl RedbEngine {
                     .map(|s| s.to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
-                StorageError::Corrupted(format!("redb panicked opening the file: {msg}"))
+                StorageError::Corrupted(format!(
+                    "database file is corrupt: redb panicked opening it: {msg}"
+                ))
             })?
             .map_err(open_error)?;
         Ok(Self {
