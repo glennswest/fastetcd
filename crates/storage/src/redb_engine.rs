@@ -89,7 +89,23 @@ impl RedbEngine {
                 path.display()
             )));
         }
-        let db = Database::create(&path).map_err(open_error)?;
+        // redb 2.6.3 does not always report a damaged file as an error:
+        // repairing a file whose pages were zeroed (a device that lost
+        // writes, or never wrote the blocks) walks a page whose type
+        // byte is neither leaf nor branch and hits `unreachable!()` in
+        // `Btree::get_helper`. Unwinding out of `Database::create` drops
+        // the file handle and its lock, so the panic is the corruption
+        // report (fastetcd#37).
+        let db = std::panic::catch_unwind(|| Database::create(&path))
+            .map_err(|panic| {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                StorageError::Corrupted(format!("redb panicked opening the file: {msg}"))
+            })?
+            .map_err(open_error)?;
         Ok(Self {
             inner: Arc::new(RedbInner {
                 db: RwLock::new(db),
