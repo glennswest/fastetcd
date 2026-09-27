@@ -66,6 +66,8 @@ impl Maintenance for MaintenanceService {
         let targets_this_member = req.member_id == 0 || req.member_id == self.state.member_id;
         let targets_nospace = req.alarm == pb::AlarmType::None as i32
             || req.alarm == pb::AlarmType::Nospace as i32;
+        let targets_corrupt = req.alarm == pb::AlarmType::None as i32
+            || req.alarm == pb::AlarmType::Corrupt as i32;
 
         // Re-sample before answering so `etcdctl alarm list` reflects
         // the store as it is now, not as it was up to one monitor tick
@@ -79,6 +81,15 @@ impl Maintenance for MaintenanceService {
                 if targets_this_member && targets_nospace {
                     space.disarm_nospace();
                 }
+                if targets_this_member && targets_corrupt {
+                    // The operator has seen that this store was restored
+                    // from a backup (fastetcd#37).
+                    self.state
+                        .recovery
+                        .disarm(self.state.sm.mvcc().engine())
+                        .await
+                        .map_err(|e| Status::internal(format!("disarm CORRUPT: {e}")))?;
+                }
             }
             AlarmAction::Activate => {
                 // etcd lets an operator raise an alarm by hand. There is
@@ -87,7 +98,8 @@ impl Maintenance for MaintenanceService {
                 // the monitor to tell it apart from a real one.
                 return Err(Status::unimplemented(
                     "raising an alarm by hand is not supported; NOSPACE is raised \
-                     by the space monitor when the store crosses its alarm mark",
+                     by the space monitor when the store crosses its alarm mark, and \
+                     CORRUPT when the store has been restored from a backup",
                 ));
             }
         }
@@ -97,6 +109,16 @@ impl Maintenance for MaintenanceService {
             alarms.push(pb::AlarmMember {
                 member_id: self.state.member_id,
                 alarm: pb::AlarmType::Nospace as i32,
+            });
+        }
+        // Raised while a recovery from backup is on record. Unlike etcd's
+        // CORRUPT, it does not refuse requests: the store is consistent,
+        // it is just older than it was, and the point of restoring it is
+        // to serve again (fastetcd#37).
+        if self.state.recovery.active().is_some() && targets_this_member && targets_corrupt {
+            alarms.push(pb::AlarmMember {
+                member_id: self.state.member_id,
+                alarm: pb::AlarmType::Corrupt as i32,
             });
         }
         let revision = self.state.sm.mvcc().current_revision().await;
@@ -143,6 +165,9 @@ impl Maintenance for MaintenanceService {
         if stats.nospace {
             // etcd reports raised alarms here, by name.
             errors.push(pb::AlarmType::Nospace.as_str_name().to_string());
+        }
+        if self.state.recovery.active().is_some() {
+            errors.push(pb::AlarmType::Corrupt.as_str_name().to_string());
         }
 
         let header = response_header(&self.state, revision).await;

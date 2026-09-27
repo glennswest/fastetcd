@@ -308,6 +308,43 @@ struct Args {
     #[arg(long, env = "FASTETCD_MAX_SNAPSHOTS", default_value_t = 1)]
     max_snapshots: usize,
 
+    /// Directory for periodic backups of the whole store, on a
+    /// **different volume** from `--data-dir`: a device that loses writes
+    /// can corrupt the data file and, on the same volume, the backups
+    /// with it. Unset (the default): no periodic backups. A lone member
+    /// whose data file is found corrupt restores itself from the newest
+    /// good backup here (fastetcd#37).
+    #[arg(long, env = "FASTETCD_BACKUP_DIR")]
+    backup_dir: Option<PathBuf>,
+
+    /// Take a backup at least this often, when anything has changed.
+    #[arg(long, env = "FASTETCD_BACKUP_INTERVAL_SECS", default_value_t = 900)]
+    backup_interval_secs: u64,
+
+    /// Also take a backup once this many revisions have been written
+    /// since the last one. `0` disables this trigger.
+    #[arg(long, env = "FASTETCD_BACKUP_EVERY_REVISIONS", default_value_t = 10_000)]
+    backup_every_revisions: i64,
+
+    /// Backups to keep in `--backup-dir`, newest first. Each is a full
+    /// copy of the store.
+    #[arg(long, env = "FASTETCD_BACKUP_RETAIN", default_value_t = 4)]
+    backup_retain: usize,
+
+    /// What to do when the data file is found corrupt at startup.
+    /// `restore`: a lone member restores its newest good backup from
+    /// `--backup-dir`, keeps the corrupt file, and raises the CORRUPT
+    /// alarm. A member of a multi-node cluster always refuses: it must
+    /// not forget its raft vote. `refuse`: never restore; leave the file
+    /// untouched and exit.
+    #[arg(
+        long,
+        env = "FASTETCD_ON_CORRUPTION",
+        value_enum,
+        default_value = "restore"
+    )]
+    on_corruption: fastetcd_server::recovery::OnCorruption,
+
     /// (etcd compat) Maximum gRPC request size.
     #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES")]
     max_request_bytes: Option<u64>,
@@ -534,6 +571,29 @@ fn derive_node_id(name: &str) -> NodeId {
 
 /// Parse an `initial_cluster` string of the form
 /// `n1=http://h1:2380,n2=http://h2:2380`.
+/// Backups on the data volume share its fate: a device that loses
+/// writes can take both. Allowed, but said out loud.
+fn warn_if_same_volume(data_dir: &std::path::Path, backup_dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = std::fs::create_dir_all(backup_dir);
+        if let (Ok(d), Ok(b)) = (std::fs::metadata(data_dir), std::fs::metadata(backup_dir)) {
+            if d.dev() == b.dev() {
+                tracing::warn!(
+                    data_dir = %data_dir.display(),
+                    backup_dir = %backup_dir.display(),
+                    "--backup-dir is on the same volume as --data-dir: a device that loses \
+                     writes can corrupt the backups along with the data. Use a separate \
+                     volume, and size it for --backup-retain full copies of the store."
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (data_dir, backup_dir);
+}
+
 fn parse_initial_cluster(s: &str) -> anyhow::Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     if s.trim().is_empty() {
@@ -663,7 +723,46 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.data_dir)?;
     let data_file = args.data_dir.join("fastetcd.redb");
     let store_is_new = !data_file.exists();
-    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&data_file)?);
+
+    // A corrupt data file is restored from a backup on a lone member
+    // rather than crash-looping (fastetcd#37).
+    let configured_members = initial_cluster
+        .keys()
+        .map(|name| derive_node_id(name))
+        .chain(std::iter::once(node_id))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if let Some(dir) = &args.backup_dir {
+        warn_if_same_volume(&args.data_dir, dir);
+    } else {
+        tracing::warn!(
+            "no --backup-dir: no periodic backups are taken, so a corrupt data file \
+             cannot be recovered. Give fastetcd a backup directory on a separate volume."
+        );
+    }
+    let (engine, _recovered) = fastetcd_server::recovery::open_or_recover(
+        &data_file,
+        &fastetcd_server::recovery::OpenOptions {
+            backup_dir: args.backup_dir.clone(),
+            on_corruption: args.on_corruption,
+            node_id,
+            configured_members,
+        },
+    )
+    .await?;
+    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(engine);
+    let recovery_alarm =
+        Arc::new(fastetcd_server::recovery::RecoveryAlarm::load(&engine).await?);
+    if let Some(r) = recovery_alarm.active() {
+        tracing::error!(
+            backup_revision = r.backup_revision,
+            backup = %r.backup_file,
+            corrupt_file = %r.corrupt_file,
+            "CORRUPT alarm raised: this store was restored from a backup and lost \
+             everything written after it. Disarm with `etcdctl alarm disarm` once handled."
+        );
+    }
+    let backup_engine = engine.clone();
 
     // Chosen once per store and persisted, so a restart or an upgrade
     // never changes the id clients have pinned (fastetcd#17).
@@ -937,8 +1036,33 @@ async fn main() -> anyhow::Result<()> {
             auth_state.clone(),
             forwarder,
         )
-        .with_space(space),
+        .with_space(space)
+        .with_recovery(recovery_alarm),
     );
+
+    // Periodic backups to a separate volume (fastetcd#37).
+    if let Some(dir) = &args.backup_dir {
+        let cfg = fastetcd_server::backup::BackupConfig {
+            dir: dir.clone(),
+            interval: std::time::Duration::from_secs(args.backup_interval_secs.max(1)),
+            every_revisions: args.backup_every_revisions,
+            retain: args.backup_retain.max(1),
+            node_id,
+        };
+        tracing::info!(
+            dir = %cfg.dir.display(),
+            interval_secs = cfg.interval.as_secs(),
+            every_revisions = cfg.every_revisions,
+            retain = cfg.retain,
+            "periodic backups enabled"
+        );
+        fastetcd_server::backup::spawn(
+            cfg,
+            backup_engine,
+            server_state.sm.mvcc().clone(),
+            raft.clone(),
+        );
+    }
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());

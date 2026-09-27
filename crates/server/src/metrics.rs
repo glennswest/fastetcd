@@ -14,6 +14,10 @@
 //!   - `fastetcd_store_snapshot_size_in_bytes` (gauge)
 //!   - `fastetcd_disk_total_bytes` / `fastetcd_disk_available_bytes`
 //!   - `fastetcd_nospace_alarm_active` (gauge 0/1)
+//!   - `fastetcd_recovered_from_backup_total` (counter): restores from a
+//!     backup over the life of the store (fastetcd#37)
+//!   - `fastetcd_recovered_revision` (gauge): revision the last restore
+//!     went back to, while the CORRUPT alarm is raised; 0 otherwise
 //!   - `etcd_debugging_mvcc_current_revision` (gauge)
 //!   - `etcd_debugging_mvcc_compact_revision` (gauge)
 //!   - `fastetcd_engine` (info: redb / wal / iouring)
@@ -56,6 +60,8 @@ pub struct Metrics {
     pub disk_available_bytes: Gauge,
     pub space_used_ratio: Gauge<f64, std::sync::atomic::AtomicU64>,
     pub nospace_alarm: Gauge,
+    pub recovered_total: Counter,
+    pub recovered_revision: Gauge,
     pub current_revision: Gauge,
     pub compact_revision: Gauge,
     /// Last leader id we saw, so leader_changes_total tracks
@@ -76,6 +82,8 @@ impl Metrics {
         let disk_available_bytes = Gauge::default();
         let space_used_ratio = Gauge::<f64, std::sync::atomic::AtomicU64>::default();
         let nospace_alarm = Gauge::default();
+        let recovered_total = Counter::default();
+        let recovered_revision = Gauge::default();
         let current_revision = Gauge::default();
         let compact_revision = Gauge::default();
         let m = Arc::new(Self {
@@ -90,6 +98,8 @@ impl Metrics {
             disk_available_bytes: disk_available_bytes.clone(),
             space_used_ratio: space_used_ratio.clone(),
             nospace_alarm: nospace_alarm.clone(),
+            recovered_total: recovered_total.clone(),
+            recovered_revision: recovered_revision.clone(),
             current_revision: current_revision.clone(),
             compact_revision: compact_revision.clone(),
             last_leader: AtomicU64::new(0),
@@ -159,6 +169,19 @@ impl Metrics {
                 "1 while the NOSPACE alarm is raised and writes are refused",
                 nospace_alarm,
             );
+            // prometheus-client appends `_total` to a counter's name.
+            reg.register(
+                "fastetcd_recovered_from_backup",
+                "Times this store has been restored from a backup after its data \
+                 file was found corrupt",
+                recovered_total,
+            );
+            reg.register(
+                "fastetcd_recovered_revision",
+                "Revision the store was restored to while the CORRUPT alarm is \
+                 raised (writes after it were lost); 0 when no alarm is raised",
+                recovered_revision,
+            );
             reg.register(
                 "etcd_debugging_mvcc_current_revision",
                 "Latest MVCC revision applied to the state machine",
@@ -183,6 +206,18 @@ impl Metrics {
             self.leader_changes_total.inc();
         }
         self.has_leader.set(if leader != 0 { 1 } else { 0 });
+        let recoveries = state.recovery.recoveries();
+        let counted = self.recovered_total.get();
+        if recoveries > counted {
+            self.recovered_total.inc_by(recoveries - counted);
+        }
+        self.recovered_revision.set(
+            state
+                .recovery
+                .active()
+                .map(|r| r.backup_revision)
+                .unwrap_or(0),
+        );
         let cur = state.sm.mvcc().current_revision().await;
         self.current_revision.set(cur);
         let comp = state.sm.mvcc().compact_revision().await;

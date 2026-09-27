@@ -6,6 +6,7 @@ use openraft::Raft;
 use tonic::Status;
 
 use crate::auth::AuthState;
+use crate::recovery::RecoveryAlarm;
 use crate::space::SpaceGuard;
 use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
@@ -29,6 +30,9 @@ pub struct ServerState {
     /// manage space see no behavior change; the server installs a live
     /// one via [`ServerState::with_space`].
     pub space: Arc<SpaceGuard>,
+    /// The CORRUPT alarm, raised after this store was restored from a
+    /// backup (fastetcd#37). Empty by default.
+    pub recovery: Arc<RecoveryAlarm>,
 }
 
 impl ServerState {
@@ -48,7 +52,14 @@ impl ServerState {
             auth,
             forwarder,
             space: Arc::new(SpaceGuard::disabled()),
+            recovery: Arc::new(RecoveryAlarm::default()),
         }
+    }
+
+    /// Install the recovery alarm loaded from the store at startup.
+    pub fn with_recovery(mut self, recovery: Arc<RecoveryAlarm>) -> Self {
+        self.recovery = recovery;
+        self
     }
 
     /// Install a live space guard. Called by the server binary once it

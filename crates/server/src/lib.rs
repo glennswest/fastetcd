@@ -17,6 +17,7 @@
 pub mod admin;
 pub mod auth;
 pub mod authz;
+pub mod backup;
 pub mod cluster;
 pub mod cluster_id;
 pub mod compaction;
@@ -26,6 +27,7 @@ pub mod lease;
 pub mod lease_expiry;
 pub mod maintenance;
 pub mod metrics;
+pub mod recovery;
 pub mod sizing;
 pub mod space;
 pub mod state;

@@ -329,13 +329,29 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
     if !backup.exists() {
         anyhow::bail!("backup file {} does not exist", backup.display());
     }
-    let backup_rev = revision_of(backup).await.map_err(|e| {
-        anyhow::anyhow!("{} is not a readable fastetcd backup: {e}", backup.display())
-    })?;
+    // A periodic backup from `--backup-dir` (fastetcd#37), or a raw copy
+    // of the data file from `fastetcd backup`.
+    let periodic = crate::backup::is_backup_file(backup);
+    let backup_rev = if periodic {
+        crate::backup::verify(backup)
+            .map_err(|e| anyhow::anyhow!("{} is not a usable backup: {e}", backup.display()))?
+            .revision
+    } else {
+        revision_of(backup).await.map_err(|e| {
+            anyhow::anyhow!("{} is not a readable fastetcd backup: {e}", backup.display())
+        })?
+    };
 
     let dst = data_file(data_dir);
     if dst.exists() {
-        let cur_rev = revision_of(&dst).await?;
+        // A corrupt current file cannot be read; it is kept, not compared.
+        let cur_rev = match revision_of(&dst).await {
+            Ok(rev) => rev,
+            Err(e) => {
+                println!("restore: the current data file is unreadable ({e}); keeping it aside");
+                0
+            }
+        };
         if cur_rev > backup_rev && !force {
             anyhow::bail!(
                 "refusing to restore: current data dir is at revision {cur_rev}, newer than \
@@ -349,6 +365,16 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
         println!("restore: saved current data as {}", saved.display());
     } else {
         std::fs::create_dir_all(data_dir)?;
+    }
+    if periodic {
+        crate::backup::restore_to(backup, &dst).await?;
+        println!(
+            "restore: {} (rev {}) -> {}",
+            backup.display(),
+            backup_rev,
+            dst.display()
+        );
+        return Ok(());
     }
     let bytes = std::fs::copy(backup, &dst)?;
     println!(
