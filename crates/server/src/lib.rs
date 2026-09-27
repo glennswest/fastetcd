@@ -31,6 +31,7 @@ pub mod recovery;
 pub mod sizing;
 pub mod space;
 pub mod state;
+pub mod tls;
 pub mod watch;
 
 pub use state::ServerState;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 use openraft::{Config, Raft};
 use tokio::sync::RwLock;
-use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::transport::Server;
 
 use fastetcd_proto::etcdserverpb::auth_server::AuthServer;
 use fastetcd_proto::etcdserverpb::cluster_server::ClusterServer;
@@ -16,6 +16,7 @@ use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_proto::fastetcd_raft::raft_peer_server::RaftPeerServer;
 use fastetcd_raft::kv_log_store::KvLogStore;
 use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
+use fastetcd_server::tls::{check_peer_url_schemes, Port, TlsFiles};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::auth::{AuthInterceptor, AuthService, AuthState};
@@ -160,21 +161,27 @@ struct Args {
     #[arg(long, env = "FASTETCD_CLIENT_CERT_AUTH", default_value_t = false)]
     client_cert_auth: bool,
 
-    /// PEM-encoded server certificate for peer gRPC. Defaults to
-    /// `--cert-file` when unset, matching etcd's behavior.
+    /// PEM-encoded certificate for the raft peer port. Independent of
+    /// `--cert-file`, as in etcd: unset, the peer port is plaintext.
+    /// Also presented as the client certificate when dialling other
+    /// members. Requires `--peer-key-file` and `--peer-trusted-ca-file`,
+    /// and every peer URL to be `https://`.
     #[arg(long, env = "FASTETCD_PEER_CERT_FILE")]
     peer_cert_file: Option<PathBuf>,
 
-    /// PEM-encoded private key for peer gRPC. Defaults to
-    /// `--key-file`.
+    /// PEM-encoded private key matching `--peer-cert-file`.
     #[arg(long, env = "FASTETCD_PEER_KEY_FILE")]
     peer_key_file: Option<PathBuf>,
 
-    /// PEM CA bundle for peer cert verification.
+    /// PEM CA bundle the other members' peer certificates are verified
+    /// against, both those they serve and (with
+    /// `--peer-client-cert-auth`) those they dial in with. Usually a
+    /// narrower CA than `--trusted-ca-file`.
     #[arg(long, env = "FASTETCD_PEER_TRUSTED_CA_FILE")]
     peer_trusted_ca_file: Option<PathBuf>,
 
-    /// Require peer certs.
+    /// Refuse any caller on the peer port that does not present a
+    /// certificate signed by `--peer-trusted-ca-file`.
     #[arg(long, env = "FASTETCD_PEER_CLIENT_CERT_AUTH", default_value_t = false)]
     peer_client_cert_auth: bool,
 
@@ -421,41 +428,6 @@ enum Command {
     },
 }
 
-fn build_tls_config(
-    cert_file: &Option<PathBuf>,
-    key_file: &Option<PathBuf>,
-    trusted_ca_file: &Option<PathBuf>,
-    client_cert_auth: bool,
-) -> anyhow::Result<Option<ServerTlsConfig>> {
-    match (cert_file, key_file) {
-        (Some(c), Some(k)) => {
-            let cert = std::fs::read(c)?;
-            let key = std::fs::read(k)?;
-            let identity = Identity::from_pem(cert, key);
-            let mut cfg = ServerTlsConfig::new().identity(identity);
-            if client_cert_auth {
-                let ca = trusted_ca_file
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "--client-cert-auth requires --trusted-ca-file"
-                    ))?;
-                let ca_bytes = std::fs::read(ca)?;
-                cfg = cfg
-                    .client_ca_root(tonic::transport::Certificate::from_pem(ca_bytes))
-                    // Mandatory, not optional: a client that presents no
-                    // certificate must fail the handshake. tonic 0.12
-                    // already defaults `client_auth_optional` to false
-                    // (mandatory), but set it explicitly so the security
-                    // guarantee doesn't silently depend on that default.
-                    .client_auth_optional(false);
-            }
-            Ok(Some(cfg))
-        }
-        (None, None) => Ok(None),
-        _ => anyhow::bail!("--cert-file and --key-file must both be set or both unset"),
-    }
-}
-
 /// Pick the first comma-separated URL from a list. Returns the
 /// socket part — strips `http://` / `https://` prefix for parsing
 /// as a SocketAddr in the listener calls.
@@ -688,6 +660,47 @@ async fn main() -> anyhow::Result<()> {
     let client_listen_url = first_url(&args.listen_client_urls)?;
     let peer_listen_url = first_url(&args.listen_peer_urls)?;
 
+    // TLS, client and peer ports configured independently (#23). All of
+    // it is checked here, before anything touches the data directory,
+    // so a bad flag is a clean startup error.
+    let client_tls_files = TlsFiles {
+        cert_file: args.cert_file.clone(),
+        key_file: args.key_file.clone(),
+        trusted_ca_file: args.trusted_ca_file.clone(),
+        client_cert_auth: args.client_cert_auth,
+    };
+    let peer_tls_files = TlsFiles {
+        cert_file: args.peer_cert_file.clone(),
+        key_file: args.peer_key_file.clone(),
+        trusted_ca_file: args.peer_trusted_ca_file.clone(),
+        client_cert_auth: args.peer_client_cert_auth,
+    };
+    let client_tls = client_tls_files.server_config(Port::Client)?;
+    let peer_tls = peer_tls_files.server_config(Port::Peer)?;
+    let peer_dial_tls = peer_tls_files.peer_client_config()?;
+    {
+        let mut urls: Vec<(&str, &str)> = Vec::new();
+        urls.extend(args.listen_peer_urls.split(',').map(|u| ("--listen-peer-urls", u)));
+        if let Some(a) = &args.initial_advertise_peer_urls {
+            urls.extend(a.split(',').map(|u| ("--initial-advertise-peer-urls", u)));
+        }
+        urls.extend(initial_cluster.values().map(|u| ("--initial-cluster", u.as_str())));
+        check_peer_url_schemes(peer_tls.is_some(), urls)?;
+    }
+    match (client_tls.is_some(), peer_tls.is_some()) {
+        (_, true) => tracing::info!(
+            client_tls = client_tls.is_some(),
+            peer_client_cert_auth = args.peer_client_cert_auth,
+            "peer TLS enabled (its own identity and CA)"
+        ),
+        (true, false) => tracing::warn!(
+            "client TLS is on but peer TLS is off: raft traffic on the peer port is \
+             plaintext and unauthenticated. Set --peer-cert-file, --peer-key-file, \
+             --peer-trusted-ca-file and --peer-client-cert-auth to protect it."
+        ),
+        (false, false) => {}
+    }
+
     tracing::info!(
         name = %args.name,
         node_id,
@@ -714,10 +727,6 @@ async fn main() -> anyhow::Result<()> {
         &args.metrics,
         &args.initial_advertise_peer_urls,
         &args.advertise_client_urls,
-        &args.peer_cert_file,
-        &args.peer_key_file,
-        &args.peer_trusted_ca_file,
-        &args.peer_client_cert_auth,
     );
 
     std::fs::create_dir_all(&args.data_dir)?;
@@ -926,7 +935,7 @@ async fn main() -> anyhow::Result<()> {
     // Clone the MVCC handle before `sm` is moved into ServerState; the
     // peer service uses it to serve forwarded linearizable reads (#10).
     let peer_mvcc = sm.mvcc().clone();
-    let factory = GrpcNetworkFactory::new(peers.clone());
+    let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
 
     // Bootstrap: only the `new` state initializes; `existing` waits
@@ -941,7 +950,7 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_state = AuthState::default();
     AuthService::load_persisted(sm.mvcc().engine(), &auth_state).await?;
-    let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
+    let forwarder = fastetcd_raft::WriteForwarder::with_tls(peers.clone(), peer_dial_tls);
 
     // Disk-space accounting (#14). A bounded data volume must never
     // reach ENOSPC: at that point the snapshot write fails, openraft
@@ -1145,19 +1154,8 @@ async fn main() -> anyhow::Result<()> {
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
 
-    // TLS config (client + peer share the same identity).
-    let tls = build_tls_config(
-        &args.cert_file,
-        &args.key_file,
-        &args.trusted_ca_file,
-        args.client_cert_auth,
-    )?;
-    if tls.is_some() {
-        tracing::info!("TLS enabled (client + peer)");
-    }
-
-    // Spawn the peer server on its own port.
-    let tls_for_peer = tls.clone();
+    // Spawn the peer server on its own port, with the peer identity.
+    let tls_for_peer = peer_tls;
     let peer_handle = {
         tokio::spawn(async move {
             tracing::info!(%peer_listen, "serving RaftPeer gRPC");
@@ -1176,7 +1174,7 @@ async fn main() -> anyhow::Result<()> {
     // wrapped by AuthInterceptor; Auth stays open so clients can
     // call Authenticate without a pre-existing token.
     let interceptor = AuthInterceptor::new(auth_state.clone());
-    let tls_for_client = tls;
+    let tls_for_client = client_tls;
 
     // Standard gRPC health service. Mark every service we serve as
     // SERVING so service-mesh / k8s probes pass.

@@ -55,6 +55,22 @@ tls:
   caFile: ""
   clientCertAuth: false
 
+# TLS on the raft peer port, with its own identity and CA (independent
+# of `tls` above, as in etcd). Off, raft traffic between members is
+# plaintext. On, members reach each other over https:// and verify each
+# other against caFile; clientCertAuth makes the peer port refuse any
+# caller without a certificate that CA signed. Each member's cert must
+# be valid for its headless-service name,
+# <release>-<i>.<release>-headless.<namespace>.svc. Mounted into
+# /etc/fastetcd/peer-tls.
+peerTls:
+  enabled: false
+  secretName: ""
+  certFile: tls.crt
+  keyFile: tls.key
+  caFile: ca.crt      # required when enabled
+  clientCertAuth: true
+
 # Disk space management (see docs/04-disk-space.md). fastetcd measures
 # the PVC's real free space, reclaims at the high-water mark (compact ->
 # snapshot -> purge -> defragment) and raises a NOSPACE alarm at the

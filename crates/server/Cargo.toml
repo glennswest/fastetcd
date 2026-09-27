@@ -53,6 +53,8 @@ tempfile = "3.13"
 # real etcd consumers will too.
 etcd-client = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Test certificates for the peer TLS tests (#23), generated per run.
+rcgen = "0.13"
 
 # ---------------------------------------------------------------
 # Packaging (cargo-deb / cargo-generate-rpm). Built with:

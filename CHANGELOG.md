@@ -3,6 +3,32 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27
+- **fix:** Peer TLS is honoured, with its own identity and trust root
+  (#23). `--peer-cert-file`, `--peer-key-file`, `--peer-trusted-ca-file`
+  and `--peer-client-cert-auth` (and their `ETCD_PEER_*` env vars) were
+  parsed and discarded. The peer port served the *client* identity
+  whenever `--cert-file` was set, so any certificate trusted by the
+  client port was trusted by raft too. Members also dialled each other
+  with no TLS at all, so a multi-member cluster with `--cert-file` could
+  not form. Now, as in etcd:
+  - the peer port's TLS comes only from the `--peer-*` flags.
+    `--peer-client-cert-auth` refuses any caller without a certificate
+    from `--peer-trusted-ca-file`, including one the client CA signed;
+  - members dial each other over TLS, verifying against the peer CA and
+    presenting their peer certificate, which gives mutual TLS between
+    members. `--peer-trusted-ca-file` is required with peer TLS;
+  - peer URLs must be `https://` with peer TLS and `http://` without
+    it. A mismatch is a startup error naming the flag and URL, never a
+    silent fallback;
+  - client TLS on with peer TLS off logs a warning that raft traffic is
+    plaintext;
+  - Helm chart: a separate `peerTls` block.
+  **Behaviour change:** `--cert-file` alone no longer puts TLS on the
+  peer port. No known deployment relied on it: multi-member clusters
+  could not form with it, and every known one uses `http://` peer URLs.
+  Tests: `crates/server/tests/peer_tls.rs`. Docs: `docs/03-deploy.md`.
+
 ## [v1.4.0] — 2026-09-27
 
 ### Added

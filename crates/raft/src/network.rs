@@ -20,13 +20,14 @@ use openraft::raft::{
 };
 use openraft::Raft;
 use tokio::sync::RwLock;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 
 use crate::types::{NodeId, TypeConfig};
 
 /// Map of `NodeId -> base URL` used by the network factory to dial
-/// peers. URLs are `http://host:port` matching tonic's expected form.
+/// peers. URLs are `http://host:port` (or `https://` with peer TLS)
+/// matching tonic's expected form.
 pub type PeerEndpoints = Arc<RwLock<HashMap<NodeId, String>>>;
 
 /// Construct an empty peer endpoints map. Bootstrap code populates it
@@ -35,14 +36,51 @@ pub fn empty_peers() -> PeerEndpoints {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+/// TLS for outbound peer connections: the peer CA to verify the other
+/// member's certificate against, and the peer certificate this member
+/// presents as its client certificate. `None` is plaintext.
+pub type PeerTls = Option<ClientTlsConfig>;
+
+/// Dial a peer. The URL's scheme must agree with whether peer TLS is
+/// on: an `https://` peer without TLS configured, or an `http://` peer
+/// with it, is refused with an error naming the URL, rather than
+/// quietly falling back to plaintext or failing an opaque handshake
+/// (fastetcd#23).
+pub async fn dial_peer(url: &str, tls: &PeerTls) -> Result<Channel, std::io::Error> {
+    let https = url.starts_with("https://");
+    let endpoint = Endpoint::from_shared(url.to_string()).map_err(std::io::Error::other)?;
+    let endpoint = match (tls, https) {
+        (Some(tls), true) => endpoint.tls_config(tls.clone()).map_err(std::io::Error::other)?,
+        (None, false) => endpoint,
+        (Some(_), false) => {
+            return Err(std::io::Error::other(format!(
+                "peer URL {url} is not https:// but peer TLS is on (--peer-cert-file)"
+            )))
+        }
+        (None, true) => {
+            return Err(std::io::Error::other(format!(
+                "peer URL {url} is https:// but peer TLS is off (set --peer-cert-file, \
+                 --peer-key-file and --peer-trusted-ca-file)"
+            )))
+        }
+    };
+    endpoint.connect().await.map_err(std::io::Error::other)
+}
+
 #[derive(Clone)]
 pub struct GrpcNetworkFactory {
     peers: PeerEndpoints,
+    tls: PeerTls,
 }
 
 impl GrpcNetworkFactory {
+    /// Plaintext peer connections.
     pub fn new(peers: PeerEndpoints) -> Self {
-        Self { peers }
+        Self::with_tls(peers, None)
+    }
+
+    pub fn with_tls(peers: PeerEndpoints, tls: PeerTls) -> Self {
+        Self { peers, tls }
     }
 }
 
@@ -57,6 +95,7 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for GrpcNetworkFactory {
         GrpcNetwork {
             target,
             peers: self.peers.clone(),
+            tls: self.tls.clone(),
             client: tokio::sync::Mutex::new(None),
         }
     }
@@ -68,6 +107,7 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for GrpcNetworkFactory {
 pub struct GrpcNetwork {
     target: NodeId,
     peers: PeerEndpoints,
+    tls: PeerTls,
     client: tokio::sync::Mutex<Option<pb::raft_peer_client::RaftPeerClient<Channel>>>,
 }
 
@@ -90,9 +130,7 @@ impl GrpcNetwork {
             )))
         })?;
         drop(peers);
-        let chan = Channel::from_shared(url.clone())
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?
-            .connect()
+        let chan = dial_peer(&url, &self.tls)
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
@@ -181,13 +219,20 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
 #[derive(Clone)]
 pub struct WriteForwarder {
     peers: PeerEndpoints,
+    tls: PeerTls,
     clients: Arc<RwLock<HashMap<NodeId, pb::raft_peer_client::RaftPeerClient<Channel>>>>,
 }
 
 impl WriteForwarder {
+    /// Plaintext peer connections.
     pub fn new(peers: PeerEndpoints) -> Self {
+        Self::with_tls(peers, None)
+    }
+
+    pub fn with_tls(peers: PeerEndpoints, tls: PeerTls) -> Self {
         Self {
             peers,
+            tls,
             clients: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -206,11 +251,7 @@ impl WriteForwarder {
             .get(&target)
             .cloned()
             .ok_or_else(|| format!("no peer URL for node {target}"))?;
-        let chan = Channel::from_shared(url)
-            .map_err(|e| e.to_string())?
-            .connect()
-            .await
-            .map_err(|e| e.to_string())?;
+        let chan = dial_peer(&url, &self.tls).await.map_err(|e| e.to_string())?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
         self.clients.write().await.insert(target, cli.clone());
         Ok(cli)

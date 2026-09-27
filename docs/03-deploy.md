@@ -99,19 +99,54 @@ sudo systemctl enable --now fastetcd
 
 ## TLS
 
-Standard etcd-shaped flags:
+Standard etcd-shaped flags. The client port and the raft peer port
+are configured **independently**, as in etcd, so the peer port can
+require a different, usually narrower, CA than the client port:
 
 ```
+# Client port (KV / Watch / Lease / ... and /health)
 --cert-file=/etc/fastetcd/cert.pem
 --key-file=/etc/fastetcd/key.pem
---trusted-ca-file=/etc/fastetcd/ca.pem    # optional
+--trusted-ca-file=/etc/fastetcd/ca.pem    # needed for --client-cert-auth
 --client-cert-auth                         # require client certs
+
+# Raft peer port
+--peer-cert-file=/etc/fastetcd/peer.pem
+--peer-key-file=/etc/fastetcd/peer-key.pem
+--peer-trusted-ca-file=/etc/fastetcd/peer-ca.pem   # required with peer TLS
+--peer-client-cert-auth                            # require peer certs
 ```
 
-When `--cert-file` + `--key-file` are set, both the client and peer
-ports listen over TLS using the same identity. Operators that need
-separate identities for client vs. peer should run two fastetcd
-processes — multi-identity is not currently supported.
+`--cert-file` never applies to the peer port. Without the `--peer-*`
+flags the peer port is plaintext and unauthenticated, and if client TLS
+is on fastetcd logs a warning saying so at startup. Anything that can
+reach an unprotected peer port can take part in raft, so when members
+are on different hosts or pods, turn peer TLS on.
+
+With peer TLS on:
+
+- members dial each other over TLS, verify the other member's
+  certificate against `--peer-trusted-ca-file`, and present their own
+  `--peer-cert-file` as their client certificate. A peer certificate
+  therefore needs both the `serverAuth` and `clientAuth` usages (or
+  none), and must be valid for the host in that member's peer URL;
+- `--peer-client-cert-auth` makes the peer port refuse any caller that
+  does not present a certificate the peer CA signed. A certificate the
+  client CA signed is not enough. Set it on every member;
+- every peer URL (`--listen-peer-urls`, `--initial-advertise-peer-urls`,
+  `--initial-cluster`) must be `https://`. Without peer TLS they must be
+  `http://`. A mismatch is a startup error naming the flag and URL, and
+  a member added later with the wrong scheme fails to dial with an error
+  naming its URL. A listen URL with no scheme (`0.0.0.0:2380`) is
+  accepted either way.
+
+Before v1.5.0, `--cert-file` was also served on the peer port and the
+`--peer-*` flags were parsed and ignored. Members still dialled each
+other in plaintext, so a multi-member cluster with `--cert-file` set
+could not form (fastetcd#23).
+
+The Helm chart has a separate `peerTls` block for this (see
+`values.yaml`).
 
 Every flag above is also settable via its env var — `FASTETCD_*` or,
 as a drop-in for existing etcd config, `ETCD_*` (e.g.

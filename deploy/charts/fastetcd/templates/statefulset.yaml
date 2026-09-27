@@ -44,7 +44,7 @@ spec:
                 CLUSTER=""
                 for i in $(seq 0 $(({{ .Values.replicaCount }} - 1))); do
                   n="{{ .Release.Name }}-$i"
-                  e="http://$n.{{ .Release.Name }}-headless.$POD_NAMESPACE.svc:{{ .Values.ports.peer }}"
+                  e="{{ if .Values.peerTls.enabled }}https{{ else }}http{{ end }}://$n.{{ .Release.Name }}-headless.$POD_NAMESPACE.svc:{{ .Values.ports.peer }}"
                   if [ -z "$CLUSTER" ]; then CLUSTER="$n=$e"; else CLUSTER="$CLUSTER,$n=$e"; fi
                 done
               fi
@@ -64,6 +64,14 @@ spec:
                 {{- end }}
                 {{- if .Values.tls.clientCertAuth }}
                 --client-cert-auth \
+                {{- end }}
+                {{- end }}
+                {{- if .Values.peerTls.enabled }}
+                --peer-cert-file=/etc/fastetcd/peer-tls/{{ .Values.peerTls.certFile }} \
+                --peer-key-file=/etc/fastetcd/peer-tls/{{ .Values.peerTls.keyFile }} \
+                --peer-trusted-ca-file=/etc/fastetcd/peer-tls/{{ .Values.peerTls.caFile | required "peerTls.caFile required when peerTls.enabled" }} \
+                {{- if .Values.peerTls.clientCertAuth }}
+                --peer-client-cert-auth \
                 {{- end }}
                 {{- end }}
                 {{- with .Values.space }}
@@ -107,12 +115,22 @@ spec:
               mountPath: /etc/fastetcd/tls
               readOnly: true
             {{- end }}
+            {{- if .Values.peerTls.enabled }}
+            - name: peer-tls
+              mountPath: /etc/fastetcd/peer-tls
+              readOnly: true
+            {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         {{- if .Values.tls.enabled }}
         - name: tls
           secret:
             secretName: {{ .Values.tls.secretName | required "tls.secretName required when tls.enabled" }}
+        {{- end }}
+        {{- if .Values.peerTls.enabled }}
+        - name: peer-tls
+          secret:
+            secretName: {{ .Values.peerTls.secretName | required "peerTls.secretName required when peerTls.enabled" }}
         {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:

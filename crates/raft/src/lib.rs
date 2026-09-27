@@ -21,7 +21,8 @@ pub mod state_machine;
 pub mod types;
 
 pub use network::{
-    empty_peers, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, RaftPeerService, WriteForwarder,
+    dial_peer, empty_peers, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,
+    RaftPeerService, WriteForwarder,
 };
 
 pub use snapshot_data::SnapshotFile;
