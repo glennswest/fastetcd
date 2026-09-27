@@ -38,6 +38,14 @@
     trust the primary commit slot, so on a device that lies about fsync
     a torn commit becomes an unopenable file instead of a one-commit
     rollback. See `docs/05-backup-and-recovery.md`.
+    Measured with `crates/storage/tests/two_phase_commit_cost.rs` on
+    dev.g8.lo (500 single-key commits, twice each): on tmpfs, where
+    fsync is free, 2PC adds ~4% (p50 11.1 → 11.5 µs), which is pure
+    bookkeeping; on the shared ext4 build disk, per-commit fsync ran
+    0.36-2.4 s p50 under other builds' load and swamped any difference
+    (the runs did not even order consistently). No trustworthy disk
+    number yet: its cost is one extra fsync per write, at most doubling
+    commit latency on a quiet disk. The decision does not rest on it.
 - **fix:** A `Range` inside a `Txn` now sees the txn's own earlier
   writes, as in etcd (#35). The ops of the branch that runs are applied
   strictly in order, and once the txn has changed anything a range

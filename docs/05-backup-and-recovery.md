@@ -157,5 +157,7 @@ fsync'd writes, a torn last commit becomes an unopenable file, and a
 full restore from backup loses up to the backup interval. Without it,
 the same tear is rolled back to the previous commit, losing only that
 write. Its protection is against a deliberate attacker who controls
-flush order and crashes, and it costs a second fsync on every write. The
-measured cost is in the changelog for v1.4.0.
+flush order and crashes, and it costs a second fsync on every write.
+What was measured (on tmpfs its bookkeeping is ~4%; on a contended disk
+the fsync noise hid it) is in the changelog for v1.4.0. The decision
+rests on the repair behaviour, not the cost.
