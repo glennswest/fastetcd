@@ -595,7 +595,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       multi-member refuses, no backup refuses; 2PC cost measurement.
     - [ ] Docs (`docs/05-backup-and-recovery.md`), changelog; stormcos
       issue for a backup volume + `--backup-dir`; file the lease-tables
-      snapshot gap found while reading the snapshot payload.
+      snapshot gap found while reading the snapshot payload (filed: #41).
+    - Status 2026-09-27: the items above are committed (23f8b04, c50a82f,
+      c1a04d8) but sc-build fails 6 of `corruption_recovery` (#42):
+      redb 2.6.3 *panics* (`unreachable!` in `btree.rs` `get_helper`)
+      opening a file whose pages are zeroed, instead of returning
+      "All roots are corrupted". A real node would crash the same way.
+      Remaining:
+      - [ ] `RedbEngine::open` catches a panic inside redb's open/repair
+        and reports it as `Corrupted`.
+      - [ ] Restore swap is crash-safe: write the recovery record into
+        the restored file *before* any rename, and on start finish a
+        half-done swap (data file missing, complete `.restored` present)
+        instead of creating an empty store over it.
+      - [ ] Measure 2PC cost on dev (ignored test) and record it.
+      - [ ] Changelog, work plan ticks, release 1.4.0 (with #35), golden.
 
 22. **A Range in a Txn sees the txn's own earlier writes (#35) — done on `main` (c7aabec), unreleased.**
     `MvccStore::txn` ran every `Range` against the pre-txn snapshot and
