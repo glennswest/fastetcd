@@ -176,6 +176,25 @@ strategy.
 Current count: 151 tests pass workspace-wide (on Linux; a few are
 Linux-only, so a macOS run reports fewer).
 
+## Backups and a corrupt data file
+
+Give fastetcd a backup directory on a **separate volume** and it takes
+checksummed, point-in-time backups of the whole store (every 15 minutes
+and every 10000 revisions by default, keeping 4). If a power cut on a
+device that loses writes leaves the data file unopenable, a single-node
+fastetcd restores itself from the newest good backup instead of
+crash-looping. It keeps the corrupt file and raises the `CORRUPT` alarm
+with how much was lost. A member of a multi-node cluster refuses and
+says how to replace it, because it must not forget its raft vote.
+
+```bash
+fastetcd --backup-dir /backup/fastetcd …   # off unless set
+etcdctl alarm list                          # CORRUPT after a restore
+etcdctl alarm disarm                        # once you have looked
+```
+
+See [docs/05-backup-and-recovery.md](docs/05-backup-and-recovery.md).
+
 ## Disk space
 
 fastetcd is normally deployed onto a fixed-size volume, so it manages
