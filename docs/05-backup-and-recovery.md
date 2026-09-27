@@ -65,9 +65,11 @@ transaction only for the scan itself, not for the disk write.
 
 Checked on every start. "Corrupt" means redb's own corruption error
 (both commit slots' roots fail their checksums), an unreadable header,
-or a data file that exists but is empty. Before v1.4.0, redb silently
-started a fresh store over an empty file. A lock or permission error is
-*not* corruption and fails as before.
+a data file that exists but is empty, or redb panicking while it
+repairs the file. redb 2.6.3 does the last rather than return an error
+when a device has lost whole pages and they read back as zeros. Before
+v1.4.0, redb silently started a fresh store over an empty file. A lock
+or permission error is *not* corruption and fails as before.
 
 `--on-corruption` (default `restore`):
 
@@ -86,13 +88,17 @@ the error says why and what to do.
 1. Backups in `--backup-dir` are tried newest first. One whose checksum
    fails, or that another node took, is skipped with a warning.
 2. A new store is built from it beside the corrupt one
-   (`fastetcd.redb.restored`). If that fails, nothing has moved.
+   (`fastetcd.redb.restored`), and the recovery is recorded in it. If
+   that fails, nothing has moved.
 3. The corrupt file is renamed to `fastetcd.redb.corrupt.<unix-ms>` and
    kept for inspection; **it is never deleted**. The retained raft
    snapshots move with it (`snapshots.corrupt.<unix-ms>`), since they
    may be newer than the backup.
-4. The restored store takes its place, and the recovery is recorded in
-   it.
+4. The restored store takes its place.
+
+A crash between steps 3 and 4 leaves no `fastetcd.redb` but a complete
+`fastetcd.redb.restored`. The next start finishes the swap. It never
+creates an empty store in its place.
 
 The store is back at the backup's revision. **Everything written after
 that backup is lost**, and fastetcd says so loudly:
