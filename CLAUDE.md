@@ -608,8 +608,19 @@ Tracked live in the Claude task system. Snapshot of the order:
         the restored file *before* any rename, and on start finish a
         half-done swap (data file missing, complete `.restored` present)
         instead of creating an empty store over it.
-      - [ ] Measure 2PC cost on dev (ignored test) and record it.
-      - [ ] Changelog, work plan ticks, release 1.4.0 (with #35), golden.
+      - [x] `RedbEngine::open` catch_unwind → Corrupted (8fb2124).
+      - [x] Crash-safe swap + `finish_interrupted_restore` + test (6c64183);
+        docs updated (ca1c5ea); changelog entry for #37 written.
+      - [ ] **Where I am (session restart 2026-09-27):** sc-build of
+        6c64183 was running (`cargo test --no-fail-fast --workspace` +
+        2PC measurement) — result not seen. Next: re-run
+        `sc-build 'cargo test --no-fail-fast --workspace'`; if
+        `corruption_recovery` passes, close #42, run
+        `sc-build 'cargo test --release -p fastetcd-storage --test
+        two_phase_commit_cost -- --ignored --nocapture'` and put the
+        numbers in the changelog + docs/05 (they say "in the changelog
+        for v1.4.0"), tick the #37 boxes above.
+      - [ ] Release 1.4.0 (with #35), golden, close #37 with verification.
 
 22. **A Range in a Txn sees the txn's own earlier writes (#35) — done on `main` (c7aabec), unreleased.**
     `MvccStore::txn` ran every `Range` against the pre-txn snapshot and
