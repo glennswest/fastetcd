@@ -558,6 +558,45 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Tests, docs (`--cluster-id` documented), changelog.
     - [x] Replicated / distinct-by-default id filed as #38.
 
+21. **Survive a corrupt DB (#37, P0) — in progress.** After a power cut
+    on a device that loses fsync'd writes (stormblock#171), redb refused
+    to open ("All roots are corrupted") and the node crash-looped with
+    nothing to recover from. Decided 2026-09-27:
+    - **No redb two-phase commit.** In redb 2.6.3 a 2PC commit makes
+      repair trust the primary slot and never fall back to the previous
+      commit, so on a lying device a torn commit becomes an unopenable
+      file (full restore) instead of a one-write rollback. Measure the
+      fsync cost anyway and record it.
+    - **Backups are off unless `--backup-dir` is set** (keeps the #14
+      sizing model; warn when it is on the data volume).
+    - **Only a lone member restores locally.** A member of a multi-node
+      cluster must never forget its raft vote, so it refuses to start,
+      leaves the corrupt file, and prints the member remove / re-add
+      remedy.
+    Work items:
+    - [ ] `StorageError::Corrupted`, mapped from redb's corruption error
+      on open; `Snapshot::table_names()` (redb `list_tables`).
+    - [ ] Online backup: every table from one engine snapshot, one
+      checksummed file (magic + header + tables + sha256), temp file +
+      fsync + rename + dir fsync, keep the newest `--backup-retain` (4).
+      Every `--backup-interval-secs` (900) and every
+      `--backup-every-revisions` (10000), and on a membership change.
+    - [ ] Startup: on `Corrupted`, if lone member and
+      `--on-corruption=restore` (default): move the file aside
+      (`fastetcd.redb.corrupt.<ts>`, never deleted) and the retained
+      raft snapshots with it, restore the newest backup whose checksum
+      verifies, record the recovery in `node_meta`. Else refuse, file
+      untouched.
+    - [ ] CORRUPT alarm through `Maintenance.Alarm`/`Status` until
+      disarmed; metrics `fastetcd_recovered_from_backup_total`,
+      `fastetcd_recovered_revision`. Reads and writes are not gated.
+    - [ ] Offline `fastetcd restore` accepts the new backup files.
+    - [ ] Tests: zeroed roots → restore + alarm, bad checksum skipped,
+      multi-member refuses, no backup refuses; 2PC cost measurement.
+    - [ ] Docs (`docs/05-backup-and-recovery.md`), changelog; stormcos
+      issue for a backup volume + `--backup-dir`; file the lease-tables
+      snapshot gap found while reading the snapshot payload.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
