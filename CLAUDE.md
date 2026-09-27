@@ -597,6 +597,22 @@ Tracked live in the Claude task system. Snapshot of the order:
       issue for a backup volume + `--backup-dir`; file the lease-tables
       snapshot gap found while reading the snapshot payload.
 
+22. **A Range in a Txn sees the txn's own earlier writes (#35) — in progress.**
+    `MvccStore::txn` ran every `Range` against the pre-txn snapshot and
+    applied the mutations afterwards, so `[Put(b), Range(b)]` returned
+    the old value; etcd returns the new one. Work items:
+    - [ ] Apply a txn's ops strictly in order in one `ApplyContext`;
+      a `Range` after a change reads at the pending revision
+      (`current_rev + 1`), as etcd's `storeTxnWrite.Range` does.
+    - [ ] The in-batch record cache is used only for the revision it
+      holds, so a `Range` with an explicit older `revision` still reads
+      history.
+    - [ ] Tests: put→range, delete→range, range→put→range, explicit
+      older revision; fix the unit test that asserted the old
+      behaviour; gRPC regression test; changelog.
+    - Stored state and sub-revisions are unchanged (only range results
+      differ), so a mixed-version cluster cannot diverge.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
