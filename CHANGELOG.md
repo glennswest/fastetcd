@@ -3,7 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-09-27
+## [v1.4.0] — 2026-09-27
+
+### Added
 - **feat:** Survive a corrupt data file (#37). After a power cut on a
   device that lost fsync'd writes, redb refused to open the store ("All
   roots are corrupted") and the node crash-looped with nothing to
@@ -46,6 +48,7 @@
     (the runs did not even order consistently). No trustworthy disk
     number yet: its cost is one extra fsync per write, at most doubling
     commit latency on a quiet disk. The decision does not rest on it.
+### Fixed
 - **fix:** A `Range` inside a `Txn` now sees the txn's own earlier
   writes, as in etcd (#35). The ops of the branch that runs are applied
   strictly in order, and once the txn has changed anything a range

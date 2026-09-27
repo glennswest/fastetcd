@@ -10,7 +10,21 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.3.0`** — A deployment-distinct, stable `cluster_id` (#17). The
+**`1.4.0`** — Survive a corrupt data file (#37). After a power cut on a
+device that lost fsync'd writes, redb refused to open the store and the
+node crash-looped with nothing to recover from. Now: periodic checksummed
+backups to `--backup-dir` (off unless set; belongs on a separate volume),
+and a lone member whose file is corrupt restores the newest backup that
+verifies, keeps the corrupt file, and raises a CORRUPT alarm until
+disarmed. A multi-member node refuses (its raft vote was in the file)
+and prints the member remove / re-add remedy. redb 2.6.3 sometimes
+*panics* on a damaged file instead of erroring; that panic is caught
+and treated as corruption. redb two-phase commit is deliberately off
+(it makes repair unable to roll back a torn commit). Docs:
+`docs/05-backup-and-recovery.md`. Also: a `Range` in a `Txn` sees the
+txn's own earlier writes (#35).
+
+Previous: **`1.3.0`** — A deployment-distinct, stable `cluster_id` (#17). The
 id in every `ResponseHeader` was `--cluster-id`, undocumented and
 defaulting to `1` for every deployment, so a client pinning it could
 not tell a mis-pointed endpoint from the right one. Now
@@ -558,7 +572,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Tests, docs (`--cluster-id` documented), changelog.
     - [x] Replicated / distinct-by-default id filed as #38.
 
-21. **Survive a corrupt DB (#37, P0) — in progress.** After a power cut
+21. **Survive a corrupt DB (#37, P0) — done, shipped in v1.4.0.** After a power cut
     on a device that loses fsync'd writes (stormblock#171), redb refused
     to open ("All roots are corrupted") and the node crash-looped with
     nothing to recover from. Decided 2026-09-27:
@@ -574,55 +588,39 @@ Tracked live in the Claude task system. Snapshot of the order:
       leaves the corrupt file, and prints the member remove / re-add
       remedy.
     Work items:
-    - [ ] `StorageError::Corrupted`, mapped from redb's corruption error
+    - [x] `StorageError::Corrupted`, mapped from redb's corruption error
       on open; `Snapshot::table_names()` (redb `list_tables`).
-    - [ ] Online backup: every table from one engine snapshot, one
+    - [x] Online backup: every table from one engine snapshot, one
       checksummed file (magic + header + tables + sha256), temp file +
       fsync + rename + dir fsync, keep the newest `--backup-retain` (4).
       Every `--backup-interval-secs` (900) and every
       `--backup-every-revisions` (10000), and on a membership change.
-    - [ ] Startup: on `Corrupted`, if lone member and
+    - [x] Startup: on `Corrupted`, if lone member and
       `--on-corruption=restore` (default): move the file aside
       (`fastetcd.redb.corrupt.<ts>`, never deleted) and the retained
       raft snapshots with it, restore the newest backup whose checksum
       verifies, record the recovery in `node_meta`. Else refuse, file
       untouched.
-    - [ ] CORRUPT alarm through `Maintenance.Alarm`/`Status` until
+    - [x] CORRUPT alarm through `Maintenance.Alarm`/`Status` until
       disarmed; metrics `fastetcd_recovered_from_backup_total`,
       `fastetcd_recovered_revision`. Reads and writes are not gated.
-    - [ ] Offline `fastetcd restore` accepts the new backup files.
-    - [ ] Tests: zeroed roots → restore + alarm, bad checksum skipped,
+    - [x] Offline `fastetcd restore` accepts the new backup files.
+    - [x] Tests: zeroed roots → restore + alarm, bad checksum skipped,
       multi-member refuses, no backup refuses; 2PC cost measurement.
-    - [ ] Docs (`docs/05-backup-and-recovery.md`), changelog; stormcos
+    - [x] Docs (`docs/05-backup-and-recovery.md`), changelog; stormcos
       issue for a backup volume + `--backup-dir`; file the lease-tables
       snapshot gap found while reading the snapshot payload (filed: #41).
-    - Status 2026-09-27: the items above are committed (23f8b04, c50a82f,
-      c1a04d8) but sc-build fails 6 of `corruption_recovery` (#42):
-      redb 2.6.3 *panics* (`unreachable!` in `btree.rs` `get_helper`)
-      opening a file whose pages are zeroed, instead of returning
-      "All roots are corrupted". A real node would crash the same way.
-      Remaining:
-      - [ ] `RedbEngine::open` catches a panic inside redb's open/repair
-        and reports it as `Corrupted`.
-      - [ ] Restore swap is crash-safe: write the recovery record into
-        the restored file *before* any rename, and on start finish a
-        half-done swap (data file missing, complete `.restored` present)
-        instead of creating an empty store over it.
-      - [x] `RedbEngine::open` catch_unwind → Corrupted (8fb2124).
-      - [x] Crash-safe swap + `finish_interrupted_restore` + test (6c64183);
-        docs updated (ca1c5ea); changelog entry for #37 written.
-      - [ ] **Where I am (session restart 2026-09-27):** sc-build of
-        6c64183 was running (`cargo test --no-fail-fast --workspace` +
-        2PC measurement) — result not seen. Next: re-run
-        `sc-build 'cargo test --no-fail-fast --workspace'`; if
-        `corruption_recovery` passes, close #42, run
-        `sc-build 'cargo test --release -p fastetcd-storage --test
-        two_phase_commit_cost -- --ignored --nocapture'` and put the
-        numbers in the changelog + docs/05 (they say "in the changelog
-        for v1.4.0"), tick the #37 boxes above.
-      - [ ] Release 1.4.0 (with #35), golden, close #37 with verification.
+    - Status 2026-09-27: redb 2.6.3 *panics* (`unreachable!` in
+      `btree.rs` `get_helper`) opening a file with zeroed pages rather
+      than returning "All roots are corrupted" (#42); `RedbEngine::open`
+      catches it as `Corrupted` (8fb2124, reason says "corrupt": ec30653,
+      #43). Restore swap made crash-safe (6c64183). sc-build of ec30653:
+      whole workspace green, `corruption_recovery` 10/10. 2PC cost: tmpfs
+      ~4%, the contended build disk too noisy to say (changelog).
+    - Not verified here: stormcentral's power-cut check (needs the golden
+      plus stormcos#132, a backup volume and `--backup-dir`).
 
-22. **A Range in a Txn sees the txn's own earlier writes (#35) — done on `main` (c7aabec), unreleased.**
+22. **A Range in a Txn sees the txn's own earlier writes (#35) — done, shipped in v1.4.0.**
     `MvccStore::txn` ran every `Range` against the pre-txn snapshot and
     applied the mutations afterwards, so `[Put(b), Range(b)]` returned
     the old value; etcd returns the new one. Work items:
@@ -637,9 +635,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       behaviour; gRPC regression test; changelog.
     - Stored state and sub-revisions are unchanged (only range results
       differ), so a mixed-version cluster cannot diverge.
-    - Not released or goldened yet: `main` also carries the in-progress
-      #37 work, whose `corruption_recovery` tests fail (#42). Release
-      1.3.1 once that is green.
+    - Shipped with #37 in v1.4.0.
 
 ## Constraints & rules
 
