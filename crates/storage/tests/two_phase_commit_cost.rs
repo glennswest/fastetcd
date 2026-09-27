@@ -11,6 +11,10 @@
 //! Each commit is one small key, the shape of a single etcd put, and
 //! redb fsyncs every commit either way; two-phase commit adds a second
 //! fsync to flip the commit slot.
+//!
+//! The file goes in cargo's per-target temp dir (on the build disk), or
+//! `$TWO_PC_DIR` if set, never the system temp dir: `/tmp` is often a
+//! tmpfs, where an fsync costs nothing and the comparison is empty.
 
 #![cfg(feature = "redb-engine")]
 
@@ -21,8 +25,14 @@ use redb::{Database, TableDefinition};
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("t");
 const COMMITS: usize = 500;
 
+fn base_dir() -> std::path::PathBuf {
+    std::env::var_os("TWO_PC_DIR")
+        .map(Into::into)
+        .unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into())
+}
+
 fn run(two_phase: bool) -> Vec<Duration> {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(base_dir()).unwrap();
     let db = Database::create(dir.path().join("cost.redb")).unwrap();
     let value = [7u8; 256];
     let mut samples = Vec::with_capacity(COMMITS);
@@ -48,6 +58,7 @@ fn pct(sorted: &[Duration], p: f64) -> Duration {
 #[test]
 #[ignore = "measures the disk; run explicitly with --ignored --nocapture"]
 fn two_phase_commit_cost() {
+    println!("measuring in {}", base_dir().display());
     // Warm up the filesystem and page cache once.
     let _ = run(false);
     for two_phase in [false, true, false, true] {
