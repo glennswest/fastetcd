@@ -72,9 +72,15 @@ impl TlsFiles {
             .transpose()
     }
 
-    /// Check the flags hang together, without building anything.
+    /// Check the flags hang together, without reading any file.
     pub fn validate(&self, port: Port) -> anyhow::Result<()> {
-        self.identity(port)?;
+        if self.cert_file.is_some() != self.key_file.is_some() {
+            anyhow::bail!(
+                "{} and {} must both be set or both unset",
+                port.flag("cert-file"),
+                port.flag("key-file")
+            );
+        }
         if self.client_cert_auth && self.trusted_ca_file.is_none() {
             anyhow::bail!(
                 "{} requires {}",
