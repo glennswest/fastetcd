@@ -569,8 +569,6 @@ fn derive_node_id(name: &str) -> NodeId {
     (hash & 0x7FFF_FFFF_FFFF_FFFF).max(1)
 }
 
-/// Parse an `initial_cluster` string of the form
-/// `n1=http://h1:2380,n2=http://h2:2380`.
 /// Backups on the data volume share its fate: a device that loses
 /// writes can take both. Allowed, but said out loud.
 fn warn_if_same_volume(data_dir: &std::path::Path, backup_dir: &std::path::Path) {
@@ -594,6 +592,8 @@ fn warn_if_same_volume(data_dir: &std::path::Path, backup_dir: &std::path::Path)
     let _ = (data_dir, backup_dir);
 }
 
+/// Parse an `initial_cluster` string of the form
+/// `n1=http://h1:2380,n2=http://h2:2380`.
 fn parse_initial_cluster(s: &str) -> anyhow::Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     if s.trim().is_empty() {
@@ -722,6 +722,9 @@ async fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&args.data_dir)?;
     let data_file = args.data_dir.join("fastetcd.redb");
+    // A restore from backup that a crash cut short is finished first, so
+    // the restored store is not taken for a new one (fastetcd#37).
+    fastetcd_server::recovery::finish_interrupted_restore(&data_file)?;
     let store_is_new = !data_file.exists();
 
     // A corrupt data file is restored from a backup on a lone member

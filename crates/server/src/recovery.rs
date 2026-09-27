@@ -92,6 +92,7 @@ pub async fn open_or_recover(
     data_file: &Path,
     opts: &OpenOptions,
 ) -> anyhow::Result<(RedbEngine, Option<RecoveryRecord>)> {
+    finish_interrupted_restore(data_file)?;
     let reason = match RedbEngine::open(data_file) {
         Ok(engine) => return Ok((engine, None)),
         Err(StorageError::Corrupted(reason)) => reason,
@@ -159,10 +160,12 @@ pub async fn open_or_recover(
         anyhow::bail!(multi_member_error(data_file, &reason, opts.node_id));
     }
 
-    // Build the restored store beside the corrupt one first. Only once it
-    // is complete does the corrupt file move, so a failure here leaves
-    // everything as it was.
-    let restored = data_file.with_extension("redb.restored");
+    // Build the restored store beside the corrupt one first, with the
+    // recovery already recorded in it. Only once it is complete and
+    // durable does anything move, so a failure here leaves everything as
+    // it was, and a crash during the moves below is finished by
+    // `finish_interrupted_restore` on the next start.
+    let restored = restored_path(data_file);
     let _ = std::fs::remove_file(&restored);
     backup::restore_to(&backup_path, &restored).await?;
 
@@ -171,17 +174,6 @@ pub async fn open_or_recover(
         "{}.corrupt.{now}",
         data_file.file_name().and_then(|n| n.to_str()).unwrap_or("fastetcd.redb")
     ));
-    std::fs::rename(data_file, &corrupt_file)?;
-    // The retained raft snapshots may be newer than the backup. Left in
-    // place, openraft would take the restored store to be behind a
-    // snapshot it has; they belong with the corrupt file.
-    let snapshots = data_dir.join("snapshots");
-    if snapshots.exists() {
-        std::fs::rename(&snapshots, data_dir.join(format!("snapshots.corrupt.{now}")))?;
-    }
-    std::fs::rename(&restored, data_file)?;
-    backup::sync_dir(data_dir);
-
     let record = RecoveryRecord {
         recovered_unix_ms: now,
         reason,
@@ -190,12 +182,25 @@ pub async fn open_or_recover(
         backup_created_unix_ms: header.created_unix_ms,
         backup_revision: header.revision,
     };
+    {
+        let engine = RedbEngine::open(&restored)?;
+        let recoveries = read_count(&engine).await? + 1;
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_NODE_META, KEY_RECOVERY, &bincode::serialize(&record)?);
+        batch.put(TABLE_NODE_META, KEY_RECOVERIES, &recoveries.to_be_bytes());
+        engine.commit(batch, WriteOptions::default()).await?;
+        engine.sync().await?;
+    }
+
+    // The order matters to `finish_interrupted_restore`: the data file
+    // goes first, so "no data file, a restored file present" means the
+    // restored file is complete.
+    std::fs::rename(data_file, &corrupt_file)?;
+    backup::sync_dir(data_dir);
+    move_snapshots_aside(data_dir, now)?;
+    std::fs::rename(&restored, data_file)?;
+    backup::sync_dir(data_dir);
     let engine = RedbEngine::open(data_file)?;
-    let recoveries = read_count(&engine).await? + 1;
-    let mut batch = WriteBatch::new();
-    batch.put(TABLE_NODE_META, KEY_RECOVERY, &bincode::serialize(&record)?);
-    batch.put(TABLE_NODE_META, KEY_RECOVERIES, &recoveries.to_be_bytes());
-    engine.commit(batch, WriteOptions::default()).await?;
 
     tracing::error!(
         target: "fastetcd::recovery",
@@ -208,6 +213,47 @@ pub async fn open_or_recover(
          disarm`. The corrupt file is kept for inspection."
     );
     Ok((engine, Some(record)))
+}
+
+/// Where a restore builds the new store before swapping it in.
+fn restored_path(data_file: &Path) -> PathBuf {
+    data_file.with_extension("redb.restored")
+}
+
+/// The retained raft snapshots may be newer than the backup. Left in
+/// place, openraft would take the restored store to be behind a snapshot
+/// it has; they belong with the corrupt file.
+fn move_snapshots_aside(data_dir: &Path, now: u64) -> std::io::Result<()> {
+    let snapshots = data_dir.join("snapshots");
+    if snapshots.exists() {
+        std::fs::rename(&snapshots, data_dir.join(format!("snapshots.corrupt.{now}")))?;
+        backup::sync_dir(data_dir);
+    }
+    Ok(())
+}
+
+/// Finish a restore that a crash interrupted after the corrupt file was
+/// moved aside. Without this, redb would create an empty store where the
+/// data file was, and the node would start with nothing.
+///
+/// A restored file is only ever present without a data file if it was
+/// complete, recovery record included, before the data file moved.
+pub fn finish_interrupted_restore(data_file: &Path) -> anyhow::Result<()> {
+    let restored = restored_path(data_file);
+    if data_file.exists() || !restored.exists() {
+        return Ok(());
+    }
+    let data_dir = data_file.parent().unwrap_or(Path::new("."));
+    tracing::warn!(
+        target: "fastetcd::recovery",
+        file = %data_file.display(),
+        restored = %restored.display(),
+        "finishing a restore from backup that was interrupted"
+    );
+    move_snapshots_aside(data_dir, unix_ms())?;
+    std::fs::rename(&restored, data_file)?;
+    backup::sync_dir(data_dir);
+    Ok(())
 }
 
 fn multi_member_error(data_file: &Path, reason: &str, node_id: NodeId) -> String {

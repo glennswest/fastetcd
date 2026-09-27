@@ -4,6 +4,39 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-09-27
+- **feat:** Survive a corrupt data file (#37). After a power cut on a
+  device that lost fsync'd writes, redb refused to open the store ("All
+  roots are corrupted") and the node crash-looped with nothing to
+  recover from. Now:
+  - **Periodic backups** with `--backup-dir` (off unless set; put it on
+    a separate volume, a warning says so when it is not): every table of
+    the store from one engine snapshot, one checksummed file (SHA-256),
+    temp file + fsync + rename + directory fsync. Taken every
+    `--backup-interval-secs` (900) and every `--backup-every-revisions`
+    (10000) when anything changed, and on every raft membership change.
+    The newest `--backup-retain` (4) are kept.
+  - **Restore instead of crash-looping.** A lone member whose data file
+    is corrupt restores the newest backup whose checksum verifies,
+    keeps the corrupt file as `fastetcd.redb.corrupt.<ms>` (never
+    deleted), and raises the CORRUPT alarm (`Maintenance.Alarm`,
+    `Status` errors) until `etcdctl alarm disarm`. Metrics
+    `fastetcd_recovered_from_backup_total`, `fastetcd_recovered_revision`.
+    A member of a multi-node cluster refuses and leaves the file: its
+    raft vote was in it. `--on-corruption=refuse` never restores.
+  - A damaged file is reported as corruption, not an I/O error,
+    including an existing empty file (redb would have silently created a
+    fresh store over it) and a file whose repair makes redb 2.6.3
+    **panic** (`unreachable!` walking a zeroed page), which it does
+    rather than returning an error when a device loses whole pages.
+  - The restore is crash-safe: the new store, recovery record included,
+    is complete before anything is renamed, and a restore cut short
+    between renames is finished on the next start rather than leaving
+    an empty store.
+  - The offline `fastetcd restore` accepts the new backup files.
+  - redb two-phase commit is **not** enabled: in 2.6.3 it makes repair
+    trust the primary commit slot, so on a device that lies about fsync
+    a torn commit becomes an unopenable file instead of a one-commit
+    rollback. See `docs/05-backup-and-recovery.md`.
 - **fix:** A `Range` inside a `Txn` now sees the txn's own earlier
   writes, as in etcd (#35). The ops of the branch that runs are applied
   strictly in order, and once the txn has changed anything a range

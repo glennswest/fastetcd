@@ -183,6 +183,36 @@ async fn a_lone_member_restores_its_newest_backup_and_raises_the_alarm() {
     assert_eq!(alarm.recoveries(), 1);
 }
 
+/// A power cut between moving the corrupt file aside and moving the
+/// restored one into place leaves no data file. The next start must
+/// finish the swap, not create an empty store where the data was.
+#[tokio::test]
+async fn a_restore_interrupted_mid_swap_is_finished_on_the_next_start() {
+    let d = dirs();
+    lone_member_then_corruption(&d).await;
+    let (engine, record) = open_or_recover(&d.data_file, &opts(&d, 1)).await.unwrap();
+    let record = record.unwrap();
+    drop(engine);
+
+    // The state the crash leaves: the corrupt file is aside, the
+    // complete restored file (recovery already recorded in it) has not
+    // been moved in, and the snapshots have not been moved yet.
+    let restored = d.data_file.with_extension("redb.restored");
+    std::fs::rename(&d.data_file, &restored).unwrap();
+    std::fs::create_dir_all(d.data_dir.join("snapshots")).unwrap();
+
+    let (engine, again) = open_or_recover(&d.data_file, &opts(&d, 1)).await.unwrap();
+    assert!(again.is_none(), "the swap is finished, not a second restore");
+    assert!(!restored.exists());
+    assert!(!d.data_dir.join("snapshots").exists(), "snapshots moved aside");
+    let engine: Arc<dyn KvStore> = Arc::new(engine);
+    let alarm = RecoveryAlarm::load(&engine).await.unwrap();
+    assert_eq!(alarm.active(), Some(record), "the alarm came with the restored file");
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    assert_eq!(mvcc.current_revision().await, 50);
+    assert_eq!(visible(&mvcc).await, 50);
+}
+
 #[tokio::test]
 async fn a_backup_that_fails_its_checksum_is_skipped_for_the_next_older() {
     let d = dirs();
