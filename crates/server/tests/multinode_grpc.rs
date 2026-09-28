@@ -338,6 +338,18 @@ async fn membership_changes_forward_from_a_follower() {
         3 => &n3,
         other => panic!("unexpected node id {other}"),
     };
+
+    // A follower learns `current_leader` from the leader's first
+    // AppendEntries, before the initial membership (log index 0) is
+    // committed. A membership change before then is refused with
+    // "already undergoing a configuration change", so wait until the
+    // leader has applied its first-term entry (fastetcd#44).
+    by_id(leader_id)
+        .raft
+        .wait(Some(Duration::from_secs(10)))
+        .applied_index_at_least(Some(1), "initial membership committed")
+        .await
+        .expect("leader applies its first entry");
     let follower_id = (1..=3u64).find(|id| *id != leader_id).unwrap();
     let follower = by_id(follower_id);
     let mut cluster = ClusterClient::connect(follower.client_endpoint.clone())

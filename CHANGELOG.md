@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **test:** `membership_changes_forward_from_a_follower` raced the
+  initial membership commit (#44): a follower learns the leader from its
+  first AppendEntries, before membership index 0 is committed, and a
+  MemberAdd sent then is refused with "already undergoing a configuration
+  change". The test now waits for the leader to apply its first entry.
+  The other two failures in #44 (`lease_grpc`, `snapshot_transfer_grpc`)
+  were build-box load and passed 3/3 on rerun.
+
 ### 2026-09-27
 - **fix:** Peer TLS is honoured, with its own identity and trust root
   (#23). `--peer-cert-file`, `--peer-key-file`, `--peer-trusted-ca-file`
