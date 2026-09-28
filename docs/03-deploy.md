@@ -177,6 +177,52 @@ etcdctl auth enable
 Clients then run with `--user=reader:password` (etcdctl) or send a
 `token` metadata field after calling `Authenticate`.
 
+### Auth on a multi-member cluster
+
+Auth state is replicated through Raft, as in etcd. Every change (users,
+roles, permissions, `auth enable`/`disable`) is a log entry that every
+member applies, so it can be made against any member and is in effect
+on all of them once it commits. It also survives failover, restart and
+a raft snapshot, which carries the auth tables. `Authenticate` is
+replicated too: a token issued by one member is accepted by every
+member. Tokens are held in memory only (etcd's "simple" tokens). A
+restarted member has none, and clients authenticate again, as they do
+with etcd. Reads (`user list`, `role get`, `auth status`) answer from
+the member's own applied state.
+
+Two checks run before the first auth change after a member starts, and
+again after a membership change:
+
+- **Every member must run fastetcd 1.5.0 or later.** An older member
+  cannot apply an auth entry: it would stop receiving the log, and with
+  two such members out of three the cluster would lose quorum. So auth
+  changes, including `Authenticate`, are refused with `Unavailable`,
+  naming the member, until every member is upgraded and reachable.
+  During a rolling upgrade, log in before you start and keep the
+  token. Tokens issued before the upgrade are lost when the member
+  that issued them restarts.
+- **Every member must hold the same auth state.** Before 1.5.0 each
+  member kept whatever auth calls it served itself, so members
+  upgraded from 1.4.x may differ. If they do, auth changes are refused
+  with `FailedPrecondition`, and `fastetcd_auth_diverged` is 1 on
+  `/metrics`. Nothing is chosen for you. Look at what each member
+  holds, then replicate the one that is right to all of them:
+
+  ```
+  fastetcd-ctl --endpoint http://m1:2379 auth members
+  fastetcd-ctl --endpoint http://m1:2379 --user root:pw auth adopt m2   # name or hex ID
+  ```
+
+  `auth adopt` replaces every member's users, roles and enabled flag
+  with the chosen member's. Both commands need root while auth is on.
+  `Authenticate` still works while members differ. A member only
+  accepts a login its own tables agree with, and the result returned is
+  the leader's. So if the members' root passwords differ, send the
+  login to the leader.
+
+If every member is empty (auth never used) or already identical, both
+checks pass silently and nothing changes.
+
 ### What a role's permissions cover
 
 With auth enabled, a non-root user's roles are checked on every KV
@@ -206,14 +252,13 @@ the check is made once, at create: revoking a permission does not
 cancel a watch that is already running; it keeps delivering until it
 or its stream ends (restart the client after narrowing its role).
 
-**Auth is not yet a security boundary.** Two gaps remain, each
-tracked: the admin RPCs
-(user/role management, `AuthDisable`, `Maintenance.Snapshot`, member
-changes, `Compact`) do not require root, so any authenticated user can
-grant itself the root role (#31); and auth state is written to the
-local node, not replicated through Raft (#32). Until those land, treat
-auth as protection against mistakes by trusted clients, not against a
-hostile one: scope untrusted clients with mTLS and a proxy.
+**Auth is not yet a security boundary.** One gap remains, tracked:
+the admin RPCs (user/role management, `AuthDisable`,
+`Maintenance.Snapshot`, member changes, `Compact`) do not require root,
+so any authenticated user can grant itself the root role (#31). Until
+that lands, treat auth as protection against mistakes by trusted
+clients, not against a hostile one: scope untrusted clients with mTLS
+and a proxy.
 
 ## Storage engine
 
