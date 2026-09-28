@@ -10,7 +10,13 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.5.2`** — A `Put` naming a lease that does not exist is refused
+**`1.6.0`** — Under `--client-cert-auth`, a client certificate's Common
+Name is its etcd user (#20), as in etcd: no token → the verified leaf's
+CN (`authz::identify`, used by the interceptor and the Auth service); a
+token wins; an invalid token is refused, not replaced. Roles now scope
+mTLS clients (one user per ClusterMesh cluster). New dep `x509-parser`.
+
+Previous: **`1.5.2`** — A `Put` naming a lease that does not exist is refused
 (#19) with etcd's `etcdserver: requested lease not found`. Checked on
 the leader just before proposing (`crates/raft/src/precheck.rs`), not at
 apply as etcd does, so members cannot diverge while snapshots lack the
@@ -855,7 +861,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     Found alongside: #49 (P0), an `ignore_value` put on a missing key
     fails inside apply and stops every member.
 
-28. **A client certificate's CN is the etcd user (#20) — in progress.**
+28. **A client certificate's CN is the etcd user (#20) — done, shipped in v1.6.0.**
     etcd (`AuthInfoFromCtx` → `AuthInfoFromTLS`): a `token` in the
     metadata wins; with none, and `--client-cert-auth` on, the caller is
     the Common Name of the verified client certificate's leaf. No
@@ -864,15 +870,15 @@ Tracked live in the Claude task system. Snapshot of the order:
     no matching user gets PermissionDenied. An invalid token is refused,
     never replaced by the CN. Empty CN = no identity.
     Work items:
-    - [ ] authz: CN from the peer certificate (`x509-parser`), one
+    - [x] authz: CN from the peer certificate (`x509-parser`), one
       `identity(request)` used by the interceptor and the Auth service
       (which is not behind the interceptor).
-    - [ ] `ServerState::client_cert_auth`, interceptor flag; main wires
+    - [x] `ServerState::client_cert_auth`, interceptor flag; main wires
       `--client-cert-auth`.
-    - [ ] Tests over a real mTLS client port built like main's (routes →
+    - [x] Tests over a real mTLS client port built like main's (routes →
       axum → tonic): CN-scoped reads/writes/watch, root by CN, unknown
       CN denied, token beats CN, off without `--client-cert-auth`.
-    - [ ] Docs (auth section), changelog; release; close #20.
+    - [x] Docs (auth section), changelog; release; close #20.
 
 ## Constraints & rules
 
