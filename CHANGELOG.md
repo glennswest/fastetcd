@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.4.2] — 2026-09-28
+
 ### 2026-09-28
 - **fix:** `Watch` is authorized (#33). A watch create had no permission
   check, so with auth enabled any authenticated user could watch any key
