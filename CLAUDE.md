@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.4.1`** — Peer TLS is honoured, with its own identity and trust root
+**`1.4.2`** — `Watch` is authorized (#33). A watch create had no
+permission check, so with auth enabled any authenticated user could
+watch any key or range (history and `prev_kv` included) and read what
+RBAC denies to `Range`. Each create now needs read on `[key, range_end)`;
+a denied create gets etcd's answer (`created` + `canceled`, `watch_id`
+-1, `etcdserver: permission denied`) and the stream stays usable.
+Checked at create only, as in etcd. Auth gaps left: #31, #32.
+
+Previous: **`1.4.1`** — Peer TLS is honoured, with its own identity and trust root
 (#23). The `--peer-*` TLS flags were parsed and discarded: the peer port
 served the client identity whenever `--cert-file` was set, and members
 dialled each other in plaintext, so a TLS multi-member cluster could not
@@ -682,7 +690,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       widened, polls instead of fixed sleeps, and the #10 CAS loop
       retries `Unavailable`. A separate snapshot-transfer flake is #45.
 
-24. **Watch is authorized (#33) — in progress.** With auth enabled any
+24. **Watch is authorized (#33) — done, shipped in v1.4.2.** With auth enabled any
     authenticated user could watch any key or range (with a past
     `start_revision` and `prev_kv`) and receive values RBAC denies to
     `Range`. etcd parity (`isWatchPermitted`):
@@ -695,12 +703,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Checked at create only, as in etcd: a permission revoked later
       does not cancel a live watch (documented).
     Work items:
-    - [ ] watch.rs: capture `UserIdentity`, authorize each create.
-    - [ ] Tests `crates/server/tests/authz_watch.rs`: out-of-scope
+    - [x] watch.rs: capture `UserIdentity`, authorize each create.
+    - [x] Tests `crates/server/tests/authz_watch.rs`: out-of-scope
       key/range/prefix denied with no events; in-scope allowed and
       delivers; denied create doesn't break the stream; root and
       auth-disabled unaffected; etcd-client sees the cancel.
-    - [ ] Docs, changelog; release; close #33.
+    - [x] Docs, changelog; release; close #33.
+    - Verified: the 5 denial tests fail with the check stubbed out.
 
 ## Constraints & rules
 
