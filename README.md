@@ -140,6 +140,13 @@ shares zero code with fastetcd. Anything that speaks etcd v3
 intended client. The deprecated **v2 HTTP API is not implemented**
 and is out of scope — it is gone from upstream's roadmap too.
 
+One known difference in timing: a `Put` naming a lease that does not
+exist is refused with etcd's `etcdserver: requested lease not found`,
+but the check runs on the leader just before the write is proposed,
+not when it is applied as in etcd. So a lease that expires in that
+instant still gets the key attached. Moving the check to apply waits on
+the lease tables travelling in raft snapshots (#41).
+
 ### Migration
 
 Existing etcd data moves over with `fastetcd-migrate`, which reads an

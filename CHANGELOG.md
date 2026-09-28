@@ -3,6 +3,28 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **fix:** A `Put` naming a lease that does not exist is refused (#19),
+  with etcd's `etcdserver: requested lease not found` (NotFound).
+  Nothing is written. It used to be accepted, and the key recorded the
+  dangling lease id and never expired. This is the error a client uses
+  to learn its lease expired between grant and use. Details:
+  - Applies to a standalone `Put` and to the puts of the branch a
+    `Txn` takes (the other branch is not checked, as in etcd).
+    `ignore_lease` puts are not checked.
+  - The check runs on the leader just before proposing
+    (`crates/raft/src/precheck.rs`). A follower forwards, and on a miss
+    the leader runs a read barrier first, so a lease granted through
+    any member can be used at once through any other.
+  - etcd checks at apply; that would let members diverge while raft
+    snapshots lack the lease tables (#41) and while older members
+    accept such puts. The one difference left: a lease that expires
+    between the check and the apply still gets the key attached.
+
+  Tests: `crates/server/tests/lease_put.rs` and
+  `a_put_names_a_lease_through_any_member` in `multinode_grpc.rs`.
+  Found alongside: #49 (P0).
+
 ## [v1.5.1] — 2026-09-28
 
 ### 2026-09-28
