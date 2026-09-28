@@ -9,8 +9,13 @@
   first AppendEntries, before membership index 0 is committed, and a
   MemberAdd sent then is refused with "already undergoing a configuration
   change". The test now waits for the leader to apply its first entry.
-  The other two failures in #44 (`lease_grpc`, `snapshot_transfer_grpc`)
-  were build-box load and passed 3/3 on rerun.
+  All of #44 comes down to leadership moving mid-test on a loaded
+  build box (per-job volumes, six builds at once, slow fsync) under the
+  harness's 400-900 ms election timeout. The multi-node harnesses
+  (`multinode_grpc`, `snapshot_transfer_grpc`, `peer_tls`) now use
+  1.5-3 s, the single-node leader wait allows 30 s, and the replication
+  test polls followers instead of sleeping a fixed 300 ms. Test-only;
+  server defaults are unchanged.
 
 ### 2026-09-27
 - **fix:** Peer TLS is honoured, with its own identity and trust root

@@ -98,11 +98,11 @@ impl openraft::network::RaftNetwork<TypeConfig> for NopNetConn {
 }
 
 pub async fn wait_for_leader(raft: &Raft<TypeConfig>) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut rx = raft.metrics();
     loop {
         if tokio::time::Instant::now() > deadline {
-            panic!("did not become leader in 5s");
+            panic!("did not become leader in 30s");
         }
         let m = rx.borrow_and_update().clone();
         if matches!(m.state, openraft::ServerState::Leader) {

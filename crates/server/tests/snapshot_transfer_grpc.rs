@@ -48,9 +48,12 @@ async fn start_node(id: NodeId) -> Node {
 
     let config = Arc::new(
         Config {
+            // Generous election timeouts: the build box runs several jobs
+            // at once and fsync can stall the leader past a tight
+            // timeout, moving leadership mid-test (#44).
             heartbeat_interval: 100,
-            election_timeout_min: 400,
-            election_timeout_max: 900,
+            election_timeout_min: 1500,
+            election_timeout_max: 3000,
             // Snapshot and purge aggressively so a late joiner cannot be
             // caught up from the log.
             snapshot_policy: SnapshotPolicy::LogsSinceLast(20),

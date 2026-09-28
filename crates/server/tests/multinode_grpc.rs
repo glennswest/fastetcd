@@ -52,9 +52,12 @@ async fn start_node(
 
     let config = Arc::new(
         Config {
+            // Generous election timeouts: the build box runs several jobs
+            // at once and fsync can stall the leader past a tight
+            // timeout, moving leadership mid-test (#44).
             heartbeat_interval: 100,
-            election_timeout_min: 400,
-            election_timeout_max: 900,
+            election_timeout_min: 1500,
+            election_timeout_max: 3000,
             ..Default::default()
         }
         .validate()
@@ -229,19 +232,26 @@ async fn three_node_cluster_replicates_via_grpc_transport() {
     assert_eq!(put_rev, 1);
 
     // Range on every node — they should all have the value applied.
-    // Give followers a heartbeat tick to apply.
-    sleep(Duration::from_millis(300)).await;
+    // Followers apply on a later heartbeat; poll rather than sleep a
+    // fixed tick, which a loaded build box can outlast (#44).
     for n in [&n1, &n2, &n3] {
         let mut kv = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
-        let r = kv
-            .range(pb::RangeRequest {
-                key: b"replicated-key".to_vec(),
-                serializable: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-            .into_inner();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let r = loop {
+            let r = kv
+                .range(pb::RangeRequest {
+                    key: b"replicated-key".to_vec(),
+                    serializable: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            if !r.kvs.is_empty() || tokio::time::Instant::now() > deadline {
+                break r;
+            }
+            sleep(Duration::from_millis(100)).await;
+        };
         assert_eq!(r.kvs.len(), 1, "node {} did not see the value", n.client_endpoint);
         assert_eq!(r.kvs[0].value, b"replicated-value");
     }
