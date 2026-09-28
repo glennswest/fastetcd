@@ -227,6 +227,19 @@ check against its real volume at startup.
 See `docs/04-disk-space.md` for the flags, metrics, sizing model and
 recovery procedures.
 
+## Auth on a cluster
+
+Users, roles, permissions, `auth enable` and login tokens are replicated
+through Raft, so a change made on any member holds on every member. A
+cluster upgraded from 1.4.x whose members kept different auth state
+refuses auth changes until you pick one to keep. See [docs/03-deploy.md
+§ Auth on a multi-member cluster](docs/03-deploy.md#auth-on-a-multi-member-cluster).
+
+```
+fastetcd-ctl auth members                        # what each member holds
+fastetcd-ctl --user root:pw auth adopt <member>  # replicate one to all
+```
+
 ## Deployment
 
 See `docs/03-deploy.md` for the full guide. Quick paths:

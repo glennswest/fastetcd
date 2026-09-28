@@ -3,6 +3,57 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **feat:** Auth state is replicated through Raft (#32). Every auth
+  change used to commit to the serving member's engine only, and tokens
+  were a per-member set, so on a multi-member cluster RBAC held on some
+  members and not others, and a token from one member was rejected by
+  the next. Now, as in etcd:
+  - every change (users, roles, permissions, `AuthEnable`/`Disable`) is
+    a log entry (`FastetcdLogEntry::Auth`) that every member validates
+    and applies, with the same result everywhere. Passwords are hashed
+    before proposing;
+  - `Authenticate` proposes its token, so any member accepts it. The
+    entry carries the hash the password was checked against, and is
+    refused if the password changed meanwhile. Tokens stay in memory
+    only, as with etcd's "simple" tokens;
+  - raft snapshots carry the auth tables, in a trailer after the
+    unchanged payload. An older member still decodes the payload, and
+    a snapshot from one leaves the auth tables alone;
+  - the serving member waits until it has applied the change itself,
+    so it is in effect there when the call returns.
+- **feat:** A gate in front of replicated auth (#32). Before the first
+  auth change, each member asks every other one over a new peer RPC
+  (`AuthSync`):
+  - a member that is older (it answers `Unimplemented`) or unreachable
+    refuses the change with `Unavailable`, naming it. An older member
+    cannot decode the entry, and two such in three would lose quorum;
+  - members holding different auth tables (kept from 1.4.x, when each
+    wrote its own) refuse changes with `FailedPrecondition`, and
+    `fastetcd_auth_diverged` is 1. New client-port service
+    `fastetcd.admin.FastetcdAdmin` and `fastetcd-ctl auth members` /
+    `auth adopt <member>` (root only while auth is on) show each
+    member's state and replicate the chosen one to all. Nothing is
+    chosen automatically.
+- **BREAKING:** `ServerState::new` no longer takes an `AuthState`. It
+  uses the store's own (`MvccStore::auth_memory`). `AuthService::new`
+  takes only the state. `AuthState` is now `AuthMemory` from the storage
+  crate. `Authenticate` is a raft write, one fsync per login, as in
+  etcd.
+- **test:** `crates/server/tests/auth_replication.rs` covers:
+  - a change made on a follower is enforced on every member;
+  - a token from one member is accepted by the others;
+  - revoking a role or deleting a user takes effect everywhere;
+  - a snapshot-installed learner gets the auth state;
+  - an unreachable member and an older one both refuse changes;
+  - diverged members are refused until an adopt;
+  - adopt needs root.
+
+  Also unit tests for apply and for snapshot trailer compatibility in
+  both directions.
+- **docs:** `docs/03-deploy.md` § Auth on a multi-member cluster;
+  README.
+
 ## [v1.4.2] — 2026-09-28
 
 ### 2026-09-28
