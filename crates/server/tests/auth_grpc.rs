@@ -165,10 +165,16 @@ async fn auth_enable_requires_root_user() {
     .unwrap();
     c.auth_enable(pb::AuthEnableRequest {}).await.unwrap();
 
-    let status = c
-        .auth_status(pb::AuthStatusRequest {})
+    // With auth on, AuthStatus needs root, as in etcd (#31).
+    let token = c
+        .authenticate(pb::AuthenticateRequest { name: "root".into(), password: "rootpw".into() })
         .await
         .unwrap()
-        .into_inner();
+        .into_inner()
+        .token;
+    let mut req = tonic::Request::new(pb::AuthStatusRequest {});
+    req.metadata_mut()
+        .insert("token", tonic::metadata::MetadataValue::try_from(token.as_str()).unwrap());
+    let status = c.auth_status(req).await.unwrap().into_inner();
     assert!(status.enabled);
 }

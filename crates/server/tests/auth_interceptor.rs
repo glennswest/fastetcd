@@ -123,11 +123,17 @@ async fn auth_disable_lets_unauthenticated_requests_through_again() {
     enable_auth_with_user(&h.endpoint, "dan", "dan-pw").await;
 
     let mut auth_client = AuthClient::connect(h.endpoint.clone()).await.unwrap();
-    // While disabled, KV should work without a token.
-    auth_client
-        .auth_disable(pb::AuthDisableRequest {})
+    // AuthDisable needs root while auth is on (#31); dan holds the root
+    // role. Once disabled, KV should work without a token.
+    let token = auth_client
+        .authenticate(pb::AuthenticateRequest { name: "dan".into(), password: "dan-pw".into() })
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner()
+        .token;
+    let mut req = Request::new(pb::AuthDisableRequest {});
+    req.metadata_mut().insert("token", MetadataValue::try_from(token.as_str()).unwrap());
+    auth_client.auth_disable(req).await.unwrap();
 
     let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
     kv.put(pb::PutRequest {

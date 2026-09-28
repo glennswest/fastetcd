@@ -307,14 +307,14 @@ async fn put(n: &Node, token: &str, key: &str) -> Result<(), Status> {
     .map(|_| ())
 }
 
+/// `UserList` on `n`, as root once auth is on (it needs root, #31).
 async fn users(n: &Node) -> Vec<String> {
-    auth_client(n)
-        .await
-        .user_list(pb::AuthUserListRequest {})
-        .await
-        .unwrap()
-        .into_inner()
-        .users
+    let req = if n.state.auth.is_enabled() {
+        with_token(pb::AuthUserListRequest {}, &login(n, "root", "rootpw").await.unwrap())
+    } else {
+        Request::new(pb::AuthUserListRequest {})
+    };
+    auth_client(n).await.user_list(req).await.unwrap().into_inner().users
 }
 
 async fn wait_enabled(nodes: &[Node]) {
