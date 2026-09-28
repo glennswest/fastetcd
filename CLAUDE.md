@@ -10,7 +10,17 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.5.0`** — Auth state is replicated through Raft (#32). Auth changes
+**`1.5.1`** — Admin RPCs are root-only while auth is on (#31). Any
+logged-in user could grant itself root, disable auth, stream a snapshot
+or change membership. Rules from etcd's release-3.5 source, not the
+issue's list: all Auth changes plus `AuthStatus`/`UserList`/`RoleList`
+(self `UserGet` and held-role `RoleGet` allowed, own password change
+still root); Maintenance `Snapshot`/`Defragment`/`Hash`/`HashKV`/
+`MoveLeader`/`Downgrade`/`Alarm` change; member add/remove/update/
+promote. `Compact`, `Status`, `Alarm` list, `MemberList` stay open.
+Remaining auth gap: lease RPCs (#47).
+
+Previous: **`1.5.0`** — Auth state is replicated through Raft (#32). Auth changes
 used to commit to the serving member only and tokens were per member, so
 RBAC held on some members and not others. Now every change and every
 `Authenticate` token is a log entry each member validates and applies
@@ -778,7 +788,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       the store level (enabled flag reloads at open; tables are on
       disk), not by a full member restart. Token expiry: #46.
 
-26. **Admin RPCs are root-only (#31) — in progress.** With auth on, any
+26. **Admin RPCs are root-only (#31) — done, shipped in v1.5.1.** With auth on, any
     authenticated user could grant itself root, disable auth, stream a
     snapshot or change membership. Rules taken from etcd's source
     (release-3.5 `apply_auth.go` `needAdminPermission`,
@@ -799,14 +809,17 @@ Tracked live in the Claude task system. Snapshot of the order:
       auth state, as etcd checks membership changes (no log format
       change). With auth off, everything is open, as in etcd.
     Work items:
-    - [ ] authz: `require_root` (from #32) + `holds_role`; Auth service
+    - [x] authz: `require_root` (from #32) + `holds_role`; Auth service
       resolves the caller from its `token` (it is not behind the
       interceptor, so `Authenticate` works without one).
-    - [ ] Gate each RPC above; tests `crates/server/tests/authz_admin.rs`
+    - [x] Gate each RPC above; tests `crates/server/tests/authz_admin.rs`
       (non-root denied, root allowed, no token unauthenticated, the
       self exceptions, open calls stay open).
-    - [ ] Docs (auth section, security-boundary note), changelog;
-      release; close #31. File the lease-RPC authorization gap.
+    - [x] Docs (auth section, security-boundary note), changelog;
+      release; close #31. File the lease-RPC authorization gap (#47).
+    - Verified: with `require_root` stubbed, the 4 denial tests fail.
+      Existing tests that made admin calls tokenless after enabling auth
+      were updated (#48).
 
 ## Constraints & rules
 
