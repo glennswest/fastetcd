@@ -711,8 +711,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs, changelog; release; close #33.
     - Verified: the 5 denial tests fail with the check stubbed out.
 
-25. **Auth state is replicated through Raft (#32) — design; blocked on
-    an owner decision (asked 2026-09-28).** Every Auth mutation commits
+25. **Auth state is replicated through Raft (#32) — in progress.** Every Auth mutation commits
     straight to the local engine, tokens are a node-local in-memory set,
     and raft snapshots carry only the MVCC tables. So users, roles,
     `AuthEnable` and tokens differ per member. Plan (etcd parity):
@@ -735,10 +734,35 @@ Tracked live in the Claude task system. Snapshot of the order:
       three means no quorum). Auth mutations and `Authenticate` are
       refused with `Unavailable` until every member reports >= this
       version (new `RaftPeer.Version` RPC; `Unimplemented` = old).
-    - **Open question for the owner:** members upgraded from <= 1.4.2
-      may hold *different* auth tables (each kept whatever it served).
-      How to converge them once replication starts?
-    Work items: (after the decision)
+    - Entries are intents (UserAdd, RoleGrantPermission, ...), validated
+      and applied deterministically in the state machine, as etcd does;
+      the apply result (ok / not found / exists / precondition) goes
+      back in the response. The password is hashed before proposing.
+      The serving member waits until it has applied the entry itself,
+      so a token or change is usable on it as soon as the call returns.
+    - **Converging members upgraded from <= 1.4.2 (owner, 2026-09-28:
+      "Compare; refuse if they differ").** Before the first auth write,
+      the member compares every member's auth-table digest (peer
+      `AuthSync` RPC). Identical (normally all empty) → replicate from
+      then on. Different → auth writes stay refused (FailedPrecondition
+      naming the members), logged, `fastetcd_auth_diverged` = 1, until
+      the operator runs `fastetcd-ctl auth adopt <member>`, which
+      replicates that member's tables to all (an `Adopt` entry).
+    Work items:
+    - [ ] storage: `AuthOp`, `MvccStore::apply_auth`, in-memory
+      `AuthMemory` (enabled + tokens) owned by the store, export /
+      digest / replace of the auth tables; unit tests.
+    - [ ] raft: `FastetcdLogEntry::Auth`, apply returns log index;
+      snapshot trailer with the auth tables (old payloads still decode
+      both ways); peer `AuthSync` RPC (status + export).
+    - [ ] server: every Auth mutation and `Authenticate` through Raft,
+      behind the version / divergence gate; `FastetcdAdmin.AuthAdopt`
+      on the client port (root only when auth is on); ctl `auth adopt`.
+    - [ ] Tests: 3-node — change on one member enforced on the others,
+      token from one member accepted by another, learner caught up by
+      snapshot gets auth, restart keeps it; gate refuses with a member
+      down; diverged members refused, adopt converges them.
+    - [ ] Docs (auth section, upgrade note), changelog; release; close #32.
 
 ## Constraints & rules
 
