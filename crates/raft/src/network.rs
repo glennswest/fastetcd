@@ -470,6 +470,17 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         let entry: crate::types::FastetcdLogEntry =
             bincode::deserialize(&request.into_inner().data)
                 .map_err(|e| Status::invalid_argument(format!("decode ForwardWrite: {e}")))?;
+        // The leader refuses a put naming a lease that does not exist
+        // before proposing it (#19). A node that is not the leader skips
+        // the check: `client_write` refuses it below anyway.
+        if crate::precheck::is_leader(&self.raft) {
+            if let Err(e) = crate::precheck::check_leases(&self.raft, &self.mvcc, &entry).await {
+                let result: Result<crate::types::FastetcdLogResponse, String> = Err(e.to_string());
+                let data = bincode::serialize(&result)
+                    .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+                return Ok(Response::new(pb::RaftPayload { data }));
+            }
+        }
         let result: Result<crate::types::FastetcdLogResponse, String> =
             match self.raft.client_write(entry).await {
                 Ok(resp) => Ok(resp.data),

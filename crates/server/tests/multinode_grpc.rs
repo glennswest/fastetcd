@@ -619,3 +619,89 @@ async fn linearizable_read_without_a_leader_fails_instead_of_serving_stale() {
         "linearizable read with no confirmable leader must fail, got {lin:?}"
     );
 }
+
+/// fastetcd#19 on a cluster: the lease check runs on the leader, so a
+/// lease granted through one member can be used at once through any
+/// other (a follower that has not applied the grant yet must not refuse
+/// it), and a lease that does not exist is refused through a follower
+/// too, with etcd's NotFound.
+#[tokio::test]
+async fn a_put_names_a_lease_through_any_member() {
+    use fastetcd_proto::etcdserverpb::lease_client::LeaseClient;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let leader_id = loop {
+        assert!(tokio::time::Instant::now() < deadline, "no leader in 10s");
+        if let Some(l) = n1.raft.metrics().borrow().current_leader {
+            break l;
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+    let nodes = [&n1, &n2, &n3];
+    let leader = nodes[(leader_id - 1) as usize];
+    leader
+        .raft
+        .wait(Some(Duration::from_secs(10)))
+        .applied_index_at_least(Some(1), "first entry applied")
+        .await
+        .unwrap();
+
+    for granter in nodes {
+        let id = LeaseClient::connect(granter.client_endpoint.clone())
+            .await
+            .unwrap()
+            .lease_grant(pb::LeaseGrantRequest { ttl: 60, id: 0 })
+            .await
+            .unwrap()
+            .into_inner()
+            .id;
+        // Immediately, through every member.
+        for (i, via) in nodes.iter().enumerate() {
+            KvClient::connect(via.client_endpoint.clone())
+                .await
+                .unwrap()
+                .put(pb::PutRequest {
+                    key: format!("leased/{id}/{i}").into_bytes(),
+                    value: b"v".to_vec(),
+                    lease: id,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|e| panic!("lease {id} refused via {}: {e:?}", via.client_endpoint));
+        }
+    }
+
+    for via in nodes {
+        let err = KvClient::connect(via.client_endpoint.clone())
+            .await
+            .unwrap()
+            .put(pb::PutRequest {
+                key: b"dangling".to_vec(),
+                value: b"v".to_vec(),
+                lease: 0x7777,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound, "via {}: {err:?}", via.client_endpoint);
+        assert_eq!(err.message(), "etcdserver: requested lease not found");
+    }
+}

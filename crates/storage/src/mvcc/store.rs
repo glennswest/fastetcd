@@ -886,6 +886,20 @@ impl MvccStore {
         }))
     }
 
+    /// Whether lease `id` exists (granted and not yet revoked), as etcd's
+    /// lessor looks it up for a Put that names it (fastetcd#19).
+    pub async fn lease_exists(&self, id: LeaseId) -> MvccResult<bool> {
+        let snap = self.inner.engine.snapshot().await?;
+        Ok(snap.get(TABLE_LEASE, &lease_id_key(id)).await?.is_some())
+    }
+
+    /// Evaluate a Txn's compares against the current state, without
+    /// applying anything: which branch the txn would take now.
+    pub async fn txn_would_succeed(&self, compares: &[Compare]) -> MvccResult<bool> {
+        let snap = self.inner.engine.snapshot().await?;
+        self.evaluate_compares(&*snap, compares).await
+    }
+
     /// List all lease IDs.
     pub async fn lease_list(&self) -> MvccResult<Vec<LeaseId>> {
         let snap = self.inner.engine.snapshot().await?;

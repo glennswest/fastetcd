@@ -15,6 +15,7 @@
 pub mod kv_log_store;
 pub mod log_store;
 pub mod network;
+pub mod precheck;
 pub mod snapshot_data;
 pub mod snapshot_store;
 pub mod state_machine;

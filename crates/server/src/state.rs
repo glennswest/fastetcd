@@ -9,6 +9,7 @@ use crate::auth::AuthState;
 use crate::auth_sync::AuthGate;
 use crate::recovery::RecoveryAlarm;
 use crate::space::SpaceGuard;
+use fastetcd_raft::precheck::{self, PrecheckError};
 use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
     FastetcdLogEntry, FastetcdLogResponse, FastetcdStateMachine, TypeConfig, WriteForwarder,
@@ -90,12 +91,27 @@ impl ServerState {
         &self,
         entry: FastetcdLogEntry,
     ) -> Result<FastetcdLogResponse, Status> {
+        // On the leader, refuse a put naming a lease that does not exist
+        // before proposing it (#19; see `fastetcd_raft::precheck`). A
+        // follower forwards and the leader checks.
+        if precheck::is_leader(&self.raft) {
+            match precheck::check_leases(&self.raft, self.sm.mvcc(), &entry).await {
+                Ok(()) => {}
+                Err(PrecheckError::LeaseNotFound) => {
+                    return Err(Status::not_found(precheck::LEASE_NOT_FOUND))
+                }
+                Err(PrecheckError::Unavailable(m)) => return Err(Status::unavailable(m)),
+            }
+        }
         match self.raft.client_write(entry.clone()).await {
             Ok(w) => Ok(w.data),
             Err(e) => {
                 if let Some(fwd) = e.forward_to_leader::<openraft::BasicNode>() {
                     if let Some(leader_id) = fwd.leader_id {
                         return self.forwarder.forward(leader_id, &entry).await.map_err(|msg| {
+                            if msg == precheck::LEASE_NOT_FOUND {
+                                return Status::not_found(msg);
+                            }
                             Status::unavailable(format!(
                                 "forwarded write to leader {leader_id}: {msg}"
                             ))
