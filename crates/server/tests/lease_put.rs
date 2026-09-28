@@ -165,7 +165,8 @@ async fn etcd_client_sees_lease_not_found() {
         .unwrap_err();
     match err {
         etcd_client::Error::GRpcStatus(s) => {
-            assert_eq!(s.code(), Code::NotFound, "{s:?}");
+            // etcd-client links its own tonic; compare the code by name.
+            assert_eq!(format!("{:?}", s.code()), "NotFound", "{s:?}");
             assert_eq!(s.message(), NOT_FOUND);
         }
         other => panic!("expected a gRPC status, got {other:?}"),
