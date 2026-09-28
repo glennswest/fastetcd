@@ -222,3 +222,39 @@ pub async fn require_root(
         )))
     }
 }
+
+/// The root check for an RPC behind the auth interceptor, which has put
+/// the caller's [`UserIdentity`] in the request extensions (fastetcd#31).
+/// etcd's `IsAdminPermitted`: open while auth is off; otherwise the
+/// caller must be `root` or hold the `root` role.
+///
+/// Checked here, at the API layer, against this member's applied auth
+/// state, as etcd checks membership changes. A member a moment behind
+/// could still honour a root role just revoked; exploiting that needs a
+/// caller who was root until then and could already have done anything.
+pub async fn require_admin<T>(
+    state: &crate::state::ServerState,
+    request: &tonic::Request<T>,
+) -> Result<(), Status> {
+    let user = request.extensions().get::<UserIdentity>().cloned();
+    require_root(state.sm.mvcc().engine(), &state.auth, user.as_ref()).await
+}
+
+/// Whether `user` holds `role` (etcd's `HasRole`), for `RoleGet` of a
+/// role one holds.
+pub async fn holds_role(engine: &Arc<dyn KvStore>, user: &str, role: &str) -> Result<bool, Status> {
+    let snap = engine
+        .snapshot()
+        .await
+        .map_err(|e| Status::internal(format!("authz: read user: {e}")))?;
+    Ok(match snap
+        .get(TABLE_AUTH_USERS, user.as_bytes())
+        .await
+        .map_err(|e| Status::internal(format!("authz: read user: {e}")))?
+    {
+        Some(b) => bincode::deserialize::<StoredUser>(&b)
+            .map(|u| u.roles.iter().any(|r| r == role))
+            .unwrap_or(false),
+        None => false,
+    })
+}

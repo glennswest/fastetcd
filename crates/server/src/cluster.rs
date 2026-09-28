@@ -123,6 +123,8 @@ impl Cluster for ClusterService {
         &self,
         request: Request<pb::MemberAddRequest>,
     ) -> Result<Response<pb::MemberAddResponse>, Status> {
+        // Root only while auth is on, as in etcd (checkMembershipOperationPermission, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         let first_url = req
             .peer_ur_ls
@@ -182,6 +184,8 @@ impl Cluster for ClusterService {
         &self,
         request: Request<pb::MemberRemoveRequest>,
     ) -> Result<Response<pb::MemberRemoveResponse>, Status> {
+        // Root only while auth is on, as in etcd (checkMembershipOperationPermission, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         if req.id == self.self_node_id {
             return Err(Status::invalid_argument(
@@ -216,6 +220,8 @@ impl Cluster for ClusterService {
         &self,
         request: Request<pb::MemberUpdateRequest>,
     ) -> Result<Response<pb::MemberUpdateResponse>, Status> {
+        // Root only while auth is on, as in etcd (checkMembershipOperationPermission, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         let first_url = req
             .peer_ur_ls
@@ -246,6 +252,8 @@ impl Cluster for ClusterService {
         &self,
         request: Request<pb::MemberPromoteRequest>,
     ) -> Result<Response<pb::MemberPromoteResponse>, Status> {
+        // Root only while auth is on, as in etcd (checkMembershipOperationPermission, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         let mut voters = current_voter_set(&self.state.raft).await;
         if !voters.insert(req.id) {

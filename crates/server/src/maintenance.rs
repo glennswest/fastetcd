@@ -61,8 +61,13 @@ impl Maintenance for MaintenanceService {
     ) -> Result<Response<pb::AlarmResponse>, Status> {
         use pb::alarm_request::AlarmAction;
 
+        // Listing alarms needs only a login (the interceptor); raising or
+        // disarming one needs root while auth is on, as in etcd (#31).
+        let action = AlarmAction::try_from(request.get_ref().action).unwrap_or(AlarmAction::Get);
+        if action != AlarmAction::Get {
+            crate::authz::require_admin(&self.state, &request).await?;
+        }
         let req = request.into_inner();
-        let action = AlarmAction::try_from(req.action).unwrap_or(AlarmAction::Get);
         let targets_this_member = req.member_id == 0 || req.member_id == self.state.member_id;
         let targets_nospace = req.alarm == pb::AlarmType::None as i32
             || req.alarm == pb::AlarmType::Nospace as i32;
@@ -190,8 +195,10 @@ impl Maintenance for MaintenanceService {
 
     async fn defragment(
         &self,
-        _request: Request<pb::DefragmentRequest>,
+        request: Request<pb::DefragmentRequest>,
     ) -> Result<Response<pb::DefragmentResponse>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let before = self
             .state
             .sm
@@ -238,8 +245,10 @@ impl Maintenance for MaintenanceService {
 
     async fn hash(
         &self,
-        _request: Request<pb::HashRequest>,
+        request: Request<pb::HashRequest>,
     ) -> Result<Response<pb::HashResponse>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let (revision, hash) = hash_kv_table(&self.state, 0)
             .await
             .map_err(|e| Status::internal(format!("hash: {e}")))?;
@@ -254,6 +263,8 @@ impl Maintenance for MaintenanceService {
         &self,
         request: Request<pb::HashKvRequest>,
     ) -> Result<Response<pb::HashKvResponse>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         let (revision, hash) = hash_kv_table(&self.state, req.revision)
             .await
@@ -272,8 +283,10 @@ impl Maintenance for MaintenanceService {
 
     async fn snapshot(
         &self,
-        _request: Request<pb::SnapshotRequest>,
+        request: Request<pb::SnapshotRequest>,
     ) -> Result<Response<Self::SnapshotStream>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         // Build a snapshot of the MVCC state.
         let mut sm = self.state.sm.clone();
         let mut builder = sm.get_snapshot_builder().await;
@@ -333,6 +346,8 @@ impl Maintenance for MaintenanceService {
         &self,
         request: Request<pb::MoveLeaderRequest>,
     ) -> Result<Response<pb::MoveLeaderResponse>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
         // Validate target is a current voter — etcd does the same check.
         let metrics = self.state.raft.metrics().borrow().clone();
@@ -356,8 +371,10 @@ impl Maintenance for MaintenanceService {
 
     async fn downgrade(
         &self,
-        _request: Request<pb::DowngradeRequest>,
+        request: Request<pb::DowngradeRequest>,
     ) -> Result<Response<pb::DowngradeResponse>, Status> {
+        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
+        crate::authz::require_admin(&self.state, &request).await?;
         Err(Status::unimplemented(
             "Downgrade is not implemented in fastetcd",
         ))

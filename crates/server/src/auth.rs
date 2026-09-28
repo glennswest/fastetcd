@@ -21,8 +21,10 @@
 //!   member's applied state.
 //!
 //! Per-key permissions are enforced in `crate::authz` on every KV path
-//! and on `Watch`. Not yet enforced: the root-only check on the etcd
-//! admin RPCs, including this service's own mutations (#31).
+//! and on `Watch`. With auth on, every mutation here, and `AuthStatus`,
+//! `UserList` and `RoleList`, needs root; a user may `UserGet` itself
+//! and `RoleGet` a role it holds; `Authenticate` is open (etcd's
+//! `needAdminPermission`, #31).
 
 use std::ops::Bound;
 use std::sync::Arc;
@@ -40,6 +42,7 @@ use rand::RngCore;
 use tonic::{Request, Response, Status};
 
 use crate::auth_sync::propose_auth;
+use crate::authz::{holds_role, require_root, UserIdentity};
 use crate::state::{response_header, ServerState};
 
 /// Auth's in-memory state: the enabled flag and the token set. The one
@@ -76,6 +79,28 @@ impl AuthService {
         }
         let revision = propose_auth(&self.state, op).await?;
         Ok(response_header(&self.state, revision).await)
+    }
+
+    /// Who is calling. The Auth service is not behind the interceptor
+    /// (so `Authenticate` works without a token), so the caller comes
+    /// from the `token` metadata here.
+    fn caller<T>(&self, req: &Request<T>) -> Option<UserIdentity> {
+        if let Some(u) = req.extensions().get::<UserIdentity>() {
+            return Some(u.clone());
+        }
+        let token = req.metadata().get("token")?.to_str().ok()?;
+        self.state.auth.user_for_token(token).map(|name| UserIdentity { name })
+    }
+
+    /// Root only while auth is on (etcd's `needAdminPermission`, #31).
+    async fn admin<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        let caller = self.caller(req);
+        if self.state.auth.is_enabled() && caller.is_none() {
+            return Err(Status::unauthenticated(
+                "auth: missing or invalid `token` metadata; call Authenticate first",
+            ));
+        }
+        require_root(self.state.sm.mvcc().engine(), &self.state.auth, caller.as_ref()).await
     }
 
     async fn header(&self) -> pb::ResponseHeader {
@@ -182,8 +207,9 @@ fn perm_to_pb(p: &StoredPermission) -> authpb::Permission {
 impl Auth for AuthService {
     async fn auth_enable(
         &self,
-        _req: Request<pb::AuthEnableRequest>,
+        req: Request<pb::AuthEnableRequest>,
     ) -> Result<Response<pb::AuthEnableResponse>, Status> {
+        self.admin(&req).await?;
         // Refused at apply unless a `root` user exists, as in etcd.
         let header = self.change(AuthOp::Enable).await?;
         Ok(Response::new(pb::AuthEnableResponse { header: Some(header) }))
@@ -191,16 +217,18 @@ impl Auth for AuthService {
 
     async fn auth_disable(
         &self,
-        _req: Request<pb::AuthDisableRequest>,
+        req: Request<pb::AuthDisableRequest>,
     ) -> Result<Response<pb::AuthDisableResponse>, Status> {
+        self.admin(&req).await?;
         let header = self.change(AuthOp::Disable).await?;
         Ok(Response::new(pb::AuthDisableResponse { header: Some(header) }))
     }
 
     async fn auth_status(
         &self,
-        _req: Request<pb::AuthStatusRequest>,
+        req: Request<pb::AuthStatusRequest>,
     ) -> Result<Response<pb::AuthStatusResponse>, Status> {
+        self.admin(&req).await?;
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthStatusResponse {
             header: Some(response_header(&self.state, revision).await),
@@ -247,6 +275,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserAddRequest>,
     ) -> Result<Response<pb::AuthUserAddResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         if req.name.is_empty() {
             return Err(Status::invalid_argument("auth: empty user name"));
@@ -271,6 +300,10 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserGetRequest>,
     ) -> Result<Response<pb::AuthUserGetResponse>, Status> {
+        // A user may read itself; anyone else needs root (etcd).
+        if self.caller(&req).map(|u| u.name) != Some(req.get_ref().name.clone()) {
+            self.admin(&req).await?;
+        }
         let req = req.into_inner();
         let user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
             Status::not_found(format!("auth: user {} not found", req.name))
@@ -283,8 +316,9 @@ impl Auth for AuthService {
 
     async fn user_list(
         &self,
-        _req: Request<pb::AuthUserListRequest>,
+        req: Request<pb::AuthUserListRequest>,
     ) -> Result<Response<pb::AuthUserListResponse>, Status> {
+        self.admin(&req).await?;
         let users = list_names(&self.state, TABLE_AUTH_USERS).await?;
         Ok(Response::new(pb::AuthUserListResponse { header: Some(self.header().await), users }))
     }
@@ -293,6 +327,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserDeleteRequest>,
     ) -> Result<Response<pb::AuthUserDeleteResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         let header = self.change(AuthOp::UserDelete { name: req.name }).await?;
         Ok(Response::new(pb::AuthUserDeleteResponse { header: Some(header) }))
@@ -302,6 +337,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserChangePasswordRequest>,
     ) -> Result<Response<pb::AuthUserChangePasswordResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         if req.password.is_empty() {
             return Err(Status::invalid_argument("auth: empty password"));
@@ -317,6 +353,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserGrantRoleRequest>,
     ) -> Result<Response<pb::AuthUserGrantRoleResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         let header = self
             .change(AuthOp::UserGrantRole { user: req.user, role: req.role })
@@ -328,6 +365,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthUserRevokeRoleRequest>,
     ) -> Result<Response<pb::AuthUserRevokeRoleResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         let header = self
             .change(AuthOp::UserRevokeRole { name: req.name, role: req.role })
@@ -339,6 +377,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthRoleAddRequest>,
     ) -> Result<Response<pb::AuthRoleAddResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         if req.name.is_empty() {
             return Err(Status::invalid_argument("auth: empty role name"));
@@ -351,6 +390,14 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthRoleGetRequest>,
     ) -> Result<Response<pb::AuthRoleGetResponse>, Status> {
+        // A role the caller holds may be read; any other needs root (etcd).
+        let holds = match self.caller(&req) {
+            Some(u) => holds_role(self.state.sm.mvcc().engine(), &u.name, &req.get_ref().role).await?,
+            None => false,
+        };
+        if !holds {
+            self.admin(&req).await?;
+        }
         let req = req.into_inner();
         let role = load_role(&self.state, &req.role).await?.ok_or_else(|| {
             Status::not_found(format!("auth: role {} not found", req.role))
@@ -363,8 +410,9 @@ impl Auth for AuthService {
 
     async fn role_list(
         &self,
-        _req: Request<pb::AuthRoleListRequest>,
+        req: Request<pb::AuthRoleListRequest>,
     ) -> Result<Response<pb::AuthRoleListResponse>, Status> {
+        self.admin(&req).await?;
         let roles = list_names(&self.state, TABLE_AUTH_ROLES).await?;
         Ok(Response::new(pb::AuthRoleListResponse { header: Some(self.header().await), roles }))
     }
@@ -373,6 +421,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthRoleDeleteRequest>,
     ) -> Result<Response<pb::AuthRoleDeleteResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         // Also drops the role from every user holding it, at apply.
         let header = self.change(AuthOp::RoleDelete { name: req.role }).await?;
@@ -383,6 +432,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthRoleGrantPermissionRequest>,
     ) -> Result<Response<pb::AuthRoleGrantPermissionResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         let p = req
             .perm
@@ -400,6 +450,7 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthRoleRevokePermissionRequest>,
     ) -> Result<Response<pb::AuthRoleRevokePermissionResponse>, Status> {
+        self.admin(&req).await?;
         let req = req.into_inner();
         let header = self
             .change(AuthOp::RoleRevokePermission {
