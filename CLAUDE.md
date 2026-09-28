@@ -682,6 +682,26 @@ Tracked live in the Claude task system. Snapshot of the order:
       widened, polls instead of fixed sleeps, and the #10 CAS loop
       retries `Unavailable`. A separate snapshot-transfer flake is #45.
 
+24. **Watch is authorized (#33) — in progress.** With auth enabled any
+    authenticated user could watch any key or range (with a past
+    `start_revision` and `prev_kv`) and receive values RBAC denies to
+    `Range`. etcd parity (`isWatchPermitted`):
+    - Each `CreateRequest` needs read on `[key, range_end)`, checked
+      against the user captured from the stream request.
+    - Denied: the create is answered `created: true, canceled: true`,
+      `watch_id: -1` (clientv3 `InvalidWatchID`), `cancel_reason:
+      "etcdserver: permission denied"`; nothing is registered or
+      replayed. The stream stays open for other creates.
+    - Checked at create only, as in etcd: a permission revoked later
+      does not cancel a live watch (documented).
+    Work items:
+    - [ ] watch.rs: capture `UserIdentity`, authorize each create.
+    - [ ] Tests `crates/server/tests/authz_watch.rs`: out-of-scope
+      key/range/prefix denied with no events; in-scope allowed and
+      delivers; denied create doesn't break the stream; root and
+      auth-disabled unaffected; etcd-client sees the cancel.
+    - [ ] Docs, changelog; release; close #33.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
