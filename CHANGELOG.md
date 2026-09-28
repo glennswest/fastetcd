@@ -35,11 +35,12 @@
     `auth adopt <member>` (root only while auth is on) show each
     member's state and replicate the chosen one to all. Nothing is
     chosen automatically.
-- **BREAKING:** `ServerState::new` no longer takes an `AuthState`. It
-  uses the store's own (`MvccStore::auth_memory`). `AuthService::new`
-  takes only the state. `AuthState` is now `AuthMemory` from the storage
-  crate. `Authenticate` is a raft write, one fsync per login, as in
-  etcd.
+- **refactor:** (internal crate API, not published) `ServerState::new`
+  no longer takes an `AuthState`. It uses the store's own
+  (`MvccStore::auth_memory`). `AuthService::new` takes only the state.
+  `AuthState` is now `AuthMemory` from the storage crate.
+- **perf:** `Authenticate` is now a raft write, one fsync per login, as
+  in etcd.
 - **test:** `crates/server/tests/auth_replication.rs` covers:
   - a change made on a follower is enforced on every member;
   - a token from one member is accepted by the others;
