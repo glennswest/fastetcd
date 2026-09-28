@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.5.1] — 2026-09-28
+
 ### 2026-09-28
 - **fix:** Admin RPCs are root-only while auth is on (#31). Any
   authenticated user could grant itself the root role, disable auth,
