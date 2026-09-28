@@ -21,7 +21,7 @@ pub mod state_machine;
 pub mod types;
 
 pub use network::{
-    dial_peer, empty_peers, AuthSyncError, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,
+    auth_status, dial_peer, empty_peers, AuthSyncError, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,
     RaftPeerService, WriteForwarder,
 };
 

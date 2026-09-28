@@ -183,3 +183,42 @@ fn bounds_for(key: &[u8], range_end: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) 
         )
     }
 }
+
+/// Require the caller to be root (the `root` user, or a user holding the
+/// `root` role) while auth is enabled. Used by fastetcd's own admin
+/// RPCs; the etcd admin RPCs' root-only check is #31.
+pub async fn require_root(
+    engine: &Arc<dyn KvStore>,
+    auth: &AuthState,
+    user: Option<&UserIdentity>,
+) -> Result<(), Status> {
+    if !auth.is_enabled() {
+        return Ok(());
+    }
+    let user = user.ok_or_else(|| Status::unauthenticated("auth: no user identity on request"))?;
+    if user.name == "root" {
+        return Ok(());
+    }
+    let snap = engine
+        .snapshot()
+        .await
+        .map_err(|e| Status::internal(format!("authz: read user: {e}")))?;
+    let is_root = match snap
+        .get(TABLE_AUTH_USERS, user.name.as_bytes())
+        .await
+        .map_err(|e| Status::internal(format!("authz: read user: {e}")))?
+    {
+        Some(b) => bincode::deserialize::<StoredUser>(&b)
+            .map(|u| u.roles.iter().any(|r| r == "root"))
+            .unwrap_or(false),
+        None => false,
+    };
+    if is_root {
+        Ok(())
+    } else {
+        Err(Status::permission_denied(format!(
+            "authz: {} is not root; this call needs the root role",
+            user.name
+        )))
+    }
+}

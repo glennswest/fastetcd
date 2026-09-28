@@ -64,6 +64,7 @@ pub struct Metrics {
     pub recovered_revision: Gauge,
     pub current_revision: Gauge,
     pub compact_revision: Gauge,
+    pub auth_diverged: Gauge,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -86,6 +87,7 @@ impl Metrics {
         let recovered_revision = Gauge::default();
         let current_revision = Gauge::default();
         let compact_revision = Gauge::default();
+        let auth_diverged = Gauge::default();
         let m = Arc::new(Self {
             registry: Mutex::new(registry),
             has_leader: has_leader.clone(),
@@ -102,6 +104,7 @@ impl Metrics {
             recovered_revision: recovered_revision.clone(),
             current_revision: current_revision.clone(),
             compact_revision: compact_revision.clone(),
+            auth_diverged: auth_diverged.clone(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -192,6 +195,13 @@ impl Metrics {
                 "MVCC revision below which historical reads return ErrCompacted",
                 compact_revision,
             );
+            reg.register(
+                "fastetcd_auth_diverged",
+                "1 when the last check found members holding different auth state: \
+                 auth changes are refused until one is adopted with \
+                 `fastetcd-ctl auth adopt` (fastetcd#32)",
+                auth_diverged,
+            );
         }
         m
     }
@@ -222,6 +232,7 @@ impl Metrics {
         self.current_revision.set(cur);
         let comp = state.sm.mvcc().compact_revision().await;
         self.compact_revision.set(comp);
+        self.auth_diverged.set(state.auth_gate.diverged() as i64);
         if let Ok(size) = state.sm.mvcc().engine().size_on_disk().await {
             self.db_size_bytes.set(size as i64);
         }

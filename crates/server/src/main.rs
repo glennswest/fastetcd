@@ -19,7 +19,9 @@ use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_server::tls::{check_peer_url_schemes, Port, TlsFiles};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
-use fastetcd_server::auth::{AuthInterceptor, AuthService, AuthState};
+use fastetcd_proto::fastetcd_admin::fastetcd_admin_server::FastetcdAdminServer;
+use fastetcd_server::auth::{AuthInterceptor, AuthService};
+use fastetcd_server::auth_sync::AdminService;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::lease::LeaseService;
@@ -948,8 +950,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("cluster_state=existing — skipping raft.initialize; waiting to be joined");
     }
 
-    let auth_state = AuthState::default();
-    AuthService::load_persisted(sm.mvcc().engine(), &auth_state).await?;
     let forwarder = fastetcd_raft::WriteForwarder::with_tls(peers.clone(), peer_dial_tls);
 
     // Disk-space accounting (#14). A bounded data volume must never
@@ -1045,7 +1045,6 @@ async fn main() -> anyhow::Result<()> {
             sm,
             cluster_id,
             node_id,
-            auth_state.clone(),
             forwarder,
         )
         .with_space(space)
@@ -1147,7 +1146,10 @@ async fn main() -> anyhow::Result<()> {
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone());
     let lease = LeaseService::new(server_state.clone());
-    let auth = AuthService::new(server_state, auth_state.clone());
+    let admin = AdminService::new(server_state.clone());
+    // The store's own auth state, updated by raft apply (#32).
+    let auth_state = server_state.auth.clone();
+    let auth = AuthService::new(server_state);
 
     let peer_service = RaftPeerService::new(raft, peer_mvcc);
 
@@ -1214,7 +1216,8 @@ async fn main() -> anyhow::Result<()> {
                 interceptor.clone(),
             ));
             grpc_routes.add_service(WatchServer::with_interceptor(watch, interceptor.clone()));
-            grpc_routes.add_service(LeaseServer::with_interceptor(lease, interceptor));
+            grpc_routes.add_service(LeaseServer::with_interceptor(lease, interceptor.clone()));
+            grpc_routes.add_service(FastetcdAdminServer::with_interceptor(admin, interceptor));
             grpc_routes.add_service(AuthServer::new(auth));
 
             // Same port also answers etcd's plain-HTTP health probes

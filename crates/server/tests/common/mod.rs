@@ -23,7 +23,7 @@ use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_server::cluster::ClusterService;
 use fastetcd_server::kv::KvService;
 use fastetcd_server::maintenance::MaintenanceService;
-use fastetcd_server::auth::{AuthInterceptor, AuthService, AuthState};
+use fastetcd_server::auth::{AuthInterceptor, AuthService};
 use fastetcd_server::lease::LeaseService;
 use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
@@ -155,10 +155,9 @@ pub async fn start_test_server_with_space(
     raft.initialize(members).await.unwrap();
     wait_for_leader(&raft).await;
 
-    let auth_state = AuthState::default();
     let peers = fastetcd_raft::network::empty_peers();
     let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
-    let mut state = ServerState::new(raft, sm, 7, 1, auth_state.clone(), forwarder);
+    let mut state = ServerState::new(raft, sm, 7, 1, forwarder);
     if let Some(cfg) = space {
         state = state.with_space(Arc::new(fastetcd_server::space::SpaceGuard::new(
             dir.path().to_path_buf(),
@@ -183,8 +182,8 @@ pub async fn start_test_server_with_space(
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state.clone());
-    let auth = AuthService::new(state.clone(), auth_state.clone());
-    let interceptor = AuthInterceptor::new(auth_state);
+    let auth = AuthService::new(state.clone());
+    let interceptor = AuthInterceptor::new(state.auth.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

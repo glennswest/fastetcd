@@ -1,29 +1,31 @@
 //! Implementation of the etcd `Auth` gRPC service.
 //!
-//! Phase 1 scope (this commit):
-//!   - User / Role CRUD persisted to the MvccStore engine via
-//!     direct table writes (auth state lives outside the MVCC
-//!     revisioned space, like in etcd).
-//!   - Password hashing with argon2 (default cost — same family as
-//!     upstream etcd).
-//!   - `Authenticate` validates the password and returns a random
-//!     32-byte token; tokens live in an in-memory set on the local
-//!     node. Multi-node session sharing is a follow-up.
-//!   - `AuthEnable` / `AuthDisable` toggle a persisted flag. While
-//!     enabled, the `AuthInterceptor` requires a valid token on
-//!     every request (see `auth_interceptor` below).
+//! - User / role CRUD lives in the auth tables (`auth_users`,
+//!   `auth_roles`, `auth_state`), outside the MVCC revisioned space, as
+//!   in etcd.
+//! - **Every change is replicated through Raft (fastetcd#32).** A
+//!   mutation is proposed as a `FastetcdLogEntry::Auth` and applied by
+//!   every member's state machine (`MvccStore::apply_auth`), which also
+//!   validates it, so every member reaches the same result. Passwords
+//!   are hashed (argon2) by the member serving the call, before
+//!   proposing. Changes are gated on every member running replicated
+//!   auth and holding the same tables: see [`crate::auth_sync`].
+//! - `Authenticate` checks the password locally, then proposes the
+//!   token ("simple" tokens, as etcd's default provider): every member
+//!   adds it on apply, so a token issued by one member is accepted by
+//!   all. Tokens are in memory only: a restarted member has none, and
+//!   clients re-authenticate, as with etcd.
+//! - The enabled flag and tokens live in [`AuthState`], owned by the
+//!   `MvccStore` so apply and the interceptor share one.
+//! - Reads (`UserGet`, `RoleList`, `AuthStatus`, …) are served from this
+//!   member's applied state.
 //!
 //! Per-key permissions are enforced in `crate::authz` on every KV path
-//! (`Range`, `Put`, `DeleteRange`, and each compare and op of a `Txn`,
-//! #22). Not yet enforced: `Watch` (#33) and the root-only check on
-//! admin RPCs, including this service's own mutations (#31). Auth state
-//! is written to the local engine, not through Raft (#32).
+//! and on `Watch`. Not yet enforced: the root-only check on the etcd
+//! admin RPCs, including this service's own mutations (#31).
 
-use std::collections::HashSet;
 use std::ops::Bound;
 use std::sync::Arc;
-
-use std::sync::Mutex as StdMutex;
 
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -31,53 +33,24 @@ use fastetcd_proto::authpb;
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::auth_server::Auth;
 use fastetcd_storage::mvcc::auth::{
-    PermType, StoredPermission, StoredRole, StoredUser, META_AUTH_ENABLED, TABLE_AUTH_ROLES,
-    TABLE_AUTH_STATE, TABLE_AUTH_USERS,
+    AuthOp, PermType, StoredPermission, StoredRole, StoredUser, TABLE_AUTH_ROLES,
+    TABLE_AUTH_USERS,
 };
-use fastetcd_storage::{WriteBatch, WriteOptions};
 use rand::RngCore;
 use tonic::{Request, Response, Status};
 
+use crate::auth_sync::propose_auth;
 use crate::state::{response_header, ServerState};
 
-/// In-memory token registry + auth-enabled flag. Backed by
-/// `std::sync` primitives so the sync tonic interceptor can read
-/// without a runtime. Cheaply clonable.
-#[derive(Clone, Default)]
-pub struct AuthState {
-    enabled: Arc<std::sync::atomic::AtomicBool>,
-    tokens: Arc<StdMutex<std::collections::HashMap<String, String>>>,
-}
+/// Auth's in-memory state: the enabled flag and the token set. The one
+/// the server uses is `sm.mvcc().auth_memory()`, updated by raft apply.
+pub type AuthState = fastetcd_storage::mvcc::auth::AuthMemory;
 
-impl AuthState {
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    pub fn user_for_token(&self, token: &str) -> Option<String> {
-        self.tokens.lock().ok()?.get(token).cloned()
-    }
-    pub fn issue_token(&self, user: &str) -> String {
-        let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        let token = hex_encode(&bytes);
-        if let Ok(mut g) = self.tokens.lock() {
-            g.insert(token.clone(), user.to_string());
-        }
-        token
-    }
-    pub fn revoke_user_tokens(&self, user: &str) {
-        if let Ok(mut g) = self.tokens.lock() {
-            g.retain(|_, u| u != user);
-        }
-    }
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
+/// A new random 32-byte token, hex encoded.
+fn new_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut s = String::with_capacity(64);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));
     }
@@ -87,35 +60,35 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[derive(Clone)]
 pub struct AuthService {
     state: Arc<ServerState>,
-    auth: AuthState,
 }
 
 impl AuthService {
-    pub fn new(state: Arc<ServerState>, auth: AuthState) -> Self {
-        Self { state, auth }
+    pub fn new(state: Arc<ServerState>) -> Self {
+        Self { state }
     }
 
-    /// Load persisted auth state at server boot. Restores the
-    /// `enabled` flag from the engine into the in-memory `AuthState`.
-    pub async fn load_persisted(
-        engine: &Arc<dyn fastetcd_storage::KvStore>,
-        auth: &AuthState,
-    ) -> anyhow::Result<()> {
-        let snap = engine.snapshot().await?;
-        if let Some(bytes) = snap.get(TABLE_AUTH_STATE, META_AUTH_ENABLED).await? {
-            let enabled = bytes.first().copied().unwrap_or(0) != 0;
-            auth.set_enabled(enabled);
+    /// Gate, propose, and answer with the header for the result.
+    async fn change(&self, op: AuthOp) -> Result<pb::ResponseHeader, Status> {
+        if matches!(op, AuthOp::Authenticate { .. }) {
+            self.state.auth_gate.check_upgraded(&self.state).await?;
+        } else {
+            self.state.auth_gate.check(&self.state).await?;
         }
-        Ok(())
+        let revision = propose_auth(&self.state, op).await?;
+        Ok(response_header(&self.state, revision).await)
+    }
+
+    async fn header(&self) -> pb::ResponseHeader {
+        let revision = self.state.sm.mvcc().current_revision().await;
+        response_header(&self.state, revision).await
     }
 }
 
-async fn load_user(
-    state: &ServerState,
-    name: &str,
-) -> Result<Option<StoredUser>, Status> {
-    let engine = state.sm.mvcc().engine().clone();
-    let snap = engine
+async fn load_user(state: &ServerState, name: &str) -> Result<Option<StoredUser>, Status> {
+    let snap = state
+        .sm
+        .mvcc()
+        .engine()
         .snapshot()
         .await
         .map_err(|e| Status::internal(format!("auth read: {e}")))?;
@@ -129,37 +102,11 @@ async fn load_user(
     Ok(Some(u))
 }
 
-async fn save_user(state: &ServerState, user: &StoredUser) -> Result<(), Status> {
-    let bytes = bincode::serialize(user)
-        .map_err(|e| Status::internal(format!("auth encode user: {e}")))?;
-    let mut batch = WriteBatch::new();
-    batch.put(TABLE_AUTH_USERS, user.name.as_bytes(), &bytes);
-    state
-        .sm
-        .mvcc()
-        .engine()
-        .commit(batch, WriteOptions::default())
-        .await
-        .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-    Ok(())
-}
-
-async fn delete_user(state: &ServerState, name: &str) -> Result<(), Status> {
-    let mut batch = WriteBatch::new();
-    batch.delete(TABLE_AUTH_USERS, name.as_bytes());
-    state
-        .sm
-        .mvcc()
-        .engine()
-        .commit(batch, WriteOptions::default())
-        .await
-        .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-    Ok(())
-}
-
 async fn load_role(state: &ServerState, name: &str) -> Result<Option<StoredRole>, Status> {
-    let engine = state.sm.mvcc().engine().clone();
-    let snap = engine
+    let snap = state
+        .sm
+        .mvcc()
+        .engine()
         .snapshot()
         .await
         .map_err(|e| Status::internal(format!("auth read: {e}")))?;
@@ -173,32 +120,22 @@ async fn load_role(state: &ServerState, name: &str) -> Result<Option<StoredRole>
     Ok(Some(r))
 }
 
-async fn save_role(state: &ServerState, role: &StoredRole) -> Result<(), Status> {
-    let bytes = bincode::serialize(role)
-        .map_err(|e| Status::internal(format!("auth encode role: {e}")))?;
-    let mut batch = WriteBatch::new();
-    batch.put(TABLE_AUTH_ROLES, role.name.as_bytes(), &bytes);
-    state
+async fn list_names(state: &ServerState, table: &str) -> Result<Vec<String>, Status> {
+    let snap = state
         .sm
         .mvcc()
         .engine()
-        .commit(batch, WriteOptions::default())
+        .snapshot()
         .await
-        .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-    Ok(())
-}
-
-async fn delete_role(state: &ServerState, name: &str) -> Result<(), Status> {
-    let mut batch = WriteBatch::new();
-    batch.delete(TABLE_AUTH_ROLES, name.as_bytes());
-    state
-        .sm
-        .mvcc()
-        .engine()
-        .commit(batch, WriteOptions::default())
+        .map_err(|e| Status::internal(format!("auth read: {e}")))?;
+    let entries = snap
+        .range(table, Bound::Unbounded, Bound::Unbounded, 0)
         .await
-        .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-    Ok(())
+        .map_err(|e| Status::internal(format!("auth read: {e}")))?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|(k, _)| String::from_utf8(k).ok())
+        .collect())
 }
 
 fn hash_password(plain: &str) -> Result<String, Status> {
@@ -247,48 +184,17 @@ impl Auth for AuthService {
         &self,
         _req: Request<pb::AuthEnableRequest>,
     ) -> Result<Response<pb::AuthEnableResponse>, Status> {
-        // etcd requires a `root` user with `root` role to exist
-        // before AuthEnable can succeed. Match that.
-        let root_user = load_user(&self.state, "root").await?;
-        if root_user.is_none() {
-            return Err(Status::failed_precondition(
-                "root user must exist before AuthEnable",
-            ));
-        }
-        let mut batch = WriteBatch::new();
-        batch.put(TABLE_AUTH_STATE, META_AUTH_ENABLED, &[1u8]);
-        self.state
-            .sm
-            .mvcc()
-            .engine()
-            .commit(batch, WriteOptions::default())
-            .await
-            .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-        self.auth.set_enabled(true);
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthEnableResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        // Refused at apply unless a `root` user exists, as in etcd.
+        let header = self.change(AuthOp::Enable).await?;
+        Ok(Response::new(pb::AuthEnableResponse { header: Some(header) }))
     }
 
     async fn auth_disable(
         &self,
         _req: Request<pb::AuthDisableRequest>,
     ) -> Result<Response<pb::AuthDisableResponse>, Status> {
-        let mut batch = WriteBatch::new();
-        batch.put(TABLE_AUTH_STATE, META_AUTH_ENABLED, &[0u8]);
-        self.state
-            .sm
-            .mvcc()
-            .engine()
-            .commit(batch, WriteOptions::default())
-            .await
-            .map_err(|e| Status::internal(format!("auth write: {e}")))?;
-        self.auth.set_enabled(false);
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthDisableResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self.change(AuthOp::Disable).await?;
+        Ok(Response::new(pb::AuthDisableResponse { header: Some(header) }))
     }
 
     async fn auth_status(
@@ -298,7 +204,7 @@ impl Auth for AuthService {
         let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthStatusResponse {
             header: Some(response_header(&self.state, revision).await),
-            enabled: self.auth.is_enabled(),
+            enabled: self.state.auth.is_enabled(),
             auth_revision: revision as u64,
         }))
     }
@@ -319,12 +225,22 @@ impl Auth for AuthService {
         if !verify_password(&req.password, &user.password_hash) {
             return Err(Status::unauthenticated("auth: invalid password"));
         }
-        let token = self.auth.issue_token(&user.name);
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthenticateResponse {
-            header: Some(response_header(&self.state, revision).await),
-            token,
-        }))
+        // Replicated, so any member accepts the token. The entry carries
+        // the hash checked here; if the password changed meanwhile it is
+        // refused at apply.
+        let token = new_token();
+        let header = self
+            .change(AuthOp::Authenticate {
+                user: user.name.clone(),
+                token: token.clone(),
+                checked_hash: user.password_hash,
+            })
+            .await
+            .map_err(|s| match s.code() {
+                tonic::Code::NotFound => Status::unauthenticated(s.message().to_string()),
+                _ => s,
+            })?;
+        Ok(Response::new(pb::AuthenticateResponse { header: Some(header), token }))
     }
 
     async fn user_add(
@@ -335,14 +251,7 @@ impl Auth for AuthService {
         if req.name.is_empty() {
             return Err(Status::invalid_argument("auth: empty user name"));
         }
-        if load_user(&self.state, &req.name).await?.is_some() {
-            return Err(Status::already_exists(format!(
-                "auth: user {} already exists",
-                req.name
-            )));
-        }
-        let opts = req.options.as_ref();
-        let no_password = opts.map(|o| o.no_password).unwrap_or(false);
+        let no_password = req.options.as_ref().map(|o| o.no_password).unwrap_or(false);
         let password_hash = if no_password {
             String::new()
         } else if req.password.is_empty() {
@@ -352,17 +261,10 @@ impl Auth for AuthService {
         } else {
             hash_password(&req.password)?
         };
-        let user = StoredUser {
-            name: req.name.clone(),
-            password_hash,
-            roles: Vec::new(),
-            no_password,
-        };
-        save_user(&self.state, &user).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserAddResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self
+            .change(AuthOp::UserAdd { name: req.name, password_hash, no_password })
+            .await?;
+        Ok(Response::new(pb::AuthUserAddResponse { header: Some(header) }))
     }
 
     async fn user_get(
@@ -373,9 +275,8 @@ impl Auth for AuthService {
         let user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
             Status::not_found(format!("auth: user {} not found", req.name))
         })?;
-        let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthUserGetResponse {
-            header: Some(response_header(&self.state, revision).await),
+            header: Some(self.header().await),
             roles: user.roles,
         }))
     }
@@ -384,24 +285,8 @@ impl Auth for AuthService {
         &self,
         _req: Request<pb::AuthUserListRequest>,
     ) -> Result<Response<pb::AuthUserListResponse>, Status> {
-        let engine = self.state.sm.mvcc().engine().clone();
-        let snap = engine
-            .snapshot()
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        let entries = snap
-            .range(TABLE_AUTH_USERS, Bound::Unbounded, Bound::Unbounded, 0)
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        let users: Vec<String> = entries
-            .into_iter()
-            .filter_map(|(k, _)| String::from_utf8(k).ok())
-            .collect();
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserListResponse {
-            header: Some(response_header(&self.state, revision).await),
-            users,
-        }))
+        let users = list_names(&self.state, TABLE_AUTH_USERS).await?;
+        Ok(Response::new(pb::AuthUserListResponse { header: Some(self.header().await), users }))
     }
 
     async fn user_delete(
@@ -409,18 +294,8 @@ impl Auth for AuthService {
         req: Request<pb::AuthUserDeleteRequest>,
     ) -> Result<Response<pb::AuthUserDeleteResponse>, Status> {
         let req = req.into_inner();
-        if load_user(&self.state, &req.name).await?.is_none() {
-            return Err(Status::not_found(format!(
-                "auth: user {} not found",
-                req.name
-            )));
-        }
-        delete_user(&self.state, &req.name).await?;
-        self.auth.revoke_user_tokens(&req.name);
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserDeleteResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self.change(AuthOp::UserDelete { name: req.name }).await?;
+        Ok(Response::new(pb::AuthUserDeleteResponse { header: Some(header) }))
     }
 
     async fn user_change_password(
@@ -428,20 +303,14 @@ impl Auth for AuthService {
         req: Request<pb::AuthUserChangePasswordRequest>,
     ) -> Result<Response<pb::AuthUserChangePasswordResponse>, Status> {
         let req = req.into_inner();
-        let mut user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: user {} not found", req.name))
-        })?;
         if req.password.is_empty() {
             return Err(Status::invalid_argument("auth: empty password"));
         }
-        user.password_hash = hash_password(&req.password)?;
-        user.no_password = false;
-        save_user(&self.state, &user).await?;
-        self.auth.revoke_user_tokens(&req.name);
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserChangePasswordResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let password_hash = hash_password(&req.password)?;
+        let header = self
+            .change(AuthOp::UserChangePassword { name: req.name, password_hash })
+            .await?;
+        Ok(Response::new(pb::AuthUserChangePasswordResponse { header: Some(header) }))
     }
 
     async fn user_grant_role(
@@ -449,23 +318,10 @@ impl Auth for AuthService {
         req: Request<pb::AuthUserGrantRoleRequest>,
     ) -> Result<Response<pb::AuthUserGrantRoleResponse>, Status> {
         let req = req.into_inner();
-        let mut user = load_user(&self.state, &req.user).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: user {} not found", req.user))
-        })?;
-        if load_role(&self.state, &req.role).await?.is_none() {
-            return Err(Status::not_found(format!(
-                "auth: role {} not found",
-                req.role
-            )));
-        }
-        if !user.roles.contains(&req.role) {
-            user.roles.push(req.role);
-        }
-        save_user(&self.state, &user).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserGrantRoleResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self
+            .change(AuthOp::UserGrantRole { user: req.user, role: req.role })
+            .await?;
+        Ok(Response::new(pb::AuthUserGrantRoleResponse { header: Some(header) }))
     }
 
     async fn user_revoke_role(
@@ -473,15 +329,10 @@ impl Auth for AuthService {
         req: Request<pb::AuthUserRevokeRoleRequest>,
     ) -> Result<Response<pb::AuthUserRevokeRoleResponse>, Status> {
         let req = req.into_inner();
-        let mut user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: user {} not found", req.name))
-        })?;
-        user.roles.retain(|r| r != &req.role);
-        save_user(&self.state, &user).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthUserRevokeRoleResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self
+            .change(AuthOp::UserRevokeRole { name: req.name, role: req.role })
+            .await?;
+        Ok(Response::new(pb::AuthUserRevokeRoleResponse { header: Some(header) }))
     }
 
     async fn role_add(
@@ -492,24 +343,8 @@ impl Auth for AuthService {
         if req.name.is_empty() {
             return Err(Status::invalid_argument("auth: empty role name"));
         }
-        if load_role(&self.state, &req.name).await?.is_some() {
-            return Err(Status::already_exists(format!(
-                "auth: role {} already exists",
-                req.name
-            )));
-        }
-        save_role(
-            &self.state,
-            &StoredRole {
-                name: req.name,
-                permissions: Vec::new(),
-            },
-        )
-        .await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthRoleAddResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self.change(AuthOp::RoleAdd { name: req.name }).await?;
+        Ok(Response::new(pb::AuthRoleAddResponse { header: Some(header) }))
     }
 
     async fn role_get(
@@ -520,9 +355,8 @@ impl Auth for AuthService {
         let role = load_role(&self.state, &req.role).await?.ok_or_else(|| {
             Status::not_found(format!("auth: role {} not found", req.role))
         })?;
-        let revision = self.state.sm.mvcc().current_revision().await;
         Ok(Response::new(pb::AuthRoleGetResponse {
-            header: Some(response_header(&self.state, revision).await),
+            header: Some(self.header().await),
             perm: role.permissions.iter().map(perm_to_pb).collect(),
         }))
     }
@@ -531,24 +365,8 @@ impl Auth for AuthService {
         &self,
         _req: Request<pb::AuthRoleListRequest>,
     ) -> Result<Response<pb::AuthRoleListResponse>, Status> {
-        let engine = self.state.sm.mvcc().engine().clone();
-        let snap = engine
-            .snapshot()
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        let entries = snap
-            .range(TABLE_AUTH_ROLES, Bound::Unbounded, Bound::Unbounded, 0)
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        let roles: Vec<String> = entries
-            .into_iter()
-            .filter_map(|(k, _)| String::from_utf8(k).ok())
-            .collect();
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthRoleListResponse {
-            header: Some(response_header(&self.state, revision).await),
-            roles,
-        }))
+        let roles = list_names(&self.state, TABLE_AUTH_ROLES).await?;
+        Ok(Response::new(pb::AuthRoleListResponse { header: Some(self.header().await), roles }))
     }
 
     async fn role_delete(
@@ -556,38 +374,9 @@ impl Auth for AuthService {
         req: Request<pb::AuthRoleDeleteRequest>,
     ) -> Result<Response<pb::AuthRoleDeleteResponse>, Status> {
         let req = req.into_inner();
-        if load_role(&self.state, &req.role).await?.is_none() {
-            return Err(Status::not_found(format!(
-                "auth: role {} not found",
-                req.role
-            )));
-        }
-        delete_role(&self.state, &req.role).await?;
-        // Drop the role from every user that referenced it.
-        let engine = self.state.sm.mvcc().engine().clone();
-        let snap = engine
-            .snapshot()
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        let entries = snap
-            .range(TABLE_AUTH_USERS, Bound::Unbounded, Bound::Unbounded, 0)
-            .await
-            .map_err(|e| Status::internal(format!("auth read: {e}")))?;
-        for (_, v) in entries {
-            let mut user: StoredUser = match bincode::deserialize(&v) {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
-            let before = user.roles.len();
-            user.roles.retain(|r| r != &req.role);
-            if user.roles.len() != before {
-                save_user(&self.state, &user).await?;
-            }
-        }
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthRoleDeleteResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        // Also drops the role from every user holding it, at apply.
+        let header = self.change(AuthOp::RoleDelete { name: req.role }).await?;
+        Ok(Response::new(pb::AuthRoleDeleteResponse { header: Some(header) }))
     }
 
     async fn role_grant_permission(
@@ -595,24 +384,16 @@ impl Auth for AuthService {
         req: Request<pb::AuthRoleGrantPermissionRequest>,
     ) -> Result<Response<pb::AuthRoleGrantPermissionResponse>, Status> {
         let req = req.into_inner();
-        let mut role = load_role(&self.state, &req.name).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: role {} not found", req.name))
-        })?;
         let p = req
             .perm
             .ok_or_else(|| Status::invalid_argument("auth: missing Permission"))?;
         let perm_type =
             pb_perm_type(p.perm_type).ok_or_else(|| Status::invalid_argument("auth: bad perm type"))?;
-        role.permissions.push(StoredPermission {
-            perm_type,
-            key: p.key,
-            range_end: p.range_end,
-        });
-        save_role(&self.state, &role).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthRoleGrantPermissionResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let perm = StoredPermission { perm_type, key: p.key, range_end: p.range_end };
+        let header = self
+            .change(AuthOp::RoleGrantPermission { name: req.name, perm })
+            .await?;
+        Ok(Response::new(pb::AuthRoleGrantPermissionResponse { header: Some(header) }))
     }
 
     async fn role_revoke_permission(
@@ -620,16 +401,14 @@ impl Auth for AuthService {
         req: Request<pb::AuthRoleRevokePermissionRequest>,
     ) -> Result<Response<pb::AuthRoleRevokePermissionResponse>, Status> {
         let req = req.into_inner();
-        let mut role = load_role(&self.state, &req.role).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: role {} not found", req.role))
-        })?;
-        role.permissions
-            .retain(|p| p.key != req.key || p.range_end != req.range_end);
-        save_role(&self.state, &role).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        Ok(Response::new(pb::AuthRoleRevokePermissionResponse {
-            header: Some(response_header(&self.state, revision).await),
-        }))
+        let header = self
+            .change(AuthOp::RoleRevokePermission {
+                name: req.role,
+                key: req.key,
+                range_end: req.range_end,
+            })
+            .await?;
+        Ok(Response::new(pb::AuthRoleRevokePermissionResponse { header: Some(header) }))
     }
 }
 
@@ -690,11 +469,4 @@ impl tonic::service::Interceptor for AuthInterceptor {
             )),
         }
     }
-}
-
-/// Drop the unused HashSet import now that we no longer keep a
-/// public-methods set.
-#[allow(dead_code)]
-fn _drop_hashset() {
-    let _ = HashSet::<String>::new();
 }

@@ -1,0 +1,46 @@
+syntax = "proto3";
+package fastetcd.admin;
+
+// fastetcd-specific administration on the client port. Not part of the
+// etcd v3 wire protocol; `fastetcd-ctl` is its client. Behind the same
+// auth interceptor as the etcd services, and root-only while auth is on.
+
+service FastetcdAdmin {
+    // Every member's view of the replicated auth state (#32): version,
+    // digest, user and role names, whether auth is on. Before auth
+    // changes can replicate, every member's digest must match.
+    rpc AuthMembers(AuthMembersRequest) returns (AuthMembersResponse);
+
+    // Replicate one member's auth tables to every member, replacing
+    // theirs (#32). The remedy when members' auth state diverged before
+    // replication.
+    rpc AuthAdopt(AuthAdoptRequest) returns (AuthAdoptResponse);
+}
+
+message AuthMembersRequest {}
+
+message AuthMember {
+    uint64 member_id = 1;
+    // Empty when the member could not report; see `error`.
+    string version = 2;
+    string digest = 3;
+    repeated string users = 4;
+    repeated string roles = 5;
+    bool enabled = 6;
+    string error = 7;
+}
+
+message AuthMembersResponse {
+    repeated AuthMember members = 1;
+    // True when every member reported the same digest.
+    bool identical = 2;
+}
+
+message AuthAdoptRequest {
+    uint64 member_id = 1;
+}
+
+message AuthAdoptResponse {
+    // The adopted state, now on every member.
+    AuthMember adopted = 1;
+}

@@ -24,6 +24,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 
 use crate::types::{NodeId, TypeConfig};
+use fastetcd_storage::mvcc::auth::AuthTables;
 
 /// Map of `NodeId -> base URL` used by the network factory to dial
 /// peers. URLs are `http://host:port` (or `https://` with peer TLS)
@@ -216,6 +217,20 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
 /// Used when a node isn't the raft leader: rather than requiring a
 /// separate exchange of client URLs between members, it forwards the
 /// write over the peer (raft) connection that's already known to work.
+/// This member's answer to an `AuthSync` status request.
+pub fn auth_status(tables: &AuthTables) -> crate::types::AuthSyncResponse {
+    let names = |rows: &[(Vec<u8>, Vec<u8>)]| -> Vec<String> {
+        rows.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect()
+    };
+    crate::types::AuthSyncResponse::Status {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        digest: tables.digest(),
+        users: names(&tables.users),
+        roles: names(&tables.roles),
+        enabled: tables.enabled(),
+    }
+}
+
 /// Why a member's `AuthSync` status could not be had.
 #[derive(Debug, Clone)]
 pub enum AuthSyncError {
@@ -547,10 +562,7 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
             .await
             .map_err(|e| Status::internal(format!("read auth tables: {e}")))?;
         let resp = match req {
-            crate::types::AuthSyncRequest::Status => crate::types::AuthSyncResponse::Status {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                digest: tables.digest(),
-            },
+            crate::types::AuthSyncRequest::Status => auth_status(&tables),
             crate::types::AuthSyncRequest::Export => crate::types::AuthSyncResponse::Export(tables),
         };
         let data = bincode::serialize(&resp)

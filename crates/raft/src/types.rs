@@ -82,7 +82,15 @@ pub enum AuthSyncRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuthSyncResponse {
-    Status { version: String, digest: String },
+    /// `users`/`roles` are names only, so an operator choosing which
+    /// member to adopt from can see what each holds.
+    Status {
+        version: String,
+        digest: String,
+        users: Vec<String>,
+        roles: Vec<String>,
+        enabled: bool,
+    },
     Export(AuthTables),
 }
 

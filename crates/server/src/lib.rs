@@ -16,6 +16,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod auth_sync;
 pub mod authz;
 pub mod backup;
 pub mod cluster;

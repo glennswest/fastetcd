@@ -6,6 +6,7 @@ use openraft::Raft;
 use tonic::Status;
 
 use crate::auth::AuthState;
+use crate::auth_sync::AuthGate;
 use crate::recovery::RecoveryAlarm;
 use crate::space::SpaceGuard;
 use fastetcd_raft::types::MembershipChange;
@@ -23,7 +24,11 @@ pub struct ServerState {
     pub sm: FastetcdStateMachine,
     pub cluster_id: u64,
     pub member_id: u64,
+    /// Auth's in-memory state, the store's own (`sm.mvcc().auth_memory()`),
+    /// so what raft apply changes is what the interceptor reads (#32).
     pub auth: AuthState,
+    /// When a replicated auth change may be proposed (#32).
+    pub auth_gate: Arc<AuthGate>,
     pub forwarder: WriteForwarder,
     /// Disk-space accounting and the NOSPACE alarm (fastetcd#14).
     /// Defaults to a disabled guard so embeddings and tests that don't
@@ -41,15 +46,16 @@ impl ServerState {
         sm: FastetcdStateMachine,
         cluster_id: u64,
         member_id: u64,
-        auth: AuthState,
         forwarder: WriteForwarder,
     ) -> Self {
+        let auth = sm.mvcc().auth_memory().clone();
         Self {
             raft,
             sm,
             cluster_id,
             member_id,
             auth,
+            auth_gate: Arc::new(AuthGate::default()),
             forwarder,
             space: Arc::new(SpaceGuard::disabled()),
             recovery: Arc::new(RecoveryAlarm::default()),

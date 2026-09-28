@@ -9,7 +9,12 @@ use tokio_stream::StreamExt;
 
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::kv_client::KvClient;
+use fastetcd_proto::etcdserverpb::auth_client::AuthClient;
+use fastetcd_proto::etcdserverpb::cluster_client::ClusterClient;
 use fastetcd_proto::etcdserverpb::maintenance_client::MaintenanceClient;
+use fastetcd_proto::fastetcd_admin as apb;
+use fastetcd_proto::fastetcd_admin::fastetcd_admin_client::FastetcdAdminClient;
+use tonic::metadata::MetadataValue;
 
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd-ctl", version, about)]
@@ -17,6 +22,11 @@ struct Args {
     /// Server endpoint, e.g. `http://127.0.0.1:2379`.
     #[arg(long, default_value = "http://127.0.0.1:2379")]
     endpoint: String,
+
+    /// `name:password` to authenticate as, when auth is on. Used by the
+    /// `auth` commands, which need root.
+    #[arg(long)]
+    user: Option<String>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -61,6 +71,119 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         disarm: bool,
     },
+    /// Replicated auth (fastetcd#32): inspect and converge members.
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCmd {
+    /// Show every member's auth state: version, users, roles, whether
+    /// auth is on, and the digest compared before replicating.
+    Members,
+    /// Replicate one member's auth state to every member, replacing
+    /// theirs. For members that held different auth state before
+    /// replication. `member` is a member name or hex ID, as `etcdctl
+    /// member list` prints them.
+    Adopt { member: String },
+}
+
+/// Authenticate as `name:password`, returning the token.
+async fn login(endpoint: &str, user: &Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(user) = user else { return Ok(None) };
+    let (name, password) = user
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--user must be name:password"))?;
+    let mut c = AuthClient::connect(endpoint.to_string()).await?;
+    let r = c
+        .authenticate(pb::AuthenticateRequest {
+            name: name.to_string(),
+            password: password.to_string(),
+        })
+        .await?
+        .into_inner();
+    Ok(Some(r.token))
+}
+
+/// Attaches the auth token, if any, to every request.
+#[derive(Clone)]
+struct WithToken(Option<MetadataValue<tonic::metadata::Ascii>>);
+
+impl tonic::service::Interceptor for WithToken {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(t) = &self.0 {
+            req.metadata_mut().insert("token", t.clone());
+        }
+        Ok(req)
+    }
+}
+
+fn print_member(m: &apb::AuthMember) {
+    if !m.error.is_empty() {
+        println!("member {:x}: {}", m.member_id, m.error);
+        return;
+    }
+    println!(
+        "member {:x}: version {}, auth {}, digest {}",
+        m.member_id,
+        m.version,
+        if m.enabled { "on" } else { "off" },
+        &m.digest[..16.min(m.digest.len())]
+    );
+    println!("  users: {}", m.users.join(", "));
+    println!("  roles: {}", m.roles.join(", "));
+}
+
+async fn auth_cmd(endpoint: String, user: Option<String>, cmd: AuthCmd) -> anyhow::Result<()> {
+    let token = login(&endpoint, &user)
+        .await?
+        .map(|t| t.parse())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("token: {e}"))?;
+    let channel = tonic::transport::Endpoint::from_shared(endpoint)?.connect().await?;
+    let auth = WithToken(token);
+    let mut admin = FastetcdAdminClient::with_interceptor(channel.clone(), auth.clone());
+    match cmd {
+        AuthCmd::Members => {
+            let r = admin.auth_members(apb::AuthMembersRequest {}).await?.into_inner();
+            for m in &r.members {
+                print_member(m);
+            }
+            if r.identical {
+                println!("all members hold the same auth state");
+            } else {
+                println!(
+                    "members differ: auth changes are refused until one is adopted \
+                     (fastetcd-ctl auth adopt <member>)"
+                );
+            }
+        }
+        AuthCmd::Adopt { member } => {
+            let mut cluster = ClusterClient::with_interceptor(channel, auth);
+            let list = cluster
+                .member_list(pb::MemberListRequest { linearizable: false })
+                .await?
+                .into_inner();
+            let id = list
+                .members
+                .iter()
+                .find(|m| m.name == member)
+                .map(|m| m.id)
+                .or_else(|| u64::from_str_radix(member.trim_start_matches("0x"), 16).ok())
+                .ok_or_else(|| anyhow::anyhow!("no member named {member}, and not a hex ID"))?;
+            let r = admin
+                .auth_adopt(apb::AuthAdoptRequest { member_id: id })
+                .await?
+                .into_inner();
+            println!("adopted on every member:");
+            if let Some(m) = r.adopted {
+                print_member(&m);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Render a byte count the way an operator reads it.
@@ -225,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Cmd::Auth { cmd } => auth_cmd(args.endpoint, args.user, cmd).await?,
     }
     Ok(())
 }

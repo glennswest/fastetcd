@@ -103,9 +103,12 @@ pub enum AuthOp {
     Enable,
     Disable,
     /// A successful `Authenticate`: the serving member checked the
-    /// password and chose the token. Every member adds it on apply, so
-    /// any member accepts it (etcd's "simple" token provider).
-    Authenticate { user: String, token: String },
+    /// password against `checked_hash` and chose the token. Every member
+    /// adds it on apply, so any member accepts it (etcd's "simple" token
+    /// provider). Refused if the user's hash is no longer `checked_hash`:
+    /// the member that checked may have held a password changed since,
+    /// as etcd refuses on a stale auth revision.
+    Authenticate { user: String, token: String, checked_hash: String },
     UserAdd { name: String, password_hash: String, no_password: bool },
     UserDelete { name: String },
     UserChangePassword { name: String, password_hash: String },
@@ -336,11 +339,16 @@ pub async fn plan(
             batch.put(TABLE_AUTH_STATE, META_AUTH_ENABLED, &[0u8]);
             fx.set_enabled = Some(false);
         }
-        AuthOp::Authenticate { user, token } => {
-            // The user may have been deleted between the password check
-            // and this entry.
-            if get_user(snap, user).await?.is_none() {
+        AuthOp::Authenticate { user, token, checked_hash } => {
+            // The user may have been deleted, or its password changed,
+            // between the password check and this entry.
+            let Some(u) = get_user(snap, user).await? else {
                 return Ok(Err(user_not_found(user)));
+            };
+            if &u.password_hash != checked_hash || u.no_password {
+                return Ok(Err(AuthApplyError::FailedPrecondition(format!(
+                    "auth: the password of user {user} changed while authenticating; retry"
+                ))));
             }
             fx.add_token = Some((token.clone(), user.clone()));
         }
@@ -472,6 +480,14 @@ mod tests {
         s.apply_auth(&op).await.unwrap().1.unwrap_err()
     }
 
+    fn auth(user: &str, token: &str, checked_hash: &str) -> AuthOp {
+        AuthOp::Authenticate {
+            user: user.into(),
+            token: token.into(),
+            checked_hash: checked_hash.into(),
+        }
+    }
+
     fn user_add(name: &str) -> AuthOp {
         AuthOp::UserAdd { name: name.into(), password_hash: "h".into(), no_password: false }
     }
@@ -519,17 +535,22 @@ mod tests {
     async fn tokens_follow_authenticate_delete_and_password_change() {
         let (_d, s) = open().await;
         ok(&s, user_add("alice")).await;
-        ok(&s, AuthOp::Authenticate { user: "alice".into(), token: "t1".into() }).await;
+        ok(&s, auth("alice", "t1", "h")).await;
         assert_eq!(s.auth_memory().user_for_token("t1").as_deref(), Some("alice"));
         ok(&s, AuthOp::UserChangePassword { name: "alice".into(), password_hash: "h2".into() })
             .await;
         assert_eq!(s.auth_memory().user_for_token("t1"), None);
-        ok(&s, AuthOp::Authenticate { user: "alice".into(), token: "t2".into() }).await;
+        // The old hash no longer authenticates.
+        assert!(matches!(
+            refused(&s, auth("alice", "tx", "h")).await,
+            AuthApplyError::FailedPrecondition(_)
+        ));
+        ok(&s, auth("alice", "t2", "h2")).await;
         ok(&s, AuthOp::UserDelete { name: "alice".into() }).await;
         assert_eq!(s.auth_memory().user_for_token("t2"), None);
         // A token for a user deleted before its entry applied is refused.
         assert!(matches!(
-            refused(&s, AuthOp::Authenticate { user: "alice".into(), token: "t3".into() }).await,
+            refused(&s, auth("alice", "t3", "h2")).await,
             AuthApplyError::NotFound(_)
         ));
         assert_eq!(s.auth_memory().user_for_token("t3"), None);
@@ -556,7 +577,7 @@ mod tests {
         ok(&a, AuthOp::RoleAdd { name: "r".into() }).await;
         ok(&a, AuthOp::Enable).await;
         ok(&b, user_add("mallory")).await;
-        ok(&b, AuthOp::Authenticate { user: "mallory".into(), token: "tm".into() }).await;
+        ok(&b, auth("mallory", "tm", "h")).await;
         let ta = a.auth_tables().await.unwrap();
         assert_ne!(ta.digest(), b.auth_tables().await.unwrap().digest());
 

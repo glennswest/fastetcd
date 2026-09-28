@@ -78,7 +78,6 @@ async fn start_node(id: NodeId) -> Node {
         sm,
         7,
         id,
-        fastetcd_server::auth::AuthState::default(),
         forwarder,
     ));
     let peer_service = RaftPeerService::new(raft.clone(), state.sm.mvcc().clone());

@@ -30,3 +30,7 @@ pub mod authpb {
 pub mod fastetcd_raft {
     tonic::include_proto!("fastetcd.raft");
 }
+
+pub mod fastetcd_admin {
+    tonic::include_proto!("fastetcd.admin");
+}
