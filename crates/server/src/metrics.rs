@@ -232,7 +232,7 @@ impl Metrics {
         self.current_revision.set(cur);
         let comp = state.sm.mvcc().compact_revision().await;
         self.compact_revision.set(comp);
-        self.auth_diverged.set(state.auth_gate.diverged() as i64);
+        self.auth_diverged.set(state.auth_gate.diverged(&state.auth) as i64);
         if let Ok(size) = state.sm.mvcc().engine().size_on_disk().await {
             self.db_size_bytes.set(size as i64);
         }

@@ -491,7 +491,7 @@ async fn diverged_members_are_refused_until_one_is_adopted() {
             .unwrap_err();
         assert_eq!(err.code(), Code::FailedPrecondition, "member {}: {err:?}", n.id);
         assert!(err.message().contains("auth adopt"), "{err:?}");
-        assert!(n.state.auth_gate.diverged());
+        assert!(n.state.auth_gate.diverged(&n.state.auth));
     }
 
     // `auth members` shows who holds what.
@@ -518,7 +518,11 @@ async fn diverged_members_are_refused_until_one_is_adopted() {
     // Replication works from here on.
     configure_auth(&nodes[2]).await.unwrap();
     wait_enabled(&nodes).await;
-    assert!(!nodes[0].state.auth_gate.diverged());
+    // No member still reports divergence (the metric), including those
+    // that made no auth change since the adopt.
+    for n in &nodes {
+        assert!(!n.state.auth_gate.diverged(&n.state.auth), "member {}", n.id);
+    }
 }
 
 #[tokio::test]

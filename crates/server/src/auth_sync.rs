@@ -27,7 +27,7 @@
 //! snapshots (which now carry the auth tables), keep members identical.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ use fastetcd_storage::mvcc::auth::{AuthApplyError, AuthOp};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
+use crate::auth::AuthState;
 use crate::authz::{require_root, UserIdentity};
 use crate::state::ServerState;
 
@@ -51,7 +52,11 @@ pub struct AuthGate {
     /// Members confirmed to run replicated auth and to hold the same
     /// auth tables as this member.
     confirmed: Mutex<BTreeSet<NodeId>>,
+    /// Set when the last survey found different tables; with the number
+    /// of adoptions applied at the time, since an adopt (from any member)
+    /// makes that verdict stale.
     diverged: AtomicBool,
+    diverged_at: AtomicU64,
 }
 
 /// One member's answer to the survey.
@@ -128,9 +133,11 @@ fn require_all_upgraded(surveyed: &[Surveyed]) -> Result<(), Status> {
 }
 
 impl AuthGate {
-    /// Whether the last survey found members with different auth tables.
-    pub fn diverged(&self) -> bool {
+    /// Whether the last survey found members with different auth tables,
+    /// and no adopt has applied here since.
+    pub fn diverged(&self, auth: &AuthState) -> bool {
         self.diverged.load(Ordering::Relaxed)
+            && self.diverged_at.load(Ordering::Relaxed) == auth.adoptions()
     }
 
     /// Forget which members are confirmed, so the next change surveys
@@ -169,6 +176,7 @@ impl AuthGate {
             self.diverged.store(false, Ordering::Relaxed);
             return Ok(());
         }
+        self.diverged_at.store(state.auth.adoptions(), Ordering::Relaxed);
         self.diverged.store(true, Ordering::Relaxed);
         let listing: Vec<String> = surveyed
             .iter()

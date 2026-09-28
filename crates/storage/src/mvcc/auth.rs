@@ -216,6 +216,9 @@ impl AuthTables {
 pub struct AuthMemory {
     enabled: Arc<AtomicBool>,
     tokens: Arc<StdMutex<HashMap<String, String>>>,
+    /// Bumped each time an `Adopt` applies here, so a "members differ"
+    /// verdict from before it can be recognised as stale.
+    adoptions: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AuthMemory {
@@ -232,6 +235,10 @@ impl AuthMemory {
         if let Ok(mut g) = self.tokens.lock() {
             g.insert(token.to_string(), user.to_string());
         }
+    }
+    /// How many `Adopt` entries this member has applied since it started.
+    pub fn adoptions(&self) -> u64 {
+        self.adoptions.load(Ordering::Relaxed)
     }
     pub fn revoke_user_tokens(&self, user: &str) {
         if let Ok(mut g) = self.tokens.lock() {
@@ -253,6 +260,7 @@ pub struct AuthEffects {
     add_token: Option<(String, String)>,
     revoke_user: Option<String>,
     keep_only_users: Option<Vec<String>>,
+    adopted: bool,
 }
 
 impl AuthEffects {
@@ -268,6 +276,9 @@ impl AuthEffects {
         }
         if let Some((token, user)) = self.add_token {
             mem.insert_token(&token, &user);
+        }
+        if self.adopted {
+            mem.adoptions.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -446,6 +457,7 @@ pub async fn plan(
         AuthOp::Adopt { tables } => {
             tables.replace_into(batch);
             fx.set_enabled = Some(tables.enabled());
+            fx.adopted = true;
             fx.keep_only_users = Some(
                 tables
                     .users
