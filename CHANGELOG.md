@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.5.2] — 2026-09-28
+
 ### 2026-09-28
 - **fix:** A `Put` naming a lease that does not exist is refused (#19),
   with etcd's `etcdserver: requested lease not found` (NotFound).
