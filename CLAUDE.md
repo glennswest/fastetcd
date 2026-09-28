@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.5.1`** — Admin RPCs are root-only while auth is on (#31). Any
+**`1.5.2`** — A `Put` naming a lease that does not exist is refused
+(#19) with etcd's `etcdserver: requested lease not found`. Checked on
+the leader just before proposing (`crates/raft/src/precheck.rs`), not at
+apply as etcd does, so members cannot diverge while snapshots lack the
+lease tables (#41). Found alongside: #49 (P0), an `ignore_value` put on a
+missing key fails inside apply and stops every member.
+
+Previous: **`1.5.1`** — Admin RPCs are root-only while auth is on (#31). Any
 logged-in user could grant itself root, disable auth, stream a snapshot
 or change membership. Rules from etcd's release-3.5 source, not the
 issue's list: all Auth changes plus `AuthStatus`/`UserList`/`RoleList`
@@ -821,8 +828,8 @@ Tracked live in the Claude task system. Snapshot of the order:
       Existing tests that made admin calls tokenless after enabling auth
       were updated (#48).
 
-27. **A Put with a lease that does not exist is refused (#19) — in
-    progress.** etcd refuses it (`etcdserver: requested lease not found`,
+27. **A Put with a lease that does not exist is refused (#19) — done,
+    shipped in v1.5.2.** etcd refuses it (`etcdserver: requested lease not found`,
     NotFound); fastetcd stored the dangling lease id. etcd checks at
     apply. Here the check runs **on the leader, just before proposing**,
     not at apply, because an apply-time check would let members
@@ -839,12 +846,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       attaches (etcd refuses that too). Moving the check to apply is for
       after #41, with a version gate.
     Work items:
-    - [ ] storage: `lease_exists`, public compare evaluation.
-    - [ ] raft: `check_leases(entry)`, called before `client_write` on
+    - [x] storage: `lease_exists`, public compare evaluation.
+    - [x] raft: `check_leases(entry)`, called before `client_write` on
       the leader (ServerState::propose and ForwardWrite).
-    - [ ] Tests: single node (put / txn branch / revoked / ignore_lease)
+    - [x] Tests: single node (put / txn branch / revoked / ignore_lease)
       and 3-node (grant on the leader, put via a follower at once).
-    - [ ] Docs, changelog; release; close #19.
+    - [x] Docs, changelog; release; close #19.
     Found alongside: #49 (P0), an `ignore_value` put on a missing key
     fails inside apply and stops every member.
 
