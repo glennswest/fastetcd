@@ -778,6 +778,36 @@ Tracked live in the Claude task system. Snapshot of the order:
       the store level (enabled flag reloads at open; tables are on
       disk), not by a full member restart. Token expiry: #46.
 
+26. **Admin RPCs are root-only (#31) — in progress.** With auth on, any
+    authenticated user could grant itself root, disable auth, stream a
+    snapshot or change membership. Rules taken from etcd's source
+    (release-3.5 `apply_auth.go` `needAdminPermission`,
+    `v3rpc/maintenance.go` `authMaintenanceServer`, `server.go`
+    `checkMembershipOperationPermission`; `main` agrees), not from the
+    issue's list, which differed in three places (noted when closing):
+    - Auth: every mutation, plus `AuthStatus`, `UserList`, `RoleList`,
+      needs root. `UserGet` of yourself and `RoleGet` of a role you
+      hold are allowed. `Authenticate` is open. Changing *your own*
+      password still needs root, as in etcd.
+    - Maintenance: `Defragment`, `Snapshot`, `Hash`, `HashKV`,
+      `MoveLeader`, `Downgrade`, and `Alarm` other than GET need root;
+      `Status` and `Alarm` GET need only a login.
+    - Cluster: `MemberAdd`/`Remove`/`Update`/`Promote` need root;
+      `MemberList` does not.
+    - `KV.Compact` stays open to any authenticated user, as in etcd.
+    - Checked at the API layer against the serving member's applied
+      auth state, as etcd checks membership changes (no log format
+      change). With auth off, everything is open, as in etcd.
+    Work items:
+    - [ ] authz: `require_root` (from #32) + `holds_role`; Auth service
+      resolves the caller from its `token` (it is not behind the
+      interceptor, so `Authenticate` works without one).
+    - [ ] Gate each RPC above; tests `crates/server/tests/authz_admin.rs`
+      (non-root denied, root allowed, no token unauthenticated, the
+      self exceptions, open calls stay open).
+    - [ ] Docs (auth section, security-boundary note), changelog;
+      release; close #31. File the lease-RPC authorization gap.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
