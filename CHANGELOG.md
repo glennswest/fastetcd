@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.5.0] — 2026-09-28
+
 ### 2026-09-28
 - **feat:** Auth state is replicated through Raft (#32). Every auth
   change used to commit to the serving member's engine only, and tokens
