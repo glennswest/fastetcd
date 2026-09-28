@@ -30,6 +30,9 @@ pub struct ServerState {
     pub auth: AuthState,
     /// When a replicated auth change may be proposed (#32).
     pub auth_gate: Arc<AuthGate>,
+    /// `--client-cert-auth`: a request with no token is made by the user
+    /// its client certificate's Common Name names (#20).
+    pub client_cert_auth: bool,
     pub forwarder: WriteForwarder,
     /// Disk-space accounting and the NOSPACE alarm (fastetcd#14).
     /// Defaults to a disabled guard so embeddings and tests that don't
@@ -57,10 +60,18 @@ impl ServerState {
             member_id,
             auth,
             auth_gate: Arc::new(AuthGate::default()),
+            client_cert_auth: false,
             forwarder,
             space: Arc::new(SpaceGuard::disabled()),
             recovery: Arc::new(RecoveryAlarm::default()),
         }
+    }
+
+    /// Under `--client-cert-auth`, identify callers without a token by
+    /// their client certificate's Common Name (#20).
+    pub fn with_client_cert_auth(mut self, on: bool) -> Self {
+        self.client_cert_auth = on;
+        self
     }
 
     /// Install the recovery alarm loaded from the store at startup.

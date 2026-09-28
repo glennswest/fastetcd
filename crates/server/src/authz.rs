@@ -258,3 +258,45 @@ pub async fn holds_role(engine: &Arc<dyn KvStore>, user: &str, role: &str) -> Re
         None => false,
     })
 }
+
+/// The Common Name of a DER certificate, if it has a non-empty one.
+pub fn common_name(der: &[u8]) -> Option<String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()?
+        .as_str()
+        .ok()?
+        .to_string();
+    (!cn.is_empty()).then_some(cn)
+}
+
+/// Who is calling, as etcd decides it (`AuthInfoFromCtx`, fastetcd#20):
+///
+/// - a `token` in the metadata names the user it was issued to; an
+///   invalid token names no one (it is refused, never replaced by the
+///   certificate below);
+/// - with no token, and `client_cert_auth` on, the Common Name of the
+///   client certificate the TLS handshake verified (its leaf). Such a
+///   user needs no `Authenticate` and usually has no password; the usual
+///   permission checks apply, and a CN with no matching user is refused
+///   by them.
+///
+/// Only meaningful while auth is enabled; the caller checks that.
+pub fn identify<T>(
+    request: &tonic::Request<T>,
+    auth: &AuthState,
+    client_cert_auth: bool,
+) -> Option<UserIdentity> {
+    if let Some(token) = request.metadata().get("token") {
+        let name = token.to_str().ok().and_then(|t| auth.user_for_token(t))?;
+        return Some(UserIdentity { name });
+    }
+    if !client_cert_auth {
+        return None;
+    }
+    let certs = request.peer_certs()?;
+    let leaf = certs.first()?;
+    common_name(leaf.as_ref()).map(|name| UserIdentity { name })
+}

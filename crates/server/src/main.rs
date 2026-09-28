@@ -1048,7 +1048,8 @@ async fn main() -> anyhow::Result<()> {
             forwarder,
         )
         .with_space(space)
-        .with_recovery(recovery_alarm),
+        .with_recovery(recovery_alarm)
+        .with_client_cert_auth(args.client_cert_auth),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).
@@ -1175,7 +1176,8 @@ async fn main() -> anyhow::Result<()> {
     // Client services on the client port. Every non-Auth service is
     // wrapped by AuthInterceptor; Auth stays open so clients can
     // call Authenticate without a pre-existing token.
-    let interceptor = AuthInterceptor::new(auth_state.clone());
+    let interceptor =
+        AuthInterceptor::new(auth_state.clone()).with_client_cert_auth(args.client_cert_auth);
     let tls_for_client = client_tls;
 
     // Standard gRPC health service. Mark every service we serve as

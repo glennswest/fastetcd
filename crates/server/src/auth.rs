@@ -82,14 +82,14 @@ impl AuthService {
     }
 
     /// Who is calling. The Auth service is not behind the interceptor
-    /// (so `Authenticate` works without a token), so the caller comes
-    /// from the `token` metadata here.
+    /// (so `Authenticate` works without a token), so the caller is found
+    /// here, as the interceptor finds it: token, else client CN.
     fn caller<T>(&self, req: &Request<T>) -> Option<UserIdentity> {
         if let Some(u) = req.extensions().get::<UserIdentity>() {
             return Some(u.clone());
         }
-        let token = req.metadata().get("token")?.to_str().ok()?;
-        self.state.auth.user_for_token(token).map(|name| UserIdentity { name })
+        // Token, else the client certificate's CN (#20).
+        crate::authz::identify(req, &self.state.auth, self.state.client_cert_auth)
     }
 
     /// Root only while auth is on (etcd's `needAdminPermission`, #31).
@@ -484,11 +484,20 @@ impl Auth for AuthService {
 #[derive(Clone)]
 pub struct AuthInterceptor {
     auth: AuthState,
+    client_cert_auth: bool,
 }
 
 impl AuthInterceptor {
     pub fn new(auth: AuthState) -> Self {
-        Self { auth }
+        Self { auth, client_cert_auth: false }
+    }
+
+    /// Under `--client-cert-auth`, a request with no token is made by the
+    /// user named by its client certificate's Common Name, as in etcd
+    /// (#20).
+    pub fn with_client_cert_auth(mut self, on: bool) -> Self {
+        self.client_cert_auth = on;
+        self
     }
 }
 
@@ -497,27 +506,19 @@ impl tonic::service::Interceptor for AuthInterceptor {
         if !self.auth.is_enabled() {
             return Ok(req);
         }
-        // Look for the etcd-conventional token metadata field.
-        let token = req
-            .metadata()
-            .get("token")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let user_name = match token {
-            Some(t) => self.auth.user_for_token(&t),
-            None => None,
-        };
-        match user_name {
-            Some(name) => {
+        match crate::authz::identify(&req, &self.auth, self.client_cert_auth) {
+            Some(user) => {
                 // Attach user identity to the request extensions so
-                // per-handler authz (Phase 3) can read it.
-                req.extensions_mut()
-                    .insert(crate::authz::UserIdentity { name });
+                // per-handler authz can read it.
+                req.extensions_mut().insert(user);
                 Ok(req)
             }
-            None => Err(Status::unauthenticated(
-                "auth: missing or invalid `token` metadata; call Authenticate first",
-            )),
+            None => Err(Status::unauthenticated(if self.client_cert_auth {
+                "auth: missing or invalid `token` metadata, and no client certificate \
+                 with a Common Name; call Authenticate first"
+            } else {
+                "auth: missing or invalid `token` metadata; call Authenticate first"
+            })),
         }
     }
 }
