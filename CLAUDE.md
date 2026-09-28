@@ -711,6 +711,35 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs, changelog; release; close #33.
     - Verified: the 5 denial tests fail with the check stubbed out.
 
+25. **Auth state is replicated through Raft (#32) — design; blocked on
+    an owner decision (asked 2026-09-28).** Every Auth mutation commits
+    straight to the local engine, tokens are a node-local in-memory set,
+    and raft snapshots carry only the MVCC tables. So users, roles,
+    `AuthEnable` and tokens differ per member. Plan (etcd parity):
+    - New `FastetcdLogEntry` auth variants, carrying resulting records
+      (put/delete user, put/delete role, set enabled) so apply is a
+      deterministic write. Auth RPCs forward to the leader (like
+      writes), which serializes them, reads after a read barrier,
+      validates, and proposes. `AuthState.enabled` follows the applied
+      value.
+    - Tokens: etcd's default "simple" tokens, replicated. `Authenticate`
+      checks the password, then proposes the token; every member adds
+      it on apply. Not in snapshots, lost on a member restart (clients
+      re-authenticate), as in etcd. JWT is not in scope.
+    - Snapshots: auth tables go in a trailer after today's payload.
+      bincode 1 ignores trailing bytes, so an old node still decodes a
+      new payload, and a new node takes "no trailer" as "leave auth
+      tables alone" (today's behaviour).
+    - Mixed versions: an old member cannot decode the new entries (its
+      AppendEntries fails and it stalls, and two stalled members in
+      three means no quorum). Auth mutations and `Authenticate` are
+      refused with `Unavailable` until every member reports >= this
+      version (new `RaftPeer.Version` RPC; `Unimplemented` = old).
+    - **Open question for the owner:** members upgraded from <= 1.4.2
+      may hold *different* auth tables (each kept whatever it served).
+      How to converge them once replication starts?
+    Work items: (after the decision)
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
