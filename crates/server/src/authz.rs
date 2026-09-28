@@ -185,8 +185,8 @@ fn bounds_for(key: &[u8], range_end: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) 
 }
 
 /// Require the caller to be root (the `root` user, or a user holding the
-/// `root` role) while auth is enabled. Used by fastetcd's own admin
-/// RPCs; the etcd admin RPCs' root-only check is #31.
+/// `root` role) while auth is enabled (etcd's `IsAdminPermitted`). Used
+/// by every admin RPC, etcd's and fastetcd's own (#31).
 pub async fn require_root(
     engine: &Arc<dyn KvStore>,
     auth: &AuthState,
