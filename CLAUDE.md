@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.4.0`** — Survive a corrupt data file (#37). After a power cut on a
+**`1.4.1`** — Peer TLS is honoured, with its own identity and trust root
+(#23). The `--peer-*` TLS flags were parsed and discarded: the peer port
+served the client identity whenever `--cert-file` was set, and members
+dialled each other in plaintext, so a TLS multi-member cluster could not
+form. Now (`crates/server/src/tls.rs`) the peer port takes its identity
+and CA only from `--peer-*`, members dial each other over mutual TLS
+against `--peer-trusted-ca-file`, `--peer-client-cert-auth` refuses any
+caller without a peer-CA cert (a client-CA cert included), and every
+peer URL's scheme must match (`https://` with peer TLS), or startup
+fails naming the flag. Behaviour change: `--cert-file` alone no longer
+puts TLS on the peer port. Also hardened the multi-node test harnesses
+against a loaded build box (#44).
+
+Previous: **`1.4.0`** — Survive a corrupt data file (#37). After a power cut on a
 device that lost fsync'd writes, redb refused to open the store and the
 node crash-looped with nothing to recover from. Now: periodic checksummed
 backups to `--backup-dir` (off unless set; belongs on a separate volume),

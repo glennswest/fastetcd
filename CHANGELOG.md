@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.4.1] — 2026-09-28
+
 ### 2026-09-28
 - **test:** `membership_changes_forward_from_a_follower` raced the
   initial membership commit (#44): a follower learns the leader from its
