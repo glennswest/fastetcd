@@ -65,6 +65,8 @@ fn ca(name: &str) -> Ca {
 fn leaf(issuer: &Ca, cn: &str) -> (String, String) {
     let mut params =
         CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()]).unwrap();
+    // rcgen's default name carries a CN of its own; start empty.
+    params.distinguished_name = rcgen::DistinguishedName::new();
     if !cn.is_empty() {
         params.distinguished_name.push(DnType::CommonName, cn);
     }
