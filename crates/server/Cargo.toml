@@ -36,6 +36,9 @@ bincode.workspace = true
 argon2.workspace = true
 rand.workspace = true
 rustls-pemfile = "2.2"
+# The Common Name of a client certificate is its etcd user under
+# `--client-cert-auth` (#20).
+x509-parser = "0.16"
 prometheus-client = "0.22"
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"
