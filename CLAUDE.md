@@ -637,7 +637,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       differ), so a mixed-version cluster cannot diverge.
     - Shipped with #37 in v1.4.0.
 
-23. **Peer TLS is honoured, with its own identity and trust root (#23) — in progress.**
+23. **Peer TLS is honoured, with its own identity and trust root (#23) — done, shipped in v1.4.1.**
     `--peer-cert-file`/`--peer-key-file`/`--peer-trusted-ca-file`/
     `--peer-client-cert-auth` were parsed and discarded; the peer port
     served the *client* identity whenever `--cert-file` was set, and
@@ -656,14 +656,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       anything else is a startup error, and a runtime dial to a
       mismatched URL fails with an error naming it. Never silent.
     Work items:
-    - [ ] `crates/server/src/tls.rs`: server + peer-client TLS builders
+    - [x] `crates/server/src/tls.rs`: server + peer-client TLS builders
       and URL-scheme check, in the lib so tests use the same code.
-    - [ ] raft crate: `GrpcNetworkFactory`/`WriteForwarder` take the
+    - [x] raft crate: `GrpcNetworkFactory`/`WriteForwarder` take the
       peer `ClientTlsConfig`; one shared dial helper.
-    - [ ] main.rs: separate client and peer server TLS; drop the discard.
-    - [ ] Tests: peer mTLS cluster replicates; peer port rejects a
+    - [x] main.rs: separate client and peer server TLS; drop the discard.
+    - [x] Tests: peer mTLS cluster replicates; peer port rejects a
       certless caller and one with a client-CA cert; config errors.
-    - [ ] Docs (flags, chart values), changelog; release; close #23.
+    - [x] Docs (flags, chart values), changelog; release; close #23.
+    - Verifying it, sc-build hit multi-node test flakes (#44): leader
+      churn on the loaded build box, not #23. Harness election timeouts
+      widened, polls instead of fixed sleeps, and the #10 CAS loop
+      retries `Unavailable`. A separate snapshot-transfer flake is #45.
 
 ## Constraints & rules
 
