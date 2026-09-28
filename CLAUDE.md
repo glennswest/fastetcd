@@ -715,12 +715,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     straight to the local engine, tokens are a node-local in-memory set,
     and raft snapshots carry only the MVCC tables. So users, roles,
     `AuthEnable` and tokens differ per member. Plan (etcd parity):
-    - New `FastetcdLogEntry` auth variants, carrying resulting records
-      (put/delete user, put/delete role, set enabled) so apply is a
-      deterministic write. Auth RPCs forward to the leader (like
-      writes), which serializes them, reads after a read barrier,
-      validates, and proposes. `AuthState.enabled` follows the applied
-      value.
+    - New `FastetcdLogEntry::Auth` variant (see "Entries are intents"
+      below). `AuthState.enabled` follows the applied value.
     - Tokens: etcd's default "simple" tokens, replicated. `Authenticate`
       checks the password, then proposes the token; every member adds
       it on apply. Not in snapshots, lost on a member restart (clients
@@ -733,7 +729,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       AppendEntries fails and it stalls, and two stalled members in
       three means no quorum). Auth mutations and `Authenticate` are
       refused with `Unavailable` until every member reports >= this
-      version (new `RaftPeer.Version` RPC; `Unimplemented` = old).
+      version (new peer `AuthSync` RPC; `Unimplemented` = old).
     - Entries are intents (UserAdd, RoleGrantPermission, ...), validated
       and applied deterministically in the state machine, as etcd does;
       the apply result (ok / not found / exists / precondition) goes
