@@ -821,6 +821,33 @@ Tracked live in the Claude task system. Snapshot of the order:
       Existing tests that made admin calls tokenless after enabling auth
       were updated (#48).
 
+27. **A Put with a lease that does not exist is refused (#19) — in
+    progress.** etcd refuses it (`etcdserver: requested lease not found`,
+    NotFound); fastetcd stored the dangling lease id. etcd checks at
+    apply. Here the check runs **on the leader, just before proposing**,
+    not at apply, because an apply-time check would let members
+    diverge: raft snapshots do not carry the lease tables yet (#41), and
+    a member older than the check would accept what newer ones refuse.
+    - Leader only: a follower can lag a lease just granted. A follower
+      forwards (ForwardWrite) and the leader checks. On a miss, the
+      leader runs a read barrier (`ensure_linearizable`) and looks
+      again, so a newly elected leader that has not applied everything
+      yet does not refuse a live lease.
+    - Put with `lease != 0` and not `ignore_lease`; in a Txn, the puts of
+      the branch the compares select, as etcd checks the branch taken.
+    - Left: a lease that expires between the check and the apply still
+      attaches (etcd refuses that too). Moving the check to apply is for
+      after #41, with a version gate.
+    Work items:
+    - [ ] storage: `lease_exists`, public compare evaluation.
+    - [ ] raft: `check_leases(entry)`, called before `client_write` on
+      the leader (ServerState::propose and ForwardWrite).
+    - [ ] Tests: single node (put / txn branch / revoked / ignore_lease)
+      and 3-node (grant on the leader, put via a follower at once).
+    - [ ] Docs, changelog; release; close #19.
+    Found alongside: #49 (P0), an `ignore_value` put on a missing key
+    fails inside apply and stops every member.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
