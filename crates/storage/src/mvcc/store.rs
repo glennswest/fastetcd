@@ -37,6 +37,9 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 
+use super::auth::{
+    self, AuthApplyError, AuthMemory, AuthOp, AuthTables, META_AUTH_ENABLED, TABLE_AUTH_STATE,
+};
 use super::event::{EventBatch, EventKind, MvccEvent};
 use super::lease::{
     lease_id_key, lease_key_index, lease_keys_bounds, parse_lease_keys_key, LeaseId, LeaseRecord,
@@ -286,6 +289,10 @@ struct Inner {
     /// (membership and blank entries mutate no MVCC state) is committed
     /// on its own by `flush_raft_meta`.
     pending_raft_meta: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Auth's in-memory half: the enabled flag and the token set
+    /// (fastetcd#32). Owned here so the state machine updates it on
+    /// apply and the server's interceptor reads the same state.
+    auth: AuthMemory,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -318,7 +325,7 @@ impl MvccStore {
         }
 
         let (event_tx, _) = broadcast::channel(1024);
-        Ok(Self {
+        let store = Self {
             inner: Arc::new(Inner {
                 engine,
                 write_state: Mutex::new(WriteState {
@@ -328,8 +335,69 @@ impl MvccStore {
                 }),
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
+                auth: AuthMemory::default(),
             }),
-        })
+        };
+        store.reload_auth().await?;
+        Ok(store)
+    }
+
+    /// Auth's in-memory state (enabled flag, tokens). Every clone of
+    /// this store returns the same one.
+    pub fn auth_memory(&self) -> &AuthMemory {
+        &self.inner.auth
+    }
+
+    /// Re-read the enabled flag from the auth tables: at open, and after
+    /// a raft snapshot replaced them. Tokens are not stored, so they
+    /// are left as they are.
+    pub async fn reload_auth(&self) -> MvccResult<()> {
+        let snap = self.inner.engine.snapshot().await?;
+        let enabled = snap
+            .get(TABLE_AUTH_STATE, META_AUTH_ENABLED)
+            .await?
+            .and_then(|b| b.first().copied())
+            .unwrap_or(0)
+            != 0;
+        self.inner.auth.set_enabled(enabled);
+        Ok(())
+    }
+
+    /// The auth tables, read from one engine snapshot.
+    pub async fn auth_tables(&self) -> MvccResult<AuthTables> {
+        let snap = self.inner.engine.snapshot().await?;
+        Ok(AuthTables::read(&*snap).await?)
+    }
+
+    /// Apply one replicated auth change (fastetcd#32). Validated against
+    /// the current auth tables; the writes commit in one batch together
+    /// with the staged raft metadata, and only then do the in-memory
+    /// effects (enabled flag, tokens) run. A refusal writes nothing
+    /// (the staged metadata is committed by `flush_raft_meta`) and is
+    /// returned as the inner `Err`, the same on every member. Returns
+    /// the current revision: auth changes do not advance it.
+    pub async fn apply_auth(
+        &self,
+        op: &AuthOp,
+    ) -> MvccResult<(i64, Result<(), AuthApplyError>)> {
+        let snap = self.inner.engine.snapshot().await?;
+        let mut batch = WriteBatch::new();
+        let planned = auth::plan(&*snap, op, &mut batch).await?;
+        drop(snap);
+        let rev = self.current_revision().await;
+        let effects = match planned {
+            Ok(fx) => fx,
+            Err(refused) => return Ok((rev, Err(refused))),
+        };
+        let staged = self.fold_raft_meta(&mut batch).await;
+        if staged || !batch.is_empty() {
+            self.inner
+                .engine
+                .commit(batch, WriteOptions::default())
+                .await?;
+        }
+        effects.apply(&self.inner.auth);
+        Ok((rev, Ok(())))
     }
 
     /// Stage raft metadata to be written by the next `apply_*` commit.
