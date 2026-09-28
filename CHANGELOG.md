@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.6.0] — 2026-09-28
+
 ### 2026-09-28
 - **feat:** A client certificate's Common Name is its etcd user (#20).
   Under `--client-cert-auth`, a request with no `token` is made by the
