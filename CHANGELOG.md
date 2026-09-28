@@ -3,6 +3,25 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **feat:** A client certificate's Common Name is its etcd user (#20).
+  Under `--client-cert-auth`, a request with no `token` is made by the
+  user named by the verified client certificate's CN, as in etcd
+  (`AuthInfoFromTLS`). No `Authenticate` call or password is needed,
+  and roles scope what each mTLS client may read, write and watch. This
+  is the ClusterMesh model: one etcd user per remote cluster.
+  - A token still wins over the certificate, and an invalid token is
+    refused rather than replaced by the certificate.
+  - A CN with no user is refused, and a certificate with no CN names
+    no one.
+  - The Auth service, which is not behind the interceptor, resolves
+    its caller the same way.
+  - New dependency: `x509-parser`.
+
+  Tests: `crates/server/tests/client_cert_auth.rs`, over a real mTLS
+  client port built as `main.rs` builds it. Docs: `docs/03-deploy.md`
+  § Users by client certificate.
+
 ## [v1.5.2] — 2026-09-28
 
 ### 2026-09-28

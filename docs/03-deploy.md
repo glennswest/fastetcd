@@ -177,6 +177,33 @@ etcdctl auth enable
 Clients then run with `--user=reader:password` (etcdctl) or send a
 `token` metadata field after calling `Authenticate`.
 
+### Users by client certificate
+
+With `--client-cert-auth` on, a client that sends no `token` is the
+user named by the Common Name (CN) of the client certificate the TLS
+handshake verified, as in etcd. It needs no `Authenticate` call and no
+password. Create such users with `--no-password`, and scope them with
+roles as usual:
+
+```
+etcdctl user add cluster-b --no-password
+etcdctl role add cluster-b-read
+etcdctl role grant-permission cluster-b-read read /cilium/cluster-b/ /cilium/cluster-b0
+etcdctl user grant-role cluster-b cluster-b-read
+# cluster-b connects with a certificate whose CN is "cluster-b"
+```
+
+- A certificate whose CN names no user gets `PermissionDenied`.
+- A certificate with no CN identifies no one (`Unauthenticated`).
+- A `token` wins over the certificate: a client that authenticates
+  acts as the user it logged in as.
+- An invalid token is refused. The call is not retried as the
+  certificate's user.
+- Everything a user can do is scoped this way: KV, Txn, Watch, and
+  the root-only calls, for which a certificate with CN `root` counts
+  as root.
+- Without `--client-cert-auth` the certificate names no one.
+
 ### Auth on a multi-member cluster
 
 Auth state is replicated through Raft, as in etcd. Every change (users,
