@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.4.2`** — `Watch` is authorized (#33). A watch create had no
+**`1.5.0`** — Auth state is replicated through Raft (#32). Auth changes
+used to commit to the serving member only and tokens were per member, so
+RBAC held on some members and not others. Now every change and every
+`Authenticate` token is a log entry each member validates and applies
+(`FastetcdLogEntry::Auth`, `MvccStore::apply_auth`), snapshots carry the
+auth tables in a compatible trailer, and a gate (`crates/server/src/
+auth_sync.rs`, peer `AuthSync` RPC) refuses auth changes while any member
+is older or unreachable, or while members hold different tables (kept
+from 1.4.x). The operator converges those with `fastetcd-ctl auth
+members` / `auth adopt <member>` (owner's decision: compare, refuse if
+they differ, never pick automatically). Docs: `docs/03-deploy.md` § Auth
+on a multi-member cluster. Remaining auth gap: #31.
+
+Previous: **`1.4.2`** — `Watch` is authorized (#33). A watch create had no
 permission check, so with auth enabled any authenticated user could
 watch any key or range (history and `prev_kv` included) and read what
 RBAC denies to `Range`. Each create now needs read on `[key, range_end)`;
@@ -711,7 +724,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs, changelog; release; close #33.
     - Verified: the 5 denial tests fail with the check stubbed out.
 
-25. **Auth state is replicated through Raft (#32) — in progress.** Every Auth mutation commits
+25. **Auth state is replicated through Raft (#32) — done, shipped in v1.5.0.** Every Auth mutation commits
     straight to the local engine, tokens are a node-local in-memory set,
     and raft snapshots carry only the MVCC tables. So users, roles,
     `AuthEnable` and tokens differ per member. Plan (etcd parity):
@@ -745,20 +758,25 @@ Tracked live in the Claude task system. Snapshot of the order:
       the operator runs `fastetcd-ctl auth adopt <member>`, which
       replicates that member's tables to all (an `Adopt` entry).
     Work items:
-    - [ ] storage: `AuthOp`, `MvccStore::apply_auth`, in-memory
+    - [x] storage: `AuthOp`, `MvccStore::apply_auth`, in-memory
       `AuthMemory` (enabled + tokens) owned by the store, export /
       digest / replace of the auth tables; unit tests.
-    - [ ] raft: `FastetcdLogEntry::Auth`, apply returns log index;
+    - [x] raft: `FastetcdLogEntry::Auth`, apply returns log index;
       snapshot trailer with the auth tables (old payloads still decode
       both ways); peer `AuthSync` RPC (status + export).
-    - [ ] server: every Auth mutation and `Authenticate` through Raft,
+    - [x] server: every Auth mutation and `Authenticate` through Raft,
       behind the version / divergence gate; `FastetcdAdmin.AuthAdopt`
       on the client port (root only when auth is on); ctl `auth adopt`.
-    - [ ] Tests: 3-node — change on one member enforced on the others,
+    - [x] Tests: 3-node — change on one member enforced on the others,
       token from one member accepted by another, learner caught up by
       snapshot gets auth, restart keeps it; gate refuses with a member
       down; diverged members refused, adopt converges them.
-    - [ ] Docs (auth section, upgrade note), changelog; release; close #32.
+    - [x] Docs (auth section, upgrade note), changelog; release; close #32.
+    - Verified: negative checks fail as they should (no auth tables in
+      the snapshot → learner test fails; gate forced open → the
+      unreachable / older / diverged tests fail). Restart is covered at
+      the store level (enabled flag reloads at open; tables are on
+      disk), not by a full member restart. Token expiry: #46.
 
 ## Constraints & rules
 
