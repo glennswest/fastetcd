@@ -3,6 +3,30 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **fix:** Admin RPCs are root-only while auth is on (#31). Any
+  authenticated user could grant itself the root role, disable auth,
+  change root's password, stream a snapshot of the whole keyspace, or
+  add and remove members. The rules now match etcd's release-3.5 source
+  (`needAdminPermission`, `authMaintenanceServer`,
+  `checkMembershipOperationPermission`):
+  - Auth: every change, `AuthStatus`, `UserList` and `RoleList` need
+    root. A user may `UserGet` itself and `RoleGet` a role it holds.
+    `Authenticate` is open.
+  - Maintenance: `Snapshot`, `Defragment`, `Hash`, `HashKV`,
+    `MoveLeader`, `Downgrade`, and `Alarm` other than list need root.
+    `Status` and `Alarm` list need a login.
+  - Cluster: member add / remove / update / promote need root.
+    `MemberList` needs a login.
+  - `Compact` stays open to any logged-in user, as in etcd. Changing
+    your own password needs root, as in etcd.
+
+  The Auth service now resolves its caller from the `token` metadata
+  itself, since it is not behind the interceptor. With auth off,
+  everything stays open. Tests: `crates/server/tests/authz_admin.rs`.
+  Docs: `docs/03-deploy.md` § What needs root. The remaining gap, lease
+  RPCs, is filed as #47.
+
 ## [v1.5.0] — 2026-09-28
 
 ### 2026-09-28

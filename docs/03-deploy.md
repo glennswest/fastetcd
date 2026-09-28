@@ -252,13 +252,30 @@ the check is made once, at create: revoking a permission does not
 cancel a watch that is already running; it keeps delivering until it
 or its stream ends (restart the client after narrowing its role).
 
-**Auth is not yet a security boundary.** One gap remains, tracked:
-the admin RPCs (user/role management, `AuthDisable`,
-`Maintenance.Snapshot`, member changes, `Compact`) do not require root,
-so any authenticated user can grant itself the root role (#31). Until
-that lands, treat auth as protection against mistakes by trusted
-clients, not against a hostile one: scope untrusted clients with mTLS
-and a proxy.
+### What needs root
+
+While auth is on, these calls need the caller to be `root` or to hold
+the `root` role. The rules are etcd's (`needAdminPermission`, the
+maintenance and membership checks); a non-root caller gets
+`PermissionDenied`, a caller with no valid token `Unauthenticated`:
+
+| Service | Root only | Any logged-in user |
+|---|---|---|
+| Auth | every change (`auth enable`/`disable`, user and role add / delete / grant / revoke, **any** password change, including your own), `AuthStatus`, `UserList`, `RoleList`, `UserGet` of another user, `RoleGet` of a role you do not hold | `UserGet` of yourself, `RoleGet` of a role you hold; `Authenticate` needs no login |
+| Maintenance | `Snapshot` (the whole keyspace), `Defragment`, `Hash`, `HashKV`, `MoveLeader`, `Downgrade`, `Alarm` activate / disarm | `Status`, `Alarm` list |
+| Cluster | `MemberAdd`, `MemberRemove`, `MemberUpdate`, `MemberPromote` | `MemberList` |
+| KV | none | `Compact`, as in etcd |
+| fastetcd admin | `auth members`, `auth adopt` | none |
+
+With auth off, every call is open, as in etcd. The check runs on the
+member serving the call, against its applied auth state, as etcd checks
+membership changes.
+
+**Auth is not yet a security boundary.** One gap remains, tracked: the
+lease RPCs are not authorized, so any user can revoke any lease and
+delete the keys attached to it (#47). Until that lands, treat auth as
+protection against mistakes by trusted clients, not against a hostile
+one: scope untrusted clients with mTLS and a proxy.
 
 ## Storage engine
 
