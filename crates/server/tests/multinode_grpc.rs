@@ -493,19 +493,36 @@ async fn rmw_cas_loop_has_no_spurious_conflicts() {
         let mut kv = KvClient::connect(endpoint.clone()).await.unwrap();
         let iters = 30;
         let mut ok = 0;
-        for i in 0..iters {
+        // What this test guards is spurious CAS *conflicts*. If
+        // leadership moves mid-loop (a loaded build box, #44) a request
+        // fails with `Unavailable`, as it does in etcd, and a client
+        // retries it. Do the same: settle, re-read, and retry, bounded.
+        let mut unavailable = 0;
+        let mut retry = |e: tonic::Status| {
+            assert_eq!(e.code(), tonic::Code::Unavailable, "unexpected error: {e}");
+            unavailable += 1;
+            assert!(unavailable <= 20, "still unavailable after 20 retries: {e}");
+        };
+        let mut i = 0;
+        while i < iters {
             // Linearizable GET (serializable = false, etcd default).
-            let g = kv
+            let g = match kv
                 .range(pb::RangeRequest {
                     key: key.clone(),
                     ..Default::default()
                 })
                 .await
-                .unwrap()
-                .into_inner();
+            {
+                Ok(r) => r.into_inner(),
+                Err(e) => {
+                    retry(e);
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
             let rv = g.kvs.first().map(|k| k.mod_revision).unwrap_or(0);
 
-            let txn = kv
+            let txn = match kv
                 .txn(pb::TxnRequest {
                     compare: vec![pb::Compare {
                         result: CompareResult::Equal as i32,
@@ -524,11 +541,20 @@ async fn rmw_cas_loop_has_no_spurious_conflicts() {
                     failure: Vec::new(),
                 })
                 .await
-                .unwrap()
-                .into_inner();
+            {
+                Ok(r) => r.into_inner(),
+                Err(e) => {
+                    // It may or may not have applied; the re-read after
+                    // settling sees either way, so no conflict follows.
+                    retry(e);
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
             if txn.succeeded {
                 ok += 1;
             }
+            i += 1;
         }
         let role = if target == leader_id { "leader" } else { "follower" };
         assert_eq!(

@@ -14,7 +14,9 @@
   harness's 400-900 ms election timeout. The multi-node harnesses
   (`multinode_grpc`, `snapshot_transfer_grpc`, `peer_tls`) now use
   1.5-3 s, the single-node leader wait allows 30 s, and the replication
-  test polls followers instead of sleeping a fixed 300 ms. Test-only;
+  test polls followers instead of sleeping a fixed 300 ms, and the #10
+  CAS loop retries an `Unavailable` (as an etcd client does) while still
+  failing on any CAS conflict. Test-only;
   server defaults are unchanged.
 
 ### 2026-09-27
