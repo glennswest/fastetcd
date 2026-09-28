@@ -216,6 +216,16 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
 /// Used when a node isn't the raft leader: rather than requiring a
 /// separate exchange of client URLs between members, it forwards the
 /// write over the peer (raft) connection that's already known to work.
+/// Why a member's `AuthSync` status could not be had.
+#[derive(Debug, Clone)]
+pub enum AuthSyncError {
+    /// The member answered `Unimplemented`: it runs a fastetcd older
+    /// than replicated auth and cannot decode an auth log entry.
+    Older,
+    /// The member could not be reached, or the call failed.
+    Unreachable(String),
+}
+
 #[derive(Clone)]
 pub struct WriteForwarder {
     peers: PeerEndpoints,
@@ -286,6 +296,29 @@ impl WriteForwarder {
         let result: Result<crate::types::FastetcdLogResponse, String> =
             bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
         result
+    }
+
+    /// Ask `target` for its auth status or tables (fastetcd#32).
+    pub async fn auth_sync(
+        &self,
+        target: NodeId,
+        req: &crate::types::AuthSyncRequest,
+    ) -> Result<crate::types::AuthSyncResponse, AuthSyncError> {
+        let data =
+            bincode::serialize(req).map_err(|e| AuthSyncError::Unreachable(e.to_string()))?;
+        let mut cli = self
+            .client(target)
+            .await
+            .map_err(AuthSyncError::Unreachable)?;
+        let resp = match cli.auth_sync(Request::new(pb::RaftPayload { data })).await {
+            Ok(r) => r.into_inner(),
+            Err(s) if s.code() == tonic::Code::Unimplemented => return Err(AuthSyncError::Older),
+            Err(s) => {
+                self.clients.write().await.remove(&target);
+                return Err(AuthSyncError::Unreachable(s.message().to_string()));
+            }
+        };
+        bincode::deserialize(&resp.data).map_err(|e| AuthSyncError::Unreachable(e.to_string()))
     }
 
     /// Forward a linearizable Range to `target`'s `ForwardRead` RPC and
@@ -498,6 +531,29 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 .map_err(|e| e.to_string()),
         };
         let data = bincode::serialize(&result)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn auth_sync(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let req: crate::types::AuthSyncRequest = bincode::deserialize(&request.into_inner().data)
+            .map_err(|e| Status::invalid_argument(format!("decode AuthSync: {e}")))?;
+        let tables = self
+            .mvcc
+            .auth_tables()
+            .await
+            .map_err(|e| Status::internal(format!("read auth tables: {e}")))?;
+        let resp = match req {
+            crate::types::AuthSyncRequest::Status => crate::types::AuthSyncResponse::Status {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                digest: tables.digest(),
+            },
+            crate::types::AuthSyncRequest::Export => crate::types::AuthSyncResponse::Export(tables),
+        };
+        let data = bincode::serialize(&resp)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
     }

@@ -10,6 +10,7 @@ use openraft::BasicNode;
 use openraft::TokioRuntime;
 use serde::{Deserialize, Serialize};
 
+use fastetcd_storage::mvcc::auth::{AuthApplyError, AuthOp, AuthTables};
 use fastetcd_storage::mvcc::{
     Compare, LeaseGrantResult, LeaseId, LeaseRevokeResult, LeaseTtlResult, Mutation,
     MutationResult, RangeOp, RangeResult, TxnOp, TxnResult,
@@ -69,6 +70,22 @@ pub struct ForwardedRead {
     pub count_only: bool,
 }
 
+/// A peer `AuthSync` request (fastetcd#32). Before the first auth
+/// write, a member asks every other member for its version and auth
+/// digest; `fastetcd-ctl auth adopt` asks the chosen member for its
+/// tables. A member older than this RPC answers `Unimplemented`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AuthSyncRequest {
+    Status,
+    Export,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AuthSyncResponse {
+    Status { version: String, digest: String },
+    Export(AuthTables),
+}
+
 /// The application-level log entry. Every committed Raft entry decodes
 /// to one of these variants and is dispatched to [`MvccStore`].
 ///
@@ -109,6 +126,12 @@ pub enum FastetcdLogEntry {
     /// No-op heartbeat / membership change marker. State machine
     /// records the applied log id and returns the current revision.
     Noop,
+
+    /// A replicated auth change (fastetcd#32). Appended last so every
+    /// existing variant keeps its bincode tag. A member older than this
+    /// variant cannot decode it, which is why the server only proposes
+    /// one once every member has answered `AuthSync`.
+    Auth(AuthOp),
 }
 
 /// Response shape from a state machine `apply()` call. Wire RPC
@@ -135,6 +158,14 @@ pub enum FastetcdLogResponse {
     /// `Noop` carries the current revision so callers can sequence
     /// reads against it (linearizable read-index path).
     Noop { revision: i64 },
+    /// Result of an `Auth` entry: the (unchanged) revision, the log
+    /// index it applied at, so the serving member can wait until it has
+    /// applied it too, and the apply's verdict.
+    Auth {
+        revision: i64,
+        log_index: u64,
+        result: Result<(), AuthApplyError>,
+    },
 }
 
 impl FastetcdLogResponse {
@@ -149,6 +180,7 @@ impl FastetcdLogResponse {
             FastetcdLogResponse::LeaseRevoke(r) => r.revision,
             FastetcdLogResponse::LeaseKeepAlive(_) => 0,
             FastetcdLogResponse::Noop { revision } => *revision,
+            FastetcdLogResponse::Auth { revision, .. } => *revision,
         }
     }
 }

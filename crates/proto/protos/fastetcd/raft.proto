@@ -34,6 +34,13 @@ service RaftPeer {
     // leadership (ReadIndex), waits for its state machine to catch up,
     // and reads — so the result never lags a completed write (#10).
     rpc ForwardRead(RaftPayload) returns (RaftPayload);
+
+    // Replicated auth (#32). Before its first auth write a member asks
+    // every other member for its version and auth-table digest (a
+    // member older than this RPC answers Unimplemented, and cannot
+    // decode an auth log entry, so none is proposed); `fastetcd-ctl
+    // auth adopt` asks the chosen member for its tables.
+    rpc AuthSync(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

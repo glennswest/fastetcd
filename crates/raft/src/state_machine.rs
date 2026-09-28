@@ -19,7 +19,7 @@
 //! and install still decodes them whole — streaming those needs a new
 //! on-disk format.
 
-use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use openraft::storage::RaftStateMachine;
@@ -36,6 +36,7 @@ use openraft::StoredMembership;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use fastetcd_storage::mvcc::auth::AuthTables;
 use fastetcd_storage::mvcc::MvccStore;
 
 use crate::snapshot_data::{Content, SnapshotFile};
@@ -79,6 +80,65 @@ struct SnapshotPayload {
     kv_table: Vec<(Vec<u8>, Vec<u8>)>,
     idx_table: Vec<(Vec<u8>, Vec<u8>)>,
     meta_table: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Marks the trailer that follows a [`SnapshotPayload`] in a snapshot
+/// body (fastetcd#32).
+const TRAILER_MAGIC: [u8; 8] = *b"FETCDTR1";
+
+/// What follows the payload in a snapshot body: tables that are
+/// replicated but are not MVCC tables. A trailer, not new payload
+/// fields, so the format stays compatible both ways. bincode 1 reads
+/// exactly one value and ignores what comes after it, so a member
+/// older than the trailer still decodes the payload; and a body
+/// without one (from an older member) decodes here with no trailer,
+/// which leaves those tables as they are, as before.
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotTrailer {
+    magic: [u8; 8],
+    /// The auth tables: users, roles, enabled flag.
+    auth: Option<AuthTables>,
+}
+
+/// A decoded snapshot body: the payload and, if present, the trailer's
+/// tables.
+#[derive(Debug)]
+struct SnapshotBody {
+    payload: SnapshotPayload,
+    auth: Option<AuthTables>,
+}
+
+impl SnapshotBody {
+    fn write_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        bincode::serialize_into(&mut *w, &self.payload).map_err(bincode_io)?;
+        let trailer = SnapshotTrailer { magic: TRAILER_MAGIC, auth: self.auth.clone() };
+        bincode::serialize_into(&mut *w, &trailer).map_err(bincode_io)
+    }
+
+    fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut v = Vec::new();
+        self.write_to(&mut v)?;
+        Ok(v)
+    }
+
+    fn read_from(r: &mut impl Read) -> std::io::Result<Self> {
+        let payload: SnapshotPayload = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
+        let auth = match bincode::deserialize_from::<_, SnapshotTrailer>(&mut *r) {
+            Ok(t) if t.magic == TRAILER_MAGIC => t.auth,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "snapshot trailer has an unknown magic",
+                ))
+            }
+            // No trailer: a body from a member older than it.
+            Err(e) if matches!(&*e, bincode::ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof) => {
+                None
+            }
+            Err(e) => return Err(bincode_io(e)),
+        };
+        Ok(Self { payload, auth })
+    }
 }
 
 impl FastetcdStateMachine {
@@ -159,7 +219,7 @@ impl FastetcdStateMachine {
     async fn write_snapshot(
         &self,
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
-        payload: SnapshotPayload,
+        payload: SnapshotBody,
     ) -> Result<WrittenSnapshot, StorageError<NodeId>> {
         let snapshots = self.snapshots.clone();
         let meta = meta.clone();
@@ -183,7 +243,7 @@ impl FastetcdStateMachine {
                          `etcdctl compact`, `etcdctl defrag`, or `fastetcd defrag` \
                          with the server stopped)."
                     );
-                    let bytes = bincode::serialize(&payload).map_err(|e| {
+                    let bytes = payload.to_bytes().map_err(|e| {
                         StorageIOError::write_snapshot(Some(meta.signature()), AnyError::new(&e))
                     })?;
                     Ok(WrittenSnapshot {
@@ -296,18 +356,18 @@ fn bincode_io(e: bincode::Error) -> std::io::Error {
     }
 }
 
-fn serialize_payload(f: &mut std::fs::File, payload: &SnapshotPayload) -> std::io::Result<()> {
+fn serialize_payload(f: &mut std::fs::File, payload: &SnapshotBody) -> std::io::Result<()> {
     let mut w = BufWriter::with_capacity(1 << 20, f);
-    bincode::serialize_into(&mut w, payload).map_err(bincode_io)?;
+    payload.write_to(&mut w)?;
     w.flush()
 }
 
 /// Decode a snapshot body. A file is read through a buffer, never
 /// loaded whole.
-fn decode_payload(content: &Content) -> Result<SnapshotPayload, std::io::Error> {
-    let from_file = |mut f: &std::fs::File| -> std::io::Result<SnapshotPayload> {
+fn decode_payload(content: &Content) -> Result<SnapshotBody, std::io::Error> {
+    let from_file = |mut f: &std::fs::File| -> std::io::Result<SnapshotBody> {
         f.seek(SeekFrom::Start(0))?;
-        bincode::deserialize_from(BufReader::with_capacity(1 << 20, f)).map_err(bincode_io)
+        SnapshotBody::read_from(&mut BufReader::with_capacity(1 << 20, f))
     };
     match content {
         Content::Incoming { file, .. } => {
@@ -317,7 +377,7 @@ fn decode_payload(content: &Content) -> Result<SnapshotPayload, std::io::Error> 
             from_file(file)
         }
         Content::Retained(file) => from_file(file),
-        Content::Memory(bytes) => bincode::deserialize(bytes).map_err(bincode_io),
+        Content::Memory(bytes) => SnapshotBody::read_from(&mut bytes.as_slice()),
     }
 }
 
@@ -410,7 +470,9 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
 
             // Normal or Blank entry. Decode the AppData if present.
             let response = match &entry.payload {
-                openraft::EntryPayload::Normal(data) => apply_data(&self.mvcc, data).await,
+                openraft::EntryPayload::Normal(data) => {
+                    apply_data(&self.mvcc, data, log_id.index).await
+                }
                 openraft::EntryPayload::Blank => {
                     // Heartbeat-like blank entry; just advance applied_log_id.
                     let rev = self.mvcc.current_revision().await;
@@ -519,7 +581,7 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
             last_applied_log_id,
             last_membership,
             ..
-        } = payload;
+        } = payload.payload;
 
         // Keep the installed snapshot as this node's retained one, so it
         // survives restart; only the meta stays in RAM. A received file
@@ -611,8 +673,8 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
             let mut g = self.sm.inner.lock().await;
             g.snapshot_idx += 1;
             SnapshotMeta {
-                last_log_id: payload.last_applied_log_id,
-                last_membership: payload.last_membership.clone(),
+                last_log_id: payload.payload.last_applied_log_id,
+                last_membership: payload.payload.last_membership.clone(),
                 snapshot_id: format!("snap-{}", g.snapshot_idx),
             }
         };
@@ -643,6 +705,7 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
 async fn apply_data(
     mvcc: &MvccStore,
     data: &FastetcdLogEntry,
+    log_index: u64,
 ) -> Result<FastetcdLogResponse, anyhow::Error> {
     match data {
         FastetcdLogEntry::Apply { mutations } => {
@@ -681,10 +744,14 @@ async fn apply_data(
             let rev = mvcc.current_revision().await;
             Ok(FastetcdLogResponse::Noop { revision: rev })
         }
+        FastetcdLogEntry::Auth(op) => {
+            let (revision, result) = mvcc.apply_auth(op).await?;
+            Ok(FastetcdLogResponse::Auth { revision, log_index, result })
+        }
     }
 }
 
-async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotPayload, anyhow::Error> {
+async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotBody, anyhow::Error> {
     use std::ops::Bound;
     // Capture the consistent MVCC snapshot handle AND last_applied atomically
     // under the state-machine lock. `apply()` mutates the MVCC store and
@@ -711,19 +778,26 @@ async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotPayload, any
         .range("mvcc_meta", Bound::Unbounded, Bound::Unbounded, 0)
         .await?;
 
-    Ok(SnapshotPayload {
-        last_applied_log_id,
-        last_membership,
-        kv_table,
-        idx_table,
-        meta_table,
+    // The auth tables from the same engine snapshot (fastetcd#32).
+    let auth = AuthTables::read(&*snap).await?;
+
+    Ok(SnapshotBody {
+        payload: SnapshotPayload {
+            last_applied_log_id,
+            last_membership,
+            kv_table,
+            idx_table,
+            meta_table,
+        },
+        auth: Some(auth),
     })
 }
 
 async fn rebuild_mvcc(
     mvcc: &MvccStore,
-    payload: &SnapshotPayload,
+    body: &SnapshotBody,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = &body.payload;
     use fastetcd_storage::mvcc::store::{META_KEY_RAFT_APPLIED, META_KEY_RAFT_MEMBERSHIP};
     use fastetcd_storage::{WriteBatch, WriteOptions};
 
@@ -757,11 +831,82 @@ async fn rebuild_mvcc(
         META_KEY_RAFT_MEMBERSHIP,
         &bincode::serialize(&payload.last_membership)?,
     );
+    // The auth tables, in the same batch, when the sender included them
+    // (fastetcd#32). A body from an older member has none: the local
+    // tables are left as they were, as before.
+    if let Some(auth) = &body.auth {
+        auth.replace_into(&mut batch);
+    }
     engine.commit(batch, WriteOptions::default()).await?;
 
     // The batch above went straight to the engine, so the MvccStore
     // handle is still serving the counters it cached at open. Pick up
     // the snapshot's revision before anyone reads or writes through it.
     mvcc.reload_write_state().await?;
+    mvcc.reload_auth().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload() -> SnapshotPayload {
+        SnapshotPayload {
+            last_applied_log_id: None,
+            last_membership: StoredMembership::default(),
+            kv_table: vec![(b"k".to_vec(), b"v".to_vec())],
+            idx_table: Vec::new(),
+            meta_table: vec![(b"m".to_vec(), b"1".to_vec())],
+        }
+    }
+
+    fn auth() -> AuthTables {
+        AuthTables {
+            users: vec![(b"root".to_vec(), b"u".to_vec())],
+            roles: Vec::new(),
+            state: vec![(b"enabled".to_vec(), vec![1])],
+        }
+    }
+
+    /// A member older than the trailer decodes a new body's payload,
+    /// through both paths it has (file: `deserialize_from`, memory:
+    /// `deserialize`), ignoring the trailer.
+    #[test]
+    fn an_old_member_decodes_a_body_with_a_trailer() {
+        let body = SnapshotBody { payload: payload(), auth: Some(auth()) };
+        let bytes = body.to_bytes().unwrap();
+        let from_mem: SnapshotPayload = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(from_mem.kv_table, payload().kv_table);
+        let from_file: SnapshotPayload = bincode::deserialize_from(&mut bytes.as_slice()).unwrap();
+        assert_eq!(from_file.meta_table, payload().meta_table);
+    }
+
+    /// A body from an older member (payload only) decodes with no
+    /// trailer, which leaves the auth tables alone on install.
+    #[test]
+    fn a_body_without_a_trailer_decodes_with_no_auth() {
+        let old = bincode::serialize(&payload()).unwrap();
+        let body = SnapshotBody::read_from(&mut old.as_slice()).unwrap();
+        assert_eq!(body.payload.kv_table, payload().kv_table);
+        assert!(body.auth.is_none());
+    }
+
+    #[test]
+    fn a_body_with_a_trailer_round_trips() {
+        let bytes = SnapshotBody { payload: payload(), auth: Some(auth()) }.to_bytes().unwrap();
+        let body = SnapshotBody::read_from(&mut bytes.as_slice()).unwrap();
+        assert_eq!(body.auth, Some(auth()));
+    }
+
+    #[test]
+    fn a_trailer_with_a_wrong_magic_is_an_error_not_ignored() {
+        let mut bytes = bincode::serialize(&payload()).unwrap();
+        bincode::serialize_into(
+            &mut bytes,
+            &SnapshotTrailer { magic: *b"XXXXXXXX", auth: None },
+        )
+        .unwrap();
+        assert!(SnapshotBody::read_from(&mut bytes.as_slice()).is_err());
+    }
 }
