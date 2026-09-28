@@ -855,6 +855,25 @@ Tracked live in the Claude task system. Snapshot of the order:
     Found alongside: #49 (P0), an `ignore_value` put on a missing key
     fails inside apply and stops every member.
 
+28. **A client certificate's CN is the etcd user (#20) — in progress.**
+    etcd (`AuthInfoFromCtx` → `AuthInfoFromTLS`): a `token` in the
+    metadata wins; with none, and `--client-cert-auth` on, the caller is
+    the Common Name of the verified client certificate's leaf. No
+    `Authenticate` call, no password (such users are usually
+    `--no-password`); the usual permission checks apply, and a CN with
+    no matching user gets PermissionDenied. An invalid token is refused,
+    never replaced by the CN. Empty CN = no identity.
+    Work items:
+    - [ ] authz: CN from the peer certificate (`x509-parser`), one
+      `identity(request)` used by the interceptor and the Auth service
+      (which is not behind the interceptor).
+    - [ ] `ServerState::client_cert_auth`, interceptor flag; main wires
+      `--client-cert-auth`.
+    - [ ] Tests over a real mTLS client port built like main's (routes →
+      axum → tonic): CN-scoped reads/writes/watch, root by CN, unknown
+      CN denied, token beats CN, off without `--client-cert-auth`.
+    - [ ] Docs (auth section), changelog; release; close #20.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
