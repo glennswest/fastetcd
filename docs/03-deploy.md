@@ -188,6 +188,7 @@ operation, the same way etcd checks them:
 | `Put` | write on `key`; plus read if `prev_kv` |
 | `DeleteRange` | write on `[key, range_end)`; plus read if `prev_kv` |
 | `Txn` | read on every compare target, and the above for **every** op in **both** the success and failure branches (nested txns included) |
+| `Watch` (each create) | read on `[key, range_end)` |
 
 A `Txn` is authorized as a whole before anything is proposed: one
 access the user's roles do not cover fails it with `PermissionDenied`,
@@ -197,8 +198,16 @@ because it reveals whether a key exists and what it holds. A
 write-only role therefore cannot run a guarded write (`compare` +
 `put`) on its own keys.
 
-**Auth is not yet a security boundary.** Three gaps remain, each
-tracked: `Watch` does not check permissions (#33); the admin RPCs
+A watch create the user may not read is refused as etcd refuses it: the
+response has `created` and `canceled` set, `watch_id` -1 and
+`cancel_reason` `etcdserver: permission denied`. Nothing is registered
+or replayed, and the stream stays open for other watches. As in etcd,
+the check is made once, at create: revoking a permission does not
+cancel a watch that is already running; it keeps delivering until it
+or its stream ends (restart the client after narrowing its role).
+
+**Auth is not yet a security boundary.** Two gaps remain, each
+tracked: the admin RPCs
 (user/role management, `AuthDisable`, `Maintenance.Snapshot`, member
 changes, `Compact`) do not require root, so any authenticated user can
 grant itself the root role (#31); and auth state is written to the

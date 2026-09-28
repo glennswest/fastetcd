@@ -42,6 +42,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::authz::{authorize, RequiredPerm, UserIdentity};
 use crate::conv::record_to_kv;
 use crate::state::{response_header, ServerState};
 
@@ -65,6 +66,8 @@ impl Watch for WatchService {
         request: Request<Streaming<pb::WatchRequest>>,
     ) -> Result<Response<Self::WatchStream>, Status> {
         let state = self.state.clone();
+        // Who opened the stream, for authorizing each create (#33).
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let mut inbound = request.into_inner();
 
         // Outbound channel feeds the gRPC response stream.
@@ -109,6 +112,13 @@ impl Watch for WatchService {
                 let Some(union) = req.request_union else { continue };
                 match union {
                     pb::watch_request::RequestUnion::CreateRequest(create) => {
+                        if let Err(reason) = authorize_create(&state, user.as_ref(), &create).await
+                        {
+                            if send_denied(&state, &tx_in, reason).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         if let Err(_e) =
                             handle_create(&state, &stream_state, &tx_in, create).await
                         {
@@ -429,6 +439,68 @@ async fn handle_create(
     watcher.next_rev = watcher.next_rev.max(current_rev + 1);
     ss.watchers.insert(watch_id, watcher);
     Ok(())
+}
+
+/// The cancel reason etcd gives a watch create the user may not read
+/// (`rpctypes.ErrGRPCPermissionDenied`).
+pub const PERMISSION_DENIED: &str = "etcdserver: permission denied";
+
+/// A watch create needs read permission on `[key, range_end)`, as a
+/// `Range` of it would (#33; etcd's `isWatchPermitted`). Without it the
+/// watch would hand out every value written there, and with a past
+/// `start_revision` and `prev_kv`, the history too. Checked once, at
+/// create, as etcd does: revoking the permission later does not cancel
+/// a watch already running. Returns the cancel reason on denial.
+async fn authorize_create(
+    state: &Arc<ServerState>,
+    user: Option<&UserIdentity>,
+    create: &pb::WatchCreateRequest,
+) -> Result<(), String> {
+    authorize(
+        state.sm.mvcc().engine(),
+        &state.auth,
+        user,
+        RequiredPerm::Read,
+        &create.key,
+        &create.range_end,
+    )
+    .await
+    .map_err(|e| match e.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+            tracing::debug!(
+                target: "fastetcd::watch",
+                user = ?user.map(|u| &u.name),
+                "watch create denied: {}",
+                e.message()
+            );
+            PERMISSION_DENIED.to_string()
+        }
+        _ => format!("etcdserver: {}", e.message()),
+    })
+}
+
+/// Refuse a watch create the way etcd does: `created` and `canceled`
+/// together, on `watch_id` -1 (clientv3's `InvalidWatchID`), so the
+/// client's pending create resolves to an error. Nothing is registered
+/// or replayed, and the stream stays open for other creates.
+async fn send_denied(
+    state: &Arc<ServerState>,
+    tx: &mpsc::Sender<Result<pb::WatchResponse, Status>>,
+    cancel_reason: String,
+) -> Result<(), ()> {
+    let header = response_header(state, state.sm.mvcc().current_revision().await).await;
+    tx.send(Ok(pb::WatchResponse {
+        header: Some(header),
+        watch_id: -1,
+        created: true,
+        canceled: true,
+        compact_revision: 0,
+        cancel_reason,
+        fragment: false,
+        events: Vec::new(),
+    }))
+    .await
+    .map_err(|_| ())
 }
 
 async fn send_cancel(

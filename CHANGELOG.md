@@ -3,6 +3,19 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **fix:** `Watch` is authorized (#33). A watch create had no permission
+  check, so with auth enabled any authenticated user could watch any key
+  or range, with a past `start_revision` and `prev_kv`, and receive
+  values RBAC denies to `Range`. Each create now needs read on
+  `[key, range_end)`, checked against the user who opened the stream
+  (etcd's `isWatchPermitted`). A denied create is answered as etcd
+  answers it: `created` and `canceled`, `watch_id` -1, `cancel_reason`
+  `etcdserver: permission denied`. Nothing is registered or replayed,
+  and the stream stays open for other creates. As in etcd, the check is
+  made at create only. Tests: `crates/server/tests/authz_watch.rs`.
+  Docs: `docs/03-deploy.md`.
+
 ## [v1.4.1] — 2026-09-28
 
 ### 2026-09-28
