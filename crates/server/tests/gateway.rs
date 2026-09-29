@@ -49,6 +49,7 @@ async fn start() -> Env {
         cluster: ClusterService::new(state.clone(), 1, fastetcd_raft::network::empty_peers(), directory),
         maintenance: MaintenanceService::new(state.clone()),
         auth: AuthService::new(state.clone()),
+        watch: fastetcd_server::watch::WatchService::new(state.clone()),
         interceptor: interceptor.clone(),
         traffic: state.traffic.clone(),
     };
@@ -322,4 +323,114 @@ async fn auth_applies_to_the_gateway() {
     assert!(resp.text().await.unwrap().starts_with("{\"result\""));
     env.ok("/v3/auth/disable", json!({}), Some(&root)).await;
     env.ok("/v3/kv/range", json!({"key": b64("secret")}), None).await;
+}
+
+/// Reads a streamed gateway response a line at a time.
+struct Lines {
+    resp: reqwest::Response,
+    buf: Vec<u8>,
+}
+
+impl Lines {
+    async fn open(env: &Env, path: &str, body: String) -> Self {
+        let resp = env.http.post(format!("{}{path}", env.base)).body(body).send().await.unwrap();
+        assert_eq!(resp.status(), 200, "{path}");
+        Lines { resp, buf: Vec::new() }
+    }
+
+    /// The next line as JSON, or `None` when the stream ends.
+    async fn next(&mut self) -> Option<Value> {
+        loop {
+            if let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.buf.drain(..=i).collect();
+                return Some(serde_json::from_slice(&line).unwrap());
+            }
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), self.resp.chunk())
+                .await
+                .expect("no line in 10s")
+                .unwrap()?;
+            self.buf.extend_from_slice(&chunk);
+        }
+    }
+}
+
+/// `/v3/watch` as etcd's gateway serves it: create requests in the body,
+/// then the created response and events streamed, one line each, for as
+/// long as the client stays (the body ending does not end the watch).
+#[tokio::test]
+async fn watch_streams_events_as_json_lines() {
+    let env = start().await;
+    env.ok("/v3/kv/put", json!({"key": b64("w/old"), "value": b64("1")}), None).await;
+
+    // Two creates in one body: a live watch on w/, and one replaying
+    // history from revision 1.
+    let body = format!(
+        "{}\n{}",
+        json!({"create_request": {"key": b64("w/"), "range_end": b64("w0")}}),
+        json!({"create_request": {"key": b64("w/"), "range_end": b64("w0"), "start_revision": "1"}})
+    );
+    let mut lines = Lines::open(&env, "/v3/watch", body).await;
+    let mut created = 0;
+    let mut replayed = false;
+    while created < 2 || !replayed {
+        let v = lines.next().await.expect("stream ended early");
+        let r = &v["result"];
+        if r["created"] == true {
+            created += 1;
+        }
+        if let Some(evs) = r["events"].as_array() {
+            assert_eq!(evs[0]["kv"]["key"], b64("w/old"), "{v}");
+            replayed = true;
+        }
+    }
+    // A write after the body ended still arrives, on both watchers.
+    env.ok("/v3/kv/put", json!({"key": b64("w/new"), "value": b64("2")}), None).await;
+    let mut seen = 0;
+    while seen < 2 {
+        let v = lines.next().await.expect("stream ended");
+        let evs = v["result"]["events"].as_array().unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(evs[0]["kv"]["key"], b64("w/new"));
+        assert_eq!(evs[0]["kv"]["value"], b64("2"));
+        seen += 1;
+    }
+    assert_eq!(handled(&env.h.state.traffic, "Watch", "Watch", "OK"), 0);
+    let started = env
+        .h
+        .state
+        .traffic
+        .grpc_started
+        .get_or_create(&fastetcd_server::traffic::GrpcLabels {
+            grpc_type: "bidi_stream".into(),
+            grpc_service: "etcdserverpb.Watch".into(),
+            grpc_method: "Watch".into(),
+        })
+        .get();
+    assert_eq!(started, 1);
+}
+
+/// `/v3/lease/keepalive`: one response per request in the body, then the
+/// stream ends with the body, as in etcd. Bad JSON is an error line.
+#[tokio::test]
+async fn lease_keepalive_answers_each_request_and_ends_with_the_body() {
+    let env = start().await;
+    let lease = env.ok("/v3/lease/grant", json!({"TTL": "30"}), None).await;
+    let id = lease["ID"].as_str().unwrap().to_string();
+
+    // Back to back, no separator, as a JSON decoder allows.
+    let body = format!("{}{}", json!({"ID": id}), json!({"ID": id}));
+    let mut lines = Lines::open(&env, "/v3/lease/keepalive", body).await;
+    for _ in 0..2 {
+        let v = lines.next().await.expect("a keepalive response");
+        assert_eq!(v["result"]["ID"], id, "{v}");
+        assert_eq!(v["result"]["TTL"], "30", "{v}");
+    }
+    assert!(lines.next().await.is_none(), "the stream ends with the body");
+
+    let mut lines = Lines::open(&env, "/v3/lease/keepalive", format!("{} {{nope", json!({"ID": id}))).await;
+    let mut got = Vec::new();
+    while let Some(v) = lines.next().await {
+        got.push(v);
+    }
+    assert!(got.iter().any(|v| v["result"]["ID"] == id), "{got:?}");
+    assert!(got.iter().any(|v| v["error"]["code"] == 3), "{got:?}");
 }

@@ -1203,6 +1203,7 @@ async fn main() -> anyhow::Result<()> {
         cluster: cluster.clone(),
         maintenance: maintenance.clone(),
         auth: auth.clone(),
+        watch: watch.clone(),
         interceptor: interceptor.clone(),
         traffic: traffic.clone(),
     });
