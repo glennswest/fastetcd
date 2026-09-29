@@ -337,13 +337,15 @@ impl WriteForwarder {
     }
 
     /// Forward a linearizable Range to `target`'s `ForwardRead` RPC and
-    /// return the leader's `RangeResult` (#10). Same transport and
-    /// failure handling as [`forward`](Self::forward).
+    /// return the leader's `RangeResult` (#10) with the revision the
+    /// leader read at (#50; `None` from a leader older than that, see
+    /// [`decode_forwarded_read`]). Same transport and failure handling
+    /// as [`forward`](Self::forward).
     pub async fn forward_read(
         &self,
         target: NodeId,
         read: &crate::types::ForwardedRead,
-    ) -> Result<fastetcd_storage::mvcc::RangeResult, String> {
+    ) -> Result<(fastetcd_storage::mvcc::RangeResult, Option<i64>), String> {
         let data = bincode::serialize(read).map_err(|e| e.to_string())?;
         let cli_result = async {
             let mut cli = self.client(target).await?;
@@ -359,9 +361,8 @@ impl WriteForwarder {
                 return Err(e);
             }
         };
-        let result: Result<fastetcd_storage::mvcc::RangeResult, String> =
-            bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
-        result
+        let (result, revision) = decode_forwarded_read(&resp.data).map_err(|e| e.to_string())?;
+        result.map(|r| (r, revision))
     }
 
     /// Forward a cluster-membership change to `target`'s
@@ -508,13 +509,13 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // read index, so the read is linearizable. If leadership moved
         // on, stringify the error (as forward_write does) and let the
         // original caller retry against the new leader.
-        let result: Result<fastetcd_storage::mvcc::RangeResult, String> = async {
+        let result: Result<(fastetcd_storage::mvcc::RangeResult, i64), String> = async {
             self.raft
                 .ensure_linearizable()
                 .await
                 .map_err(|e| e.to_string())?;
             self.mvcc
-                .range(
+                .range_with_revision(
                     &read.key,
                     &read.range_end,
                     read.limit as usize,
@@ -526,7 +527,7 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 .map_err(|e| e.to_string())
         }
         .await;
-        let data = bincode::serialize(&result)
+        let data = encode_forwarded_read(result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
     }
@@ -579,5 +580,87 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         let data = bincode::serialize(&resp)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
+    }
+}
+
+type ForwardedReadResult = Result<fastetcd_storage::mvcc::RangeResult, String>;
+
+/// Encode a leader's `ForwardRead` reply: the result as releases before
+/// fastetcd#50 sent it, then the revision the read was taken at. The
+/// revision goes *after* so a follower older than #50 still decodes the
+/// reply (bincode 1 ignores trailing bytes) and just doesn't use it.
+pub fn encode_forwarded_read(
+    result: Result<(fastetcd_storage::mvcc::RangeResult, i64), String>,
+) -> bincode::Result<Vec<u8>> {
+    let (result, revision): (ForwardedReadResult, i64) = match result {
+        Ok((r, rev)) => (Ok(r), rev),
+        Err(e) => (Err(e), 0),
+    };
+    bincode::serialize(&(result, revision))
+}
+
+/// Decode a `ForwardRead` reply. The revision is `None` when the leader
+/// is older than fastetcd#50 and sent the result alone.
+pub fn decode_forwarded_read(
+    data: &[u8],
+) -> bincode::Result<(ForwardedReadResult, Option<i64>)> {
+    match bincode::deserialize::<(ForwardedReadResult, i64)>(data) {
+        Ok((result, revision)) => Ok((result, Some(revision))),
+        Err(_) => bincode::deserialize::<ForwardedReadResult>(data).map(|r| (r, None)),
+    }
+}
+
+#[cfg(test)]
+mod forwarded_read_tests {
+    use super::*;
+    use fastetcd_storage::mvcc::{KvRecord, RangeResult};
+
+    fn sample() -> RangeResult {
+        RangeResult {
+            kvs: vec![KvRecord {
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+                create_revision: 3,
+                mod_revision: 4,
+                version: 2,
+                lease: 0,
+                deleted: false,
+            }],
+            more: true,
+            count: 7,
+        }
+    }
+
+    #[test]
+    fn new_leader_to_new_follower_carries_the_revision() {
+        let data = encode_forwarded_read(Ok((sample(), 42))).unwrap();
+        let (r, rev) = decode_forwarded_read(&data).unwrap();
+        let r = r.unwrap();
+        assert_eq!((r.kvs.len(), r.more, r.count, rev), (1, true, 7, Some(42)));
+        let data = encode_forwarded_read(Err("not leader".into())).unwrap();
+        let (r, _) = decode_forwarded_read(&data).unwrap();
+        assert_eq!(r.unwrap_err(), "not leader");
+    }
+
+    /// A follower older than #50 decodes exactly what it did before.
+    #[test]
+    fn new_leader_to_old_follower_still_decodes() {
+        let data = encode_forwarded_read(Ok((sample(), 42))).unwrap();
+        let old: ForwardedReadResult = bincode::deserialize(&data).unwrap();
+        assert_eq!(old.unwrap().count, 7);
+        let data = encode_forwarded_read(Err("e".into())).unwrap();
+        let old: ForwardedReadResult = bincode::deserialize(&data).unwrap();
+        assert_eq!(old.unwrap_err(), "e");
+    }
+
+    /// A leader older than #50 sends the result alone: no revision.
+    #[test]
+    fn old_leader_to_new_follower_has_no_revision() {
+        let old: ForwardedReadResult = Ok(sample());
+        let (r, rev) = decode_forwarded_read(&bincode::serialize(&old).unwrap()).unwrap();
+        assert_eq!((r.unwrap().count, rev), (7, None));
+        let old: ForwardedReadResult = Err("e".into());
+        let (r, rev) = decode_forwarded_read(&bincode::serialize(&old).unwrap()).unwrap();
+        assert_eq!((r.unwrap_err(), rev), ("e".to_string(), None));
     }
 }

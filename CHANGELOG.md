@@ -3,6 +3,27 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-29
+- **fix:** A Range's header revision is the revision its contents were
+  read at (#50, P0). The handler read `current_revision()` *after* the
+  range, so a commit in between stamped the response with a later
+  revision than its contents. Kubernetes uses that header as its LIST
+  snapshot and WATCHes from after it, so the write in between was
+  skipped for good (rustkube's LIST probe: 165 of 255 LISTs
+  inconsistent). A follower's forwarded read also took the follower's
+  own revision instead of the leader's.
+  - `MvccStore::range_with_revision` returns the revision the read was
+    taken at; the engine snapshot is now taken under the write-state
+    lock, so a compaction can't land between the two.
+  - `ForwardRead` replies carry the leader's read revision after the
+    result, so a follower older than this still decodes them. A reply
+    from an older leader has none: the follower falls back to its own
+    revision (the old answer) and warns once, only during an upgrade.
+  - Tests: concurrent writers + LIST readers against MVCC, a single
+    node over gRPC, and a 3-member cluster (leader and follower) with
+    LIST → WATCH from the next revision on the same member; the
+    forwarded-read wire both ways between versions.
+
 ## [v1.6.0] — 2026-09-28
 
 ### 2026-09-28

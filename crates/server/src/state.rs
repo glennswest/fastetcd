@@ -145,12 +145,14 @@ impl ServerState {
     /// own state machine (#10).
     ///
     /// Returns `Ok(None)` when the caller should read locally (this node
-    /// is the leader and the barrier passed), or `Ok(Some(result))` when
-    /// the leader already produced the result via forwarding.
+    /// is the leader and the barrier passed), or `Ok(Some((result,
+    /// revision)))` when the leader already produced the result via
+    /// forwarding. `revision` is the one the leader read at (#50), or
+    /// `None` from a leader older than that.
     pub async fn linearize_read(
         &self,
         read: &fastetcd_raft::ForwardedRead,
-    ) -> Result<Option<fastetcd_storage::mvcc::RangeResult>, Status> {
+    ) -> Result<Option<(fastetcd_storage::mvcc::RangeResult, Option<i64>)>, Status> {
         match self.raft.ensure_linearizable().await {
             Ok(_) => Ok(None),
             Err(e) => {

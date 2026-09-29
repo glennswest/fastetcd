@@ -124,8 +124,10 @@ impl Kv for KvService {
             &req.range_end,
         )
         .await?;
-        let result = serve_range(&self.state, &req).await?;
-        let revision = self.state.sm.mvcc().current_revision().await;
+        // The header carries the revision the read was taken at, never
+        // a later one: a LIST followed by a WATCH from after it would
+        // skip every write in between (#50).
+        let (result, revision) = serve_range(&self.state, &req).await?;
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(range_result_to_response(header, result, req.count_only)))
     }
@@ -260,10 +262,13 @@ impl Kv for KvService {
     }
 }
 
+/// Serve a Range: its result and the store revision it was read at,
+/// which is what the response header carries (etcd: the read txn's
+/// revision, for a historical `revision` too).
 async fn serve_range(
     state: &ServerState,
     req: &pb::RangeRequest,
-) -> Result<RangeResult, Status> {
+) -> Result<(RangeResult, i64), Status> {
     // A default (linearizable) read must not return state older than a
     // completed write. On a cluster, reading local state without a
     // barrier lets a lagging follower — or a leader that has silently
@@ -280,14 +285,31 @@ async fn serve_range(
             count_only: req.count_only,
         };
         // On a follower this returns the leader's result directly.
-        if let Some(result) = state.linearize_read(&read).await? {
-            return Ok(result);
+        if let Some((result, revision)) = state.linearize_read(&read).await? {
+            let revision = match revision {
+                Some(rev) => rev,
+                None => {
+                    // The leader predates #50 and did not say which
+                    // revision it read at. Only during a rolling
+                    // upgrade; the local revision is what every
+                    // release before #50 answered with.
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tracing::warn!(
+                            "leader is older than fastetcd 1.6.1: forwarded Range headers \
+                             use this member's revision until it is upgraded (#50)"
+                        )
+                    });
+                    state.sm.mvcc().current_revision().await
+                }
+            };
+            return Ok((result, revision));
         }
     }
     state
         .sm
         .mvcc()
-        .range(
+        .range_with_revision(
             &req.key,
             &req.range_end,
             req.limit.max(0) as usize,

@@ -539,3 +539,83 @@ async fn compact_then_old_revision_errors() {
         .expect_err("revision 1 should be compacted");
     assert_eq!(err.code(), tonic::Code::OutOfRange);
 }
+
+/// fastetcd#50: a Range's header revision is the revision its contents
+/// were read at. It used to be read after the range, so a concurrent
+/// commit stamped the response with a later revision than its contents,
+/// and a Kubernetes LIST + WATCH from after it skipped that write for
+/// good. Four writers and two LIST readers run at once; afterwards every
+/// LIST must hold exactly the acknowledged writes at or below its
+/// header revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn range_header_revision_matches_its_contents_under_concurrent_writes() {
+    let (client, _dir) = start_test_server().await;
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let writers: Vec<_> = (0..4)
+        .map(|w| {
+            let mut c = client.clone();
+            tokio::spawn(async move {
+                let mut acked = Vec::new();
+                for i in 0..100 {
+                    let key = format!("cm/w{w}-{i}").into_bytes();
+                    let r = c
+                        .put(pb::PutRequest { key: key.clone(), value: b"v".to_vec(), ..Default::default() })
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    acked.push((key, r.header.unwrap().revision));
+                }
+                acked
+            })
+        })
+        .collect();
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let mut c = client.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                let mut lists = Vec::new();
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let r = c
+                        .range(pb::RangeRequest {
+                            key: b"cm/".to_vec(),
+                            range_end: b"cm0".to_vec(),
+                            keys_only: true,
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    let keys: BTreeSet<Vec<u8>> = r.kvs.into_iter().map(|kv| kv.key).collect();
+                    lists.push((r.header.unwrap().revision, keys));
+                }
+                lists
+            })
+        })
+        .collect();
+
+    let mut acked = Vec::new();
+    for w in writers {
+        acked.extend(w.await.unwrap());
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut lists = Vec::new();
+    for r in readers {
+        lists.extend(r.await.unwrap());
+    }
+    assert!(lists.len() > 10, "readers ran only {} LISTs", lists.len());
+    let mut bad = Vec::new();
+    for (rev, got) in &lists {
+        let want: BTreeSet<Vec<u8>> =
+            acked.iter().filter(|(_, r)| r <= rev).map(|(k, _)| k.clone()).collect();
+        if *got != want {
+            bad.push(format!(
+                "rv={rev}: missing {}, future {}",
+                want.difference(got).count(),
+                got.difference(&want).count()
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} LISTs inconsistent: {:?}", bad.len(), lists.len(), &bad[..bad.len().min(5)]);
+}

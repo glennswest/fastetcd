@@ -133,6 +133,15 @@ the etcd Auth subsystem.
 3. Server, if follower, forwards to leader (or returns `NotLeader` with
    leader hint depending on config — match etcd's behavior).
 4. State machine snapshot read at the established revision.
+5. The response header's `revision` is the revision that snapshot was
+   read at (etcd: the read txn's revision), taken together with the
+   engine snapshot under the write-state lock, never read again
+   afterwards. A forwarded read carries the leader's read revision back
+   to the follower. This is the LIST → WATCH contract: a client that
+   lists at header revision R and watches from R + 1 sees every write
+   exactly once (#50). For a historical `revision`, the contents are at
+   that revision and the header is still the store's revision at the
+   read, as in etcd.
 
 ## Write path
 

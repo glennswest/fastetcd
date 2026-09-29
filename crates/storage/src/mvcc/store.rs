@@ -1108,22 +1108,51 @@ impl MvccStore {
         keys_only: bool,
         count_only: bool,
     ) -> MvccResult<RangeResult> {
+        self.range_with_revision(key, range_end, limit, target_rev, keys_only, count_only)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// [`range`](Self::range), plus the store revision the read was
+    /// taken at: what etcd puts in a `RangeResponse` header (its read
+    /// txn's `Rev()`), for a historical `target_rev` too.
+    ///
+    /// The header must come from here, not from a later
+    /// [`current_revision`](Self::current_revision): a commit in
+    /// between would stamp the response with a revision whose writes
+    /// it does not contain, and a client that LISTs and then WATCHes
+    /// from after that revision never sees them (fastetcd#50).
+    ///
+    /// The engine snapshot is taken while the write-state lock is held,
+    /// so it holds exactly the commits up to the copied `current_rev`
+    /// plus nothing a compaction removed after it.
+    pub async fn range_with_revision(
+        &self,
+        key: &[u8],
+        range_end: &[u8],
+        limit: usize,
+        target_rev: i64,
+        keys_only: bool,
+        count_only: bool,
+    ) -> MvccResult<(RangeResult, i64)> {
         let state = self.inner.write_state.lock().await;
         let state_copy = *state;
-        drop(state);
         let snap = self.inner.engine.snapshot().await?;
-        self.range_inner(
-            &*snap,
-            &ApplyContext::default(),
-            state_copy,
-            key,
-            range_end,
-            limit,
-            target_rev,
-            keys_only,
-            count_only,
-        )
-        .await
+        drop(state);
+        let result = self
+            .range_inner(
+                &*snap,
+                &ApplyContext::default(),
+                state_copy,
+                key,
+                range_end,
+                limit,
+                target_rev,
+                keys_only,
+                count_only,
+            )
+            .await?;
+        Ok((result, state_copy.current_rev))
     }
 
     /// Transactional execute: evaluate `compares` against the current
@@ -2061,6 +2090,68 @@ mod tests {
         assert_eq!(out.kvs.len(), 2);
         assert!(out.more);
         assert_eq!(out.count, 3);
+    }
+
+    #[tokio::test]
+    async fn range_revision_is_the_read_revision_not_a_later_one() {
+        let (_d, s) = open_mvcc().await;
+        let (r1, _) = s.apply(&[put(b"a", b"1")]).await.unwrap();
+        let (out, rev) = s.range_with_revision(b"a", b"z", 0, 0, false, false).await.unwrap();
+        assert_eq!(rev, r1);
+        assert_eq!(out.kvs.len(), 1);
+        // A commit after the read does not move the read's revision.
+        let (r2, _) = s.apply(&[put(b"b", b"2")]).await.unwrap();
+        assert!(r2 > rev);
+        // A historical read reports the store revision at the read, as
+        // etcd's header does, with contents at the requested revision.
+        let (old, rev) = s.range_with_revision(b"a", b"z", 0, r1, false, false).await.unwrap();
+        assert_eq!(rev, r2);
+        assert_eq!(old.kvs.len(), 1);
+    }
+
+    /// fastetcd#50: under concurrent writes, every range holds exactly
+    /// the writes at or below the revision it reports: none missing
+    /// (a LIST+WATCH from there would skip them), none above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn range_revision_matches_contents_under_concurrent_writes() {
+        let (_d, s) = open_mvcc().await;
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    let mut acked = Vec::new();
+                    for i in 0..100 {
+                        let key = format!("k/{w}-{i}");
+                        let (rev, _) = s.apply(&[put(key.as_bytes(), b"v")]).await.unwrap();
+                        acked.push((key.into_bytes(), rev));
+                    }
+                    acked
+                })
+            })
+            .collect();
+        let reader = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                let mut snaps = Vec::new();
+                for _ in 0..200 {
+                    snaps.push(s.range_with_revision(b"k/", b"k0", 0, 0, true, false).await.unwrap());
+                    tokio::task::yield_now().await;
+                }
+                snaps
+            })
+        };
+        let mut acked = Vec::new();
+        for w in writers {
+            acked.extend(w.await.unwrap());
+        }
+        let snaps = reader.await.unwrap();
+        for (out, rev) in snaps {
+            let got: std::collections::BTreeSet<Vec<u8>> =
+                out.kvs.iter().map(|r| r.key.clone()).collect();
+            let want: std::collections::BTreeSet<Vec<u8>> =
+                acked.iter().filter(|(_, r)| *r <= rev).map(|(k, _)| k.clone()).collect();
+            assert_eq!(got, want, "range at revision {rev}");
+        }
     }
 
     #[tokio::test]

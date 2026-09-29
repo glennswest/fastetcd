@@ -705,3 +705,214 @@ async fn a_put_names_a_lease_through_any_member() {
         assert_eq!(err.message(), "etcdserver: requested lease not found");
     }
 }
+
+/// fastetcd#50 on a cluster: a LIST's header revision is the revision
+/// its contents were read at, on the leader (local read) and on a
+/// follower (the read is forwarded, and the header used to be the
+/// follower's own revision, not the leader's). Writers go through both;
+/// LIST readers run through both at the same time. Then every LIST must
+/// hold exactly the keys created at or below its header revision, and a
+/// WATCH from the next revision on the member that served the LIST must
+/// deliver every other key: nothing is skipped between LIST and WATCH.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn list_revision_matches_contents_and_watch_continues_it() {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use fastetcd_proto::etcdserverpb::watch_client::WatchClient;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tokio_stream::StreamExt;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let leader_id = loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("no leader in 10s");
+        }
+        if let Some(l) = n1.raft.metrics().borrow().current_leader {
+            break l;
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+    let by_id = |id: NodeId| match id {
+        1 => &n1,
+        2 => &n2,
+        3 => &n3,
+        o => panic!("bad id {o}"),
+    };
+    let follower_id = (1..=3).find(|i| *i != leader_id).unwrap();
+    let endpoints = [
+        by_id(leader_id).client_endpoint.clone(),
+        by_id(follower_id).client_endpoint.clone(),
+    ];
+
+    let done = Arc::new(AtomicBool::new(false));
+    let mut writers = Vec::new();
+    for w in 0..4 {
+        let endpoint = endpoints[w % 2].clone();
+        writers.push(tokio::spawn(async move {
+            let mut kv = KvClient::connect(endpoint).await.unwrap();
+            let mut i = 0;
+            let mut unavailable = 0;
+            while i < 60 {
+                let key = format!("cm/w{w}-{i}").into_bytes();
+                match kv
+                    .put(pb::PutRequest { key, value: b"v".to_vec(), ..Default::default() })
+                    .await
+                {
+                    Ok(_) => i += 1,
+                    // Leadership moving on a loaded box (#44): retry.
+                    // Whether the lost put applied or not, the key's real
+                    // create revision is read back at the end.
+                    Err(e) if e.code() == tonic::Code::Unavailable && unavailable < 20 => {
+                        unavailable += 1;
+                        sleep(Duration::from_millis(300)).await;
+                    }
+                    Err(e) => panic!("put: {e}"),
+                }
+            }
+        }));
+    }
+    let mut readers = Vec::new();
+    for (r, endpoint) in endpoints.iter().enumerate() {
+        let endpoint = endpoint.clone();
+        let done = done.clone();
+        readers.push(tokio::spawn(async move {
+            let mut kv = KvClient::connect(endpoint.clone()).await.unwrap();
+            let mut lists = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                match kv
+                    .range(pb::RangeRequest {
+                        key: b"cm/".to_vec(),
+                        range_end: b"cm0".to_vec(),
+                        keys_only: true,
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
+                        let keys: BTreeSet<Vec<u8>> =
+                            resp.kvs.into_iter().map(|kv| kv.key).collect();
+                        lists.push((r, resp.header.unwrap().revision, keys));
+                    }
+                    Err(e) if e.code() == tonic::Code::Unavailable => {
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => panic!("range via {endpoint}: {e}"),
+                }
+            }
+            lists
+        }));
+    }
+    for w in writers {
+        w.await.unwrap();
+    }
+    done.store(true, Ordering::Relaxed);
+    let mut lists = Vec::new();
+    for r in readers {
+        lists.extend(r.await.unwrap());
+    }
+
+    // Every key's real create revision, read back linearizably.
+    let mut kv = KvClient::connect(endpoints[0].clone()).await.unwrap();
+    let final_list = kv
+        .range(pb::RangeRequest { key: b"cm/".to_vec(), range_end: b"cm0".to_vec(), ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    let created: Vec<(Vec<u8>, i64)> =
+        final_list.kvs.into_iter().map(|kv| (kv.key, kv.create_revision)).collect();
+    assert_eq!(created.len(), 240);
+    let all_keys: BTreeSet<Vec<u8>> = created.iter().map(|(k, _)| k.clone()).collect();
+
+    for r in 0..2 {
+        assert!(
+            lists.iter().filter(|l| l.0 == r).count() > 5,
+            "reader {r} ran too few LISTs: {}",
+            lists.len()
+        );
+    }
+    let mut bad = Vec::new();
+    for (r, rev, got) in &lists {
+        let want: BTreeSet<Vec<u8>> =
+            created.iter().filter(|(_, c)| c <= rev).map(|(k, _)| k.clone()).collect();
+        if *got != want {
+            bad.push(format!(
+                "{} rv={rev}: missing {}, future {}",
+                ["leader", "follower"][*r],
+                want.difference(got).count(),
+                got.difference(&want).count()
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} LISTs inconsistent: {:?}",
+        bad.len(),
+        lists.len(),
+        &bad[..bad.len().min(5)]
+    );
+
+    // LIST -> WATCH from rv+1 on the same member: together they hold
+    // every key. Take a spread of LISTs from each member.
+    for r in 0..2 {
+        let mine: Vec<_> = lists.iter().filter(|l| l.0 == r).collect();
+        for l in mine.iter().step_by((mine.len() / 4).max(1)) {
+            let (_, rev, listed) = l;
+            let expected = all_keys.len() - listed.len();
+            let mut watch = WatchClient::connect(endpoints[r].clone()).await.unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(pb::WatchRequest {
+                request_union: Some(pb::watch_request::RequestUnion::CreateRequest(
+                    pb::WatchCreateRequest {
+                        key: b"cm/".to_vec(),
+                        range_end: b"cm0".to_vec(),
+                        start_revision: rev + 1,
+                        ..Default::default()
+                    },
+                )),
+            })
+            .await
+            .unwrap();
+            let mut stream = watch.watch(ReceiverStream::new(rx)).await.unwrap().into_inner();
+            let mut seen: BTreeSet<Vec<u8>> = listed.clone();
+            let mut events = 0;
+            while events < expected {
+                let resp = tokio::time::timeout(Duration::from_secs(15), stream.next())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("watch from {} got {events}/{expected} events", rev + 1)
+                    })
+                    .expect("watch stream ended")
+                    .expect("watch error");
+                assert!(!resp.canceled, "watch canceled: {}", resp.cancel_reason);
+                for ev in resp.events {
+                    let key = ev.kv.unwrap().key;
+                    assert!(seen.insert(key.clone()), "key {key:?} both listed and watched");
+                    events += 1;
+                }
+            }
+            assert_eq!(seen, all_keys, "LIST at {rev} + WATCH from {} miss keys", rev + 1);
+            drop(tx);
+        }
+    }
+    let _ = (&n1, &n2, &n3);
+}
