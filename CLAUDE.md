@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.7.0`** — `/metrics` shows traffic (#29), with etcd's names:
+**`1.7.1`** — Build fix: `Cargo.lock` records `fastetcd-server`'s `http-body` dependency, which v1.7.0 added without a lock update, so `cargo build --locked` fails on v1.7.0 (#52). No code change.
+
+Previous: **`1.7.0`** — `/metrics` shows traffic (#29), with etcd's names:
 `grpc_server_started_total`/`grpc_server_handled_total` by method and
 code (axum middleware on the client port, `crates/server/src/traffic.rs`),
 `etcd_debugging_mvcc_{put,delete,range,txn}_total` (counted in

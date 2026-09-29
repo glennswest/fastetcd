@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.7.1] — 2026-09-29
+
 ### 2026-09-29
 - **build:** `Cargo.lock` lists `fastetcd-server`'s `http-body` dependency (added for #29 without a lock update), so `cargo build --locked` works again.
 
