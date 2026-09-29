@@ -880,6 +880,31 @@ Tracked live in the Claude task system. Snapshot of the order:
       CN denied, token beats CN, off without `--client-cert-auth`.
     - [x] Docs (auth section), changelog; release; close #20.
 
+29. **/metrics shows traffic (#29) — in progress.** The console
+    (stormconsole#20) cannot tell busy from idle or see anything falling
+    behind. etcd's names, so existing dashboards work:
+    - `etcd_debugging_mvcc_{put,delete,range,txn}_total`: counted in
+      `MvccStore` (puts/deletes as applied on every member, including
+      inside txns and lease-revoke cascades; ranges where served; txn
+      per Txn executed).
+    - `grpc_server_started_total` / `grpc_server_handled_total{grpc_type,
+      grpc_service,grpc_method,grpc_code}`: an axum middleware on the
+      client port reading `grpc-status` from headers or trailers
+      (`Canceled` if the stream is dropped first).
+    - `etcd_debugging_mvcc_watch_stream_total`, `..._watcher_total`,
+      `..._slow_watcher_total` (gauges). Slow = watchers of a stream
+      that is resyncing from history or blocked on a full outbound
+      buffer. Watch tasks now also end when the client goes away.
+    - `etcd_server_proposals_{committed,applied}_total` (index gauges;
+      committed from `save_committed`), `etcd_server_proposals_pending`.
+    - `etcd_server_is_leader`, `etcd_server_id{server_id=<hex>}`,
+      `fastetcd_engine_info{engine=…}` (was documented, never registered).
+    Work items:
+    - [ ] storage op counters; raft committed index; ServerState traffic.
+    - [ ] watch gauges; grpc middleware; metrics registration.
+    - [ ] Tests (`crates/server/tests/metrics.rs`), docs, changelog;
+      release; close #29.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
