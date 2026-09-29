@@ -250,7 +250,7 @@ async fn decode<Req: DeserializeOwned + Default>(
     {
         metadata.insert("authorization", v);
     }
-    let extensions = tonic::Extensions::from_http(parts.extensions);
+    let extensions = parts.extensions;
     if !intercept {
         return Ok(tonic::Request::from_parts(metadata, extensions, msg));
     }
