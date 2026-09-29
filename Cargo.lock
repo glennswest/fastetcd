@@ -1009,6 +1009,7 @@ dependencies = [
  "fastetcd-raft",
  "fastetcd-storage",
  "futures",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
