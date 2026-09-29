@@ -905,6 +905,28 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] Tests (`crates/server/tests/metrics.rs`), docs, changelog;
       release; close #29.
 
+30. **A Range's header revision is its snapshot's revision (#50, P0) — in progress.**
+    `KvService::range` read `current_revision()` *after* the read, so a
+    commit in between stamped the response with a later revision than
+    its contents; a Kubernetes LIST then WATCHes from after that and
+    never sees the write in between (rustkube#146). A forwarded read
+    also took the serving member's local revision, not the leader's.
+    etcd: the header is the read txn's revision.
+    - [ ] storage: `MvccStore::range_with_revision` returns the
+      revision the read was taken at (the `current_rev` it copied under
+      the write-state lock, which is what its contents are filtered to).
+    - [ ] raft `ForwardRead`: the leader appends that revision to its
+      reply (`(Result<RangeResult,String>, i64)`; bincode 1 ignores the
+      trailing bytes, so an older follower still decodes it). An older
+      leader's reply has no revision: fall back to the local revision
+      (the old behaviour), logged once — transient during an upgrade.
+    - [ ] server: header from that revision; txn headers already come
+      from the txn's own revision (under the lock).
+    - [ ] Tests: concurrent writers + LIST readers, single node and
+      through a follower (every acknowledged write <= header is in the
+      list, none above); wire compat both ways; docs, changelog;
+      release; close #50.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
