@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.6.1`** — A Range's header revision is the revision its contents
+**`1.7.0`** — `/metrics` shows traffic (#29), with etcd's names:
+`grpc_server_started_total`/`grpc_server_handled_total` by method and
+code (axum middleware on the client port, `crates/server/src/traffic.rs`),
+`etcd_debugging_mvcc_{put,delete,range,txn}_total` (counted in
+`MvccStore`), watch stream/watcher/slow-watcher gauges, raft committed/
+applied indexes and pending proposals, `etcd_server_is_leader`,
+`etcd_server_id`, `fastetcd_engine_info`. Watch tasks now end when the
+client goes away. Reference: `docs/03-deploy.md` § Metrics.
+
+Previous: **`1.6.1`** — A Range's header revision is the revision its contents
 were read at (#50, P0). It was read after the range, so a concurrent
 commit made a Kubernetes LIST + WATCH skip that write for good
 (rustkube#146). `MvccStore::range_with_revision` returns the read's
@@ -889,7 +898,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       CN denied, token beats CN, off without `--client-cert-auth`.
     - [x] Docs (auth section), changelog; release; close #20.
 
-29. **/metrics shows traffic (#29) — in progress.** The console
+29. **/metrics shows traffic (#29) — done, shipped in v1.7.0.** The console
     (stormconsole#20) cannot tell busy from idle or see anything falling
     behind. etcd's names, so existing dashboards work:
     - `etcd_debugging_mvcc_{put,delete,range,txn}_total`: counted in
@@ -909,10 +918,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `etcd_server_is_leader`, `etcd_server_id{server_id=<hex>}`,
       `fastetcd_engine_info{engine=…}` (was documented, never registered).
     Work items:
-    - [ ] storage op counters; raft committed index; ServerState traffic.
-    - [ ] watch gauges; grpc middleware; metrics registration.
-    - [ ] Tests (`crates/server/tests/metrics.rs`), docs, changelog;
+    - [x] storage op counters; raft committed index; ServerState traffic.
+    - [x] watch gauges; grpc middleware; metrics registration.
+    - [x] Tests (`crates/server/tests/metrics.rs`), docs, changelog;
       release; close #29.
+    - Resumed from the owner-paused WIP (800a7c9, branch
+      `wip/2026-09-29-paused-metrics`, merged as-is: it compiled).
+      Verified: sc-build of f6ed40e with `--no-fail-fast`, whole
+      workspace green (the first run hit the known #45 flake, auto-filed
+      as #51, closed as its duplicate). With the stream and slow-watcher
+      gauges stubbed out on the build box, both new tests fail.
 
 30. **A Range's header revision is its snapshot's revision (#50, P0) — done, shipped in v1.6.1.**
     `KvService::range` read `current_revision()` *after* the read, so a
