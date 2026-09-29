@@ -1,6 +1,8 @@
 # 00 — Design
 
-Initial architectural call for fastetcd. Living document; revise as we learn.
+The architectural call for fastetcd, kept current with the code (last
+checked against v1.8.0). Where the design goes beyond what the code
+does, the text says **Design, not implemented** and names the issue.
 
 ## Position
 
@@ -34,35 +36,28 @@ on the apply path, without requiring any client to change.
 
 ## Component choices
 
-### Storage: trait-first, two first-class engines
+### Storage: trait-first; the server runs on redb
 
 The storage layer is abstracted behind a `KvStore` trait. The MVCC state
-machine and Raft state machine adapter depend on the trait, not on any
-concrete engine. Two engines are first-class and selectable at runtime
-via `--storage-engine=redb|iouring` (default: `redb`):
+machine, the raft log store (`KvLogStore`) and the raft state machine
+depend on the trait, not on a concrete engine.
 
-**`redb` engine.** ACID single-file B-tree, native Rust, no native
-dependencies, cross-platform. The default — works wherever fastetcd
-builds. Single-writer with MVCC snapshots for readers maps cleanly onto
-our Raft-serialized write path. Operationally simple: one file is the
-whole database.
+**`redb`** is the engine the server runs on, always
+(`recovery::open_or_recover` opens `RedbEngine`): an ACID single-file
+B-tree, native Rust, cross-platform. One file, `<data-dir>/fastetcd.redb`,
+holds the MVCC tables, the raft log and vote, auth and leases.
 
-**`iouring` engine.** `glommio` (thread-per-core io_uring) +
-`O_DIRECT` + a custom group-committed WAL + in-memory MVCC index.
-Linux-only, compiled behind cargo feature `iouring` (enabled by default
-on Linux CI). Bypasses the kernel page cache and avoids filesystem
-metadata on the critical path, targeting sub-ms p99 on small writes.
+**Design, not implemented (#55):** a second, Linux-only engine for
+predictable tail latency. `fastetcd-storage` has a `wal` engine (an
+append-only WAL plus an in-memory index, tokio fs) and an `iouring`
+variant of it (cargo feature `iouring`, via `tokio-uring`, not glommio),
+but O_DIRECT and group commit are not implemented, and the server has
+no way to select either: no `--storage-engine` flag, no server feature.
+Only the storage benchmarks use them.
 
-**Alternatives considered, not adopted:** `fjall` (LSM; bench-worthy
-later but adds compaction tuning surface neither engine above has),
-`sled` (pre-1.0 forever, less predictable), `rocksdb` (C++ dep, brings
-back GC-like compaction stalls in a different dialect). **SPDK**
-(userspace NVMe driver) stays a long-term option but is not committed
-work — only revisit if iouring has a kernel-side tail-latency floor we
-cannot push past.
-
-The trait abstraction means we can benchmark engines side-by-side
-(task #10) without rewriting the state machine.
+**Alternatives considered, not adopted:** `fjall` (LSM; adds compaction
+tuning), `sled` (pre-1.0), `rocksdb` (C++ dependency, compaction
+stalls). SPDK stays a long-term option, not committed work.
 
 ### Consensus: `openraft`
 
@@ -70,59 +65,65 @@ Async-native, Rust-idiomatic, supports membership changes including joint
 consensus, snapshot install, log compaction. Mature enough to underpin a
 production system. We integrate by:
 
-- Implementing `RaftLogStorage` over an engine-agnostic log abstraction
-  with two impls (redb-backed; iouring + custom WAL). Append is durable
-  (fsync or `O_DIRECT` write) before ack.
+- `KvLogStore`: `RaftLogStorage` over the `KvStore` trait, so the log
+  lives in the same redb file. Append is durable (fsync'd commit)
+  before ack.
 - Implementing `RaftStateMachine` as the MVCC store applying committed
   entries.
-- Implementing `RaftNetwork` over our internal gRPC peer transport.
+- Implementing `RaftNetwork` over our internal gRPC peer transport
+  (`fastetcd.raft.RaftPeer` on the peer port), which also carries
+  follower → leader forwarding of writes, linearizable reads and
+  membership changes, and the auth-state check (`AuthSync`).
 
 **Alternatives considered:** `raft-rs` (synchronous, callback-driven,
 harder to wire to a tokio gRPC server), rolling our own (out of scope).
 
 ### gRPC: `tonic` + `prost`
 
-Vendor the etcd `.proto` files from `etcd-io/etcd/api/`. Generate stubs
-in the `proto` crate via a `build.rs`. No custom protocol; we serve the
-exact upstream protos.
+Vendor the etcd `.proto` files from `etcd-io/etcd/api/` (v3.6.11,
+`crates/proto/vendor.sh`). Generate stubs in the `proto` crate via a
+`build.rs`, plus serde JSON impls (`pbjson-build`) for the v3 JSON
+gateway. We serve the exact upstream protos; fastetcd's own services
+(`RaftPeer`, `FastetcdAdmin`) are separate protos.
 
 ### Async runtime: `tokio`
 
-Multi-threaded scheduler. Pin the Raft apply loop to a dedicated thread
-to avoid scheduling jitter on the critical write path.
+Multi-threaded scheduler. **Design, not implemented:** pinning the Raft
+apply loop to a dedicated thread; it runs on the shared runtime today.
 
 ### Logging: `tracing`
 
-Structured spans for every RPC and every Raft state transition. Optional
-OTLP export.
+`tracing` to stderr, filtered by `RUST_LOG` (default `info`).
+**Design, not implemented:** OTLP export; `--log-level` is ignored
+(#54).
 
 ## Layout
 
 ```
 crates/
-  proto/      # generated etcd v3 stubs (tonic + prost)
-  storage/    # KvStore trait + redb impl + (linux) iouring impl;
-              # MVCC state machine; lease registry; watch fan-out
-  raft/       # openraft adapters: log storage, state machine wrapper, network
-  server/     # binary: ties storage + raft + gRPC together; CLI flags
-  migrate/    # binary: reads etcd BoltDB snapshot → fastetcd state machine
-  ctl/        # binary: minimal etcdctl-compatible smoke client
+  proto/      # etcd v3 + fastetcd protos: tonic stubs, pbjson serde
+  storage/    # KvStore trait; redb (used), wal / iouring (not wired);
+              # MVCC store: revisions, leases, auth tables, events
+  raft/       # openraft adapters: log store, state machine, snapshots
+              # as files, gRPC peer transport, forwarding, lease precheck
+  server/     # binary `fastetcd`: gRPC services, auth, watch, gateway,
+              # metrics, space monitor, backups, recovery, CLI
+  migrate/    # binary `fastetcd-migrate`: etcd BoltDB snapshot → data dir
+  ctl/        # binaries `fastetcd-ctl` (small client), `fastetcd-bench`
 ```
 
-## Wire-compat surface (initial scope)
+## Wire-compat surface
 
-| Service       | Methods (minimum)                                              |
-|---------------|----------------------------------------------------------------|
-| KV            | Range, Put, DeleteRange, Txn, Compact                          |
-| Watch         | Watch (bidi stream), with fragmentation and progress notify    |
-| Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive (bidi), LeaseTimeToLive, LeaseLeases |
-| Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote |
-| Maintenance   | Alarm, Status, Defragment, Hash, HashKV, Snapshot, MoveLeader  |
-| Auth          | (Phase 2) AuthEnable/Disable, User*, Role*, Authenticate       |
+| Service       | Implemented | Not implemented |
+|---------------|-------------|-----------------|
+| KV            | Range, Put, DeleteRange, Txn, Compact | nested Txn (#56) |
+| Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel | response fragmentation (#58) |
+| Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases | authorization of lease RPCs (#47) |
+| Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
+| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot | MoveLeader, Downgrade (#57); Alarm ACTIVATE (deliberate) |
+| Auth          | all RPCs; replicated through Raft; token or client-cert CN | token expiry (#46) |
 
-Auth is deferred until KV/Watch/Lease/Cluster/Maintenance are solid; the
-common deployment pattern uses TLS client-cert authentication outside
-the etcd Auth subsystem.
+The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 
 ## Read path (linearizable)
 
@@ -130,8 +131,9 @@ the etcd Auth subsystem.
 2. Server, if leader, issues a Raft read-index (no log append, just a
    heartbeat round-trip to confirm leadership) and waits for apply to
    catch up to that index.
-3. Server, if follower, forwards to leader (or returns `NotLeader` with
-   leader hint depending on config — match etcd's behavior).
+3. Server, if follower, forwards the whole Range to the leader over the
+   peer transport (`ForwardRead`), which runs the barrier and reads its
+   own state machine.
 4. State machine snapshot read at the established revision.
 5. The response header's `revision` is the revision that snapshot was
    read at (etcd: the read txn's revision), taken together with the
@@ -148,8 +150,10 @@ the etcd Auth subsystem.
 1. Client `Put` arrives at any node.
 2. Non-leader forwards to leader (etcd does the same internally).
 3. Leader proposes through openraft; awaits commit.
-4. Apply thread executes against MVCC store, assigns new global
-   revision, durably writes redb txn, returns response.
+4. The state machine applies it to the MVCC store: assigns the next
+   global revision, commits one redb write transaction (the mutation and
+   the raft `last_applied` together), returns the response. A put
+   naming a lease is checked on the leader before proposing (#19).
 
 ## Watch delivery guarantee
 
@@ -171,45 +175,21 @@ Resyncs and lag cancellations are logged at `warn` on the
 
 ## Migration from etcd
 
-`crates/migrate` reads an etcd v3 snapshot (BoltDB file). The relevant
-buckets are `key` (MVCC), `lease`, `auth`, `meta`. We:
+`fastetcd-migrate` reads an etcd v3 snapshot (BoltDB file) and writes a
+fresh fastetcd data directory, **without going through Raft** (a
+bulk-load before the cluster starts). It reads the `key` bucket only:
 
-1. Walk the `key` bucket in revision order, applying each as a state
-   machine entry **without going through Raft** (this is a bulk-load,
-   pre-cluster-start path).
-2. Restore leases, current revision, compaction state.
-3. Generate a Raft snapshot at the restored revision, so the cluster
-   starts with that snapshot as its initial state on every node.
+- default: the latest live value of each key, as puts (every key at
+  revision 1);
+- `--preserve-revisions`: every record with its original revisions, so
+  `Range(rev)` and `Watch(start_rev)` behave as on the source.
+
+Not imported (#60): the `lease` bucket (keys keep their lease ids, but
+no lease backs them, so they never expire) and auth. No raft snapshot is
+generated: the first server start initializes raft on the migrated store.
 
 ## Open questions
 
-- TLS termination: in-process via `rustls` (preferred) or sidecar?
-  Default to in-process to preserve etcd's `--cert-file/--key-file` flag
-  shape.
-- Auth: defer or include in v0.1? Lean defer.
-- `Maintenance.Defragment` semantics differ per engine — redb has
-  compact-in-place (verify it is online); the iouring engine will
-  expose a WAL-segment rotation or compaction trigger with its own
-  semantics. Document both.
-- Watch event ordering across compaction boundaries — etcd has specific
-  guarantees for `ErrCompacted`; match exactly across both engines.
-  (A lagging watcher whose history is compacted is cancelled with
-  `ErrCompacted` semantics — see "Watch delivery guarantee".)
-- Default cargo features for the `storage` crate: `iouring` enabled on
-  Linux, disabled elsewhere. Verify CI matrix covers both engines on
-  Linux.
-
-## What v0.1 ships
-
-- 3-node cluster (1-node also supported).
-- Range/Put/DeleteRange/Txn/Compact.
-- Watch (single-key + range + prev_kv + progress notify).
-- Lease (Grant/Revoke/KeepAlive/TTL).
-- MemberList + Status (real values).
-- Snapshot RPC (full state dump).
-- Migration tool for etcd snapshots.
-- Smoke-tested against `etcdctl` and at least one third-party etcd v3
-  client.
-
-What's deferred to v0.2+: Auth, MoveLeader, Defragment, Downgrade,
-Alarm-on-disk-quota.
+- A second engine for tail latency (#55): wire engine selection, with
+  on-disk format detection, or drop it.
+- Watch fragmentation (#58) and nested Txn (#56).

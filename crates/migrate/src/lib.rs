@@ -2,10 +2,11 @@
 //!
 //! Public API: [`migrate_snapshot`] takes a path to an etcd BoltDB
 //! snapshot and a path to a target fastetcd data dir, walks the
-//! upstream `key` bucket, and replays the latest record of each
-//! user-key as a `Mutation::Put` into a fresh `MvccStore`. Revision
-//! history from the source is **not** preserved — Phase 2 will add a
-//! revision-preserving bulk-load path.
+//! upstream `key` bucket, and writes it into a fresh `MvccStore`:
+//! by default the latest record of each user key as a `Mutation::Put`,
+//! or with [`MigrationMode::PreserveRevisions`] every record at its
+//! original revisions (a bulk load). Only the `key` bucket is read:
+//! leases and auth are not imported (fastetcd#60).
 
 use std::path::Path;
 use std::sync::Arc;
