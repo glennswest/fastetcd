@@ -96,6 +96,7 @@ goal is a drop-in replacement, not a fork of behavior.
 | TLS | Yes | Yes |
 | Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
 | Health | grpc.health.v1 | grpc.health.v1 |
+| JSON gateway | `/v3/...` (grpc-gateway) | `/v3/...`, same routes and JSON ([docs](docs/03-deploy.md#v3-json-gateway)) |
 | Data import | n/a | `fastetcd-migrate` reads etcd BoltDB snapshots |
 
 ### Storage

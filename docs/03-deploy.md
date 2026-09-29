@@ -401,6 +401,60 @@ than buffered in memory. The snapshot file can be re-imported on a
 fresh fastetcd via `fastetcd-migrate --from=snapshot.db
 --to=/var/lib/fastetcd-new`.
 
+## v3 JSON gateway
+
+The client port also serves etcd's v3 JSON gateway, as etcd does, so
+HTTP tools need no gRPC client. It is etcd's own surface (v3.6), so
+`curl` recipes and tools written for etcd work unchanged:
+
+```bash
+# Keys and values are base64: "foo" = Zm9v, "bar" = YmFy.
+curl -s -X POST http://127.0.0.1:2379/v3/kv/put -d '{"key":"Zm9v","value":"YmFy"}'
+curl -s -X POST http://127.0.0.1:2379/v3/kv/range -d '{"key":"Zm9v"}'
+# {"header":{"cluster_id":"…","member_id":"…","revision":"1","raft_term":"1"},
+#  "kvs":[{"key":"Zm9v","create_revision":"1","mod_revision":"1","version":"1","value":"YmFy"}],"count":"1"}
+curl -s -X POST http://127.0.0.1:2379/v3/maintenance/status
+curl -s -X POST http://127.0.0.1:2379/v3/cluster/member/list
+# Everything under /registry/, keys only:
+curl -s -X POST http://127.0.0.1:2379/v3/kv/range \
+  -d '{"key":"L3JlZ2lzdHJ5Lw==","range_end":"L3JlZ2lzdHJ5MA==","keys_only":true}'
+# A watch: the body holds requests, each response is a line.
+curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm9v"}}'
+```
+
+- **Routes:** `POST` only, the body is the request message as JSON, and an
+  empty body is the default request. KV: `/v3/kv/range`, `put`,
+  `deleterange`, `txn`, `compaction`. Lease: `/v3/lease/grant`, `revoke`,
+  `timetolive`, `leases` (also under `/v3/kv/lease/`), `keepalive`.
+  Watch: `/v3/watch`. Cluster: `/v3/cluster/member/add`, `remove`,
+  `update`, `list`, `promote`. Maintenance: `/v3/maintenance/alarm`,
+  `status`, `defragment`, `hash`, `hashkv`, `snapshot`,
+  `transfer-leadership`, `downgrade`. Auth: `/v3/auth/enable`, `disable`,
+  `status`, `authenticate`, `user/{add,get,list,delete,changepw,grant,revoke}`,
+  `role/{add,get,list,delete,grant,revoke}`.
+- **JSON:** as etcd's gateway writes it: proto field names (`raft_term`,
+  `dbSize`, `ID`, `peerURLs`), 64-bit numbers as strings, keys and values
+  base64, enums by name (`"action":"GET"`, `"alarm":"NOSPACE"`), fields
+  at their default value left out. Requests accept either field
+  spelling, numbers or strings, and ignore unknown fields.
+- **Errors:** the HTTP status grpc-gateway maps the gRPC code to (400
+  invalid argument / out of range, 401 unauthenticated, 403 permission
+  denied, 404 not found, 429 NOSPACE, 503 unavailable, …), body
+  `{"code":<grpc code>,"message":"…"}`.
+- **Streams** (`snapshot`, `watch`, `keepalive`): one JSON object per
+  line, `{"result":{…}}` or `{"error":{…}}`. For `watch` and `keepalive`
+  the body is a sequence of JSON requests. A watch keeps streaming after
+  the body ends, until the client disconnects; a keepalive stream ends
+  with its requests. WebSocket upgrades are not supported.
+- **Auth:** the same as gRPC. Send the token from `/v3/auth/authenticate`
+  as the `Authorization` header (no `Bearer` prefix, as with etcd). Under
+  `--client-cert-auth` a client certificate's CN names the user, as over
+  gRPC. Writes and admin verbs are served, as etcd serves them; RBAC and
+  the root-only rules apply to them exactly as to gRPC calls.
+- Gateway calls count in `grpc_server_*_total` under the method they call.
+- `--enable-grpc-gateway=false` (or `ETCD_ENABLE_GRPC_GATEWAY=false`)
+  turns it off. gRPC and `/health` are unaffected.
+
 ## Metrics
 
 Prometheus text on `GET /metrics` at `--listen-metrics-url`, refreshed

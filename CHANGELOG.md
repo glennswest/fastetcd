@@ -3,6 +3,22 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-29
+- **feat:** etcd's v3 JSON gateway on the client port (#28). `POST
+  /v3/kv/range`, `/v3/maintenance/status`, `/v3/cluster/member/list`
+  and every other KV, Lease, Watch, Cluster, Maintenance and Auth
+  method, at etcd v3.6's routes and with its JSON (proto field names,
+  64-bit numbers as strings, base64 bytes, enums by name). Errors map to
+  grpc-gateway's HTTP statuses with `{"code","message"}` bodies.
+  Snapshot, watch and keepalive stream a JSON line per message. Each
+  call goes through the same auth interceptor and service code as gRPC,
+  with the token in the `Authorization` header, and counts in
+  `grpc_server_*_total`. `--enable-grpc-gateway` (default on,
+  `ETCD_ENABLE_GRPC_GATEWAY`). Docs: `docs/03-deploy.md` § v3 JSON
+  gateway.
+- **feat:** The gRPC API also accepts the auth token as `authorization`
+  metadata, as etcd does, not only `token`.
+
 ## [v1.7.1] — 2026-09-29
 
 ### 2026-09-29
