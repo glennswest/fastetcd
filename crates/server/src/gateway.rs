@@ -140,7 +140,14 @@ pub fn router(gw: Gateway) -> Router {
     let r = unary!(r, "/v3/auth/role/delete", "Auth", "RoleDelete", auth, Auth::role_delete, AuthRoleDeleteRequest, false);
     let r = unary!(r, "/v3/auth/role/grant", "Auth", "RoleGrantPermission", auth, Auth::role_grant_permission, AuthRoleGrantPermissionRequest, false);
     let r = unary!(r, "/v3/auth/role/revoke", "Auth", "RoleRevokePermission", auth, Auth::role_revoke_permission, AuthRoleRevokePermissionRequest, false);
+    // Anything else under /v3/ is grpc-gateway's JSON 404, not the gRPC
+    // router's `Unimplemented`.
+    let r = r.route("/v3/*rest", axum::routing::any(not_found));
     r.with_state(Arc::new(gw))
+}
+
+async fn not_found() -> Response {
+    error(&Status::not_found("Not Found"))
 }
 
 /// One unary call: decode, authenticate, call, encode.
