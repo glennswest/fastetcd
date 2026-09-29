@@ -3,12 +3,55 @@
 This document covers running fastetcd in production. For development
 runs see `README.md`.
 
-## Container
+## How fastetcd reaches a StormCOS node
 
-The repo ships a multi-stage `Dockerfile` (binary built in the
-image) and a `Dockerfile.ci` (binary pre-built outside, faster
-image build in CI). Both produce a distroless image with the
-`fastetcd` binary at `/usr/local/bin/fastetcd`.
+On the StormCOS platform fastetcd is a **golden**, built from source by
+stormcos's `deploy/build-goldens.sh`. That script and its document,
+[stormcos `docs/goldens.md`](https://github.com/glennswest/stormcos/blob/main/docs/goldens.md),
+are the one authority for the process. What it does with this repo
+(section "control plane" of the script, as of 2026-09-29):
+
+- **Source.** The checkout on the build box (`/root/fastetcd` on
+  `dev.g8.lo`, or `FASTETCD_SRC`), fast-forwarded to `origin/main`. The
+  golden is built from whatever `main` is at that moment. Nothing is
+  downloaded from a GitHub release or a registry (owner, 2026-09-28).
+- **Compile.** `cargo build --release --locked --target
+  x86_64-unknown-linux-musl`, and it must produce `fastetcd`,
+  `fastetcd-ctl` and `fastetcd-migrate`. fastetcd is a *required*
+  component: if it does not build, the image build stops.
+- **Golden `fastetcd`** (64M, a stormd base): the three binaries in
+  `/usr/bin`, run and restarted by stormd (its API on port 9081), with a
+  TCP liveness probe on 2379, as
+  `fastetcd --data-dir /data/fastetcd --listen-client-urls
+  http://0.0.0.0:2379 --listen-peer-urls http://0.0.0.0:2380
+  --advertise-client-urls http://${NODE_IP}:2379
+  --initial-advertise-peer-urls http://${NODE_IP}:2380`.
+- **Golden `fastetcd-data`** (1G, blank): the `/data/fastetcd` volume.
+  1G is headroom on top of fastetcd's own bounded growth (see
+  [Disk space](#disk-space)).
+
+What that asks of this repo:
+
+- **`main` is what ships.** A change is in the next image as soon as it
+  is pushed to `main`. A tag marks a version; it is not what the image
+  build picks.
+- **`Cargo.lock` must be committed and current.** `--locked` fails
+  rather than update it, so a dependency added without its lock entry
+  breaks the golden (as #52 did). Check with `sc-build 'cargo build
+  --locked --workspace'`.
+- **Every binary must build for musl** (no glibc-only dependency).
+- fastetcd has no stormcentral component entry, so `stormcentral
+  component build fastetcd` is refused. Its golden comes from the stormcos
+  image build.
+
+## Container images
+
+No container image is published, and **GHCR is deliberately not used**
+on this platform. For your own use, the repo ships a multi-stage
+`Dockerfile` (binary built in the image) and a `Dockerfile.ci` (binary
+built outside it, then copied in). Both produce a distroless image with
+`fastetcd` at `/usr/local/bin/fastetcd`. Build one and push it to a
+registry you run:
 
 ```
 docker build -t fastetcd:dev .
@@ -17,25 +60,20 @@ docker run --rm -p 2379:2379 -p 2380:2380 \
     fastetcd:dev
 ```
 
-GitHub Actions is disabled for this repo (repo-level setting,
-confirmed off since 2026-05-24 — not a workflow or billing issue,
-just switched off). All testing, building, and packaging happens
-by hand on a Linux box with the musl target and packaging tools
-installed — `dev.g8.lo` — via `deploy/packaging/run-tests.sh` and
-`deploy/packaging/build-release.sh`.
-
-```
-podman build -t ghcr.io/glennswest/fastetcd:vX.Y.Z -f Dockerfile.ci .
-podman push ghcr.io/glennswest/fastetcd:vX.Y.Z
-```
+GitHub Actions is disabled for this repo (a repo-level setting, off
+since 2026-05-24). Builds and tests run on `dev.g8.lo` through
+`sc-build`. Packages are built there by hand (below).
 
 ## Linux packages (rpm / deb)
 
-Releases publish `fastetcd-vX.Y.Z-1.x86_64.rpm` and
-`fastetcd_vX.Y.Z-1_amd64.deb` to [GitHub
-Releases](https://github.com/glennswest/fastetcd/releases), plus a
-plain `fastetcd-vX.Y.Z-x86_64-linux-musl.tar.gz` for distros that
-use neither package manager. All three bundle `fastetcd` /
+For hosts outside StormCOS (the platform does not use these):
+`deploy/packaging/build-release.sh vX.Y.Z` builds
+`fastetcd-vX.Y.Z-1.x86_64.rpm`, `fastetcd_vX.Y.Z-1_amd64.deb` and a
+plain `fastetcd-vX.Y.Z-x86_64-linux-musl.tar.gz` for distros that use
+neither package manager. [GitHub
+Releases](https://github.com/glennswest/fastetcd/releases) carry them
+up to v1.2.0; later versions are tags only, so build the packages
+from the tag you want (below). All three bundle `fastetcd` /
 `fastetcd-ctl` / `fastetcd-migrate`, built statically against
 `x86_64-unknown-linux-musl` — no glibc-version dependency on the
 install target.

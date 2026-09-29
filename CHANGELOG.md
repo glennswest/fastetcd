@@ -3,6 +3,21 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-29
+- **docs:** Deploy docs say how fastetcd really ships, and drop GHCR,
+  which this platform deliberately does not use (#24).
+  `docs/03-deploy.md` § How fastetcd reaches a StormCOS node describes
+  the golden stormcos's `build-goldens.sh` builds from `main` (`cargo
+  build --release --locked`, musl, three binaries, the `fastetcd` and
+  `fastetcd-data` goldens and the flags it runs with), what that asks of
+  this repo, and links stormcos `docs/goldens.md`. The GHCR push steps
+  are gone; container images are build-your-own. The packages section
+  no longer claims every release is on GitHub Releases (they stop at
+  v1.2.0).
+- **chore:** Helm chart 0.2.0: the default image is `fastetcd` (build
+  and push your own) instead of `ghcr.io/glennswest/fastetcd`;
+  `appVersion` 1.8.0 (was 0.4.0).
+
 ## [v1.8.0] — 2026-09-29
 
 ### 2026-09-29

@@ -2,7 +2,9 @@
 # Builds the rpm/deb/tarball release artifacts for a tagged version.
 # Run on a Linux host with rustup (x86_64-unknown-linux-musl target),
 # cargo-deb, cargo-generate-rpm, protoc, and musl-gcc installed —
-# e.g. dev.g8.lo. Not run in CI; GitHub Actions only runs `cargo test`.
+# e.g. dev.g8.lo. Run by hand; GitHub Actions is off for this repo. The
+# StormCOS platform does not use these packages: it builds fastetcd from
+# source into a golden (docs/03-deploy.md).
 #
 # Usage: deploy/packaging/build-release.sh vX.Y.Z
 set -euo pipefail

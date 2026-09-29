@@ -1,7 +1,10 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/glennswest/fastetcd
+  # No image is published anywhere (GHCR is deliberately not used): build
+  # one from the repo's Dockerfile, push it to a registry you run, and set
+  # this to it.
+  repository: fastetcd
   tag: ""           # defaults to .Chart.appVersion if empty
   pullPolicy: IfNotPresent
 

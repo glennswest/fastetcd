@@ -252,13 +252,15 @@ fastetcd-ctl --user root:pw auth adopt <member>  # replicate one to all
 
 See `docs/03-deploy.md` for the full guide. Quick paths:
 
-- **Container**: `docker run -p 2379:2379 -p 2380:2380
-  ghcr.io/glennswest/fastetcd:latest`
+- **StormCOS**: fastetcd ships as a golden that stormcos builds from
+  `main`; see [docs/03-deploy.md § How fastetcd reaches a StormCOS
+  node](docs/03-deploy.md#how-fastetcd-reaches-a-stormcos-node).
+- **Container**: no image is published (GHCR is not used); `docker build
+  -t fastetcd:dev .` and run or push that.
 - **Kubernetes**: `helm install fastetcd ./deploy/charts/fastetcd`
-- **Fedora/RHEL**: `dnf install` the `.rpm` from [GitHub
-  Releases](https://github.com/glennswest/fastetcd/releases)
-- **Debian/Ubuntu**: `dpkg -i` the `.deb` from [GitHub
-  Releases](https://github.com/glennswest/fastetcd/releases)
+- **Fedora/RHEL**, **Debian/Ubuntu**: `dnf install` the `.rpm` or
+  `dpkg -i` the `.deb` that `deploy/packaging/build-release.sh` builds
+  (on GitHub Releases up to v1.2.0)
 - **systemd**: rpm/deb installs enable it automatically; for a
   manual install see `deploy/systemd/fastetcd.service` and
   `docs/03-deploy.md`.

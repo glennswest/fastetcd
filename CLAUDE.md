@@ -503,6 +503,7 @@ rewrite. Only remaining gap from the v0.1.0 era is the openraft
 
 Version locations (keep in sync):
 - `Cargo.toml` workspace `[workspace.package] version`
+- `deploy/charts/fastetcd/Chart.yaml` `appVersion`
 - This file (the line above)
 - Tags `vX.Y.Z`
 
