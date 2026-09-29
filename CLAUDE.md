@@ -957,6 +957,50 @@ Tracked live in the Claude task system. Snapshot of the order:
       as the issue did: single node 89 of 132 LISTs missing a write,
       3-member 62 of 119.
 
+31. **etcd's v3 JSON gateway on the client port (#28) — in progress.**
+    stormconsole#20 is an HTTP/JSON client and can't read status,
+    members or the keyspace over gRPC. Serve etcd's own grpc-gateway
+    surface, as etcd v3.6.11 does (`server/embed/serve.go`, routes from
+    the `google.api.http` annotations in its `rpc.proto`):
+    - `POST /v3/...` for every KV, Lease, Cluster, Maintenance and Auth
+      method: `/v3/kv/range|put|deleterange|txn|compaction`,
+      `/v3/lease/grant|revoke|timetolive|leases` (+ the `/v3/kv/lease/*`
+      aliases), `/v3/cluster/member/add|remove|update|list|promote`,
+      `/v3/maintenance/alarm|status|defragment|hash|hashkv|snapshot|
+      transfer-leadership|downgrade`, `/v3/auth/...`. Writes and admin
+      verbs are served too: etcd serves them on the client port, and
+      the same authorization applies.
+    - JSON as etcd's gateway marshals it (protojson, `UseProtoNames`,
+      no default fields, unknown input fields discarded): proto field
+      names, 64-bit ints as strings, bytes base64, enums by name. Serde
+      impls generated with `pbjson-build` (`preserve_proto_field_names`,
+      `ignore_unknown_fields`). Empty body = default request.
+    - Errors as grpc-gateway v2: HTTP status from the gRPC code (e.g.
+      NotFound 404, PermissionDenied 403, Unauthenticated 401),
+      body `{"code":N,"message":"…"}`. Server streams (Snapshot) as
+      newline-delimited `{"result":…}` / `{"error":…}`.
+    - Same auth as gRPC: each call goes through `AuthInterceptor` and
+      then the service's own checks. The token comes from the
+      `Authorization` header (etcd's gateway forwards it as
+      `authorization` metadata, which etcd's auth accepts beside
+      `token`; fastetcd's gRPC path accepts it too now). TLS client-cert
+      CN identity works the same, from the connection.
+    - Gateway calls count in `grpc_server_*_total` under the method they
+      call, as they do in etcd (its gateway dials the gRPC server).
+    - `--enable-grpc-gateway` (default true, `ETCD_ENABLE_GRPC_GATEWAY`).
+    - Then: `/v3/watch` and `/v3/lease/keepalive` (bidi streams:
+      newline-delimited JSON requests in the body, results streamed).
+    Work items:
+    - [ ] proto: pbjson serde for etcdserverpb / mvccpb / authpb.
+    - [ ] server `gateway.rs`: routes, JSON, errors, interceptor, snapshot
+      stream, metrics; main wiring + flag; `authorization` metadata.
+    - [ ] Tests (`crates/server/tests/gateway.rs`): status, member list,
+      alarm get/deactivate, range with base64 keys, put/txn/compaction,
+      error mapping, auth (no token 401, token via Authorization, RBAC
+      denial 403, root-only admin), snapshot stream.
+    - [ ] Watch / keepalive streams.
+    - [ ] Docs, changelog; release; close #28.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
