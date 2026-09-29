@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-ctl"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-migrate"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "bbolt-rs",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-proto"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "pbjson",
  "pbjson-build",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-raft"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-server"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "fastetcd-storage"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "async-trait",
  "bincode",

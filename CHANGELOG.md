@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.8.0] — 2026-09-29
+
 ### 2026-09-29
 - **feat:** etcd's v3 JSON gateway on the client port (#28). `POST
   /v3/kv/range`, `/v3/maintenance/status`, `/v3/cluster/member/list`
