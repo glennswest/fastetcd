@@ -274,9 +274,9 @@ pub fn common_name(der: &[u8]) -> Option<String> {
 
 /// Who is calling, as etcd decides it (`AuthInfoFromCtx`, fastetcd#20):
 ///
-/// - a `token` in the metadata names the user it was issued to; an
-///   invalid token names no one (it is refused, never replaced by the
-///   certificate below);
+/// - a `token` (or `authorization`) in the metadata names the user it
+///   was issued to; an invalid token names no one (it is refused, never
+///   replaced by the certificate below);
 /// - with no token, and `client_cert_auth` on, the Common Name of the
 ///   client certificate the TLS handshake verified (its leaf). Such a
 ///   user needs no `Authenticate` and usually has no password; the usual
@@ -289,7 +289,13 @@ pub fn identify<T>(
     auth: &AuthState,
     client_cert_auth: bool,
 ) -> Option<UserIdentity> {
-    if let Some(token) = request.metadata().get("token") {
+    // etcd reads the token from `token`, or else `authorization` (what
+    // its v3 JSON gateway forwards the `Authorization` header as;
+    // rpctypes.TokenFieldNameSwagger). fastetcd's gateway does the same
+    // (#28).
+    let md = request.metadata();
+    let token = md.get("token").or_else(|| md.get("authorization"));
+    if let Some(token) = token {
         let name = token.to_str().ok().and_then(|t| auth.user_for_token(t))?;
         return Some(UserIdentity { name });
     }

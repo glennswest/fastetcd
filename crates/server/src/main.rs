@@ -187,6 +187,17 @@ struct Args {
     #[arg(long, env = "FASTETCD_PEER_CLIENT_CERT_AUTH", default_value_t = false)]
     peer_client_cert_auth: bool,
 
+    /// Serve etcd's v3 JSON gateway (`POST /v3/...`) on the client
+    /// port, as etcd does (#28). `--enable-grpc-gateway=false` turns it
+    /// off; gRPC and `/health` are unaffected.
+    #[arg(
+        long,
+        env = "FASTETCD_ENABLE_GRPC_GATEWAY",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    enable_grpc_gateway: bool,
+
     /// Address to serve Prometheus `/metrics` on. Empty disables.
     #[arg(
         long,
@@ -482,6 +493,7 @@ fn apply_etcd_env_compat() {
         ("FASTETCD_KEY_FILE", "ETCD_KEY_FILE"),
         ("FASTETCD_TRUSTED_CA_FILE", "ETCD_TRUSTED_CA_FILE"),
         ("FASTETCD_CLIENT_CERT_AUTH", "ETCD_CLIENT_CERT_AUTH"),
+        ("FASTETCD_ENABLE_GRPC_GATEWAY", "ETCD_ENABLE_GRPC_GATEWAY"),
         ("FASTETCD_PEER_CERT_FILE", "ETCD_PEER_CERT_FILE"),
         ("FASTETCD_PEER_KEY_FILE", "ETCD_PEER_KEY_FILE"),
         ("FASTETCD_PEER_TRUSTED_CA_FILE", "ETCD_PEER_TRUSTED_CA_FILE"),
@@ -1183,6 +1195,17 @@ async fn main() -> anyhow::Result<()> {
     let interceptor =
         AuthInterceptor::new(auth_state.clone()).with_client_cert_auth(args.client_cert_auth);
     let tls_for_client = client_tls;
+    // etcd's v3 JSON gateway on the client port, through the same
+    // services and interceptor as gRPC (#28).
+    let gateway = args.enable_grpc_gateway.then(|| fastetcd_server::gateway::Gateway {
+        kv: kv.clone(),
+        lease: lease.clone(),
+        cluster: cluster.clone(),
+        maintenance: maintenance.clone(),
+        auth: auth.clone(),
+        interceptor: interceptor.clone(),
+        traffic: traffic.clone(),
+    });
 
     // Standard gRPC health service. Mark every service we serve as
     // SERVING so service-mesh / k8s probes pass.
@@ -1232,12 +1255,16 @@ async fn main() -> anyhow::Result<()> {
             // tonic 0.12 routes are convertible to/from axum::Router,
             // so the gRPC routes and the HTTP routes below share one
             // `Service` served on the same listener.
-            let app: axum::Router = grpc_routes
+            let mut app: axum::Router = grpc_routes
                 .routes()
                 .into_axum_router()
                 .route("/health", axum::routing::get(health_http_handler))
                 .route("/livez", axum::routing::get(livez_http_handler))
-                .route("/readyz", axum::routing::get(livez_http_handler))
+                .route("/readyz", axum::routing::get(livez_http_handler));
+            if let Some(gw) = gateway {
+                app = app.merge(fastetcd_server::gateway::router(gw));
+            }
+            let app = app
                 .layer(axum::middleware::from_fn_with_state(
                     traffic,
                     fastetcd_server::traffic::grpc_middleware,

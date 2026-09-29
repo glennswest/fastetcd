@@ -25,6 +25,8 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
+# JSON bodies of the v3 gateway (#28).
+serde_json.workspace = true
 openraft.workspace = true
 
 fastetcd-proto.workspace = true

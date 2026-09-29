@@ -112,6 +112,11 @@ const CODE_NAMES: [&str; 17] = [
     "Unauthenticated",
 ];
 
+/// The `grpc_code` label for a status code (`OK`, `NotFound`, ...).
+pub fn code_label(code: tonic::Code) -> &'static str {
+    CODE_NAMES.get(code as usize).copied().unwrap_or("Unknown")
+}
+
 fn code_name(status: &[u8]) -> &'static str {
     std::str::from_utf8(status)
         .ok()

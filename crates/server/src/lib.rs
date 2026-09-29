@@ -23,6 +23,7 @@ pub mod cluster;
 pub mod cluster_id;
 pub mod compaction;
 pub mod conv;
+pub mod gateway;
 pub mod kv;
 pub mod lease;
 pub mod lease_expiry;
