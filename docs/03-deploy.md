@@ -401,6 +401,48 @@ than buffered in memory. The snapshot file can be re-imported on a
 fresh fastetcd via `fastetcd-migrate --from=snapshot.db
 --to=/var/lib/fastetcd-new`.
 
+## Metrics
+
+Prometheus text on `GET /metrics` at `--listen-metrics-url`, refreshed
+on each scrape. Names are etcd's where one exists, so dashboards written
+for etcd work. Counters start at 0 when the process starts; compute rates
+from deltas between scrapes.
+
+**Traffic** (#29):
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `grpc_server_started_total{grpc_type,grpc_service,grpc_method}` | counter | Calls started on the client port. |
+| `grpc_server_handled_total{…,grpc_code}` | counter | Calls finished, by status code name (`OK`, `NotFound`, …). A call whose client went away before its status was sent (how every `Watch` ends) is `Canceled`. |
+| `etcd_debugging_mvcc_put_total`, `…_delete_total` | counter | Puts and deletes this member applied. Every member counts every write, including those in a txn and the deletes a lease revoke causes. |
+| `etcd_debugging_mvcc_range_total` | counter | Ranges this member served, including ranges in a txn. |
+| `etcd_debugging_mvcc_txn_total` | counter | Txns this member applied. |
+| `etcd_debugging_mvcc_watch_stream_total` | gauge | Open `Watch` streams. |
+| `etcd_debugging_mvcc_watcher_total` | gauge | Watchers on those streams. |
+| `etcd_debugging_mvcc_slow_watcher_total` | gauge | Watchers behind the head: being caught up from history, or on a stream whose client is not reading. A watcher that falls behind is resynced rather than losing events (#16), so this is the sign that one is behind. |
+| `fastetcd_watch_resyncs_total`, `fastetcd_watch_lag_cancels_total` | counter | Watchers caught up from history; watchers cancelled because that history was compacted. |
+
+**Raft and membership:**
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `etcd_server_has_leader` | gauge | 1 if this member knows a leader. |
+| `etcd_server_is_leader` | gauge | 1 if this member *is* the leader. |
+| `etcd_server_id{server_id="<hex>"}` | gauge | Always 1; the label is this member's id, to match a scrape to a member. |
+| `etcd_server_leader_changes_seen_total` | counter | Leader changes seen. |
+| `etcd_server_proposals_committed_total` | gauge | The raft committed index (a gauge, as in etcd). |
+| `etcd_server_proposals_applied_total` | gauge | The raft applied index. Committed minus applied is apply lag. |
+| `etcd_server_proposals_pending` | gauge | Proposals this member is waiting on. |
+
+**Store:** `etcd_debugging_mvcc_current_revision`,
+`etcd_debugging_mvcc_compact_revision`,
+`etcd_mvcc_db_total_size_in_bytes`,
+`etcd_mvcc_db_total_size_in_use_in_bytes`,
+`etcd_server_quota_backend_bytes`, `fastetcd_engine_info{engine}`
+(`redb`, `wal` or `iouring`), and the disk and recovery metrics in
+[04-disk-space](04-disk-space.md) and
+[05-backup-and-recovery](05-backup-and-recovery.md).
+
 ## Migration from etcd
 
 ```

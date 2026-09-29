@@ -3,6 +3,29 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-29
+- **feat:** `/metrics` shows traffic (#29), with etcd's names so
+  existing dashboards work:
+  - `grpc_server_started_total` / `grpc_server_handled_total{grpc_type,
+    grpc_service,grpc_method[,grpc_code]}` for every call on the client
+    port (an axum middleware reads `grpc-status` from the headers or
+    trailers; a call whose client leaves first is `Canceled`).
+  - `etcd_debugging_mvcc_{put,delete,range,txn}_total`, counted in
+    `MvccStore` (writes as applied on every member).
+  - `etcd_debugging_mvcc_watch_stream_total`, `…_watcher_total`,
+    `…_slow_watcher_total` (resyncing from history, or blocked on a
+    client that is not reading).
+  - `etcd_server_proposals_committed_total` / `…_applied_total` (the
+    raft indexes; committed from the log store's `save_committed`),
+    `etcd_server_proposals_pending`, `etcd_server_is_leader`,
+    `etcd_server_id{server_id}`.
+  - `fastetcd_engine_info{engine}`, documented before but never
+    registered; `fastetcd_watch_resyncs_total` /
+    `fastetcd_watch_lag_cancels_total` now registered too.
+- **fix:** A watch stream's tasks end as soon as its client goes away,
+  not at the next event they fail to send, which might never come.
+- **docs:** Metrics reference in `docs/03-deploy.md` § Metrics.
+
 ## [v1.6.1] — 2026-09-29
 
 ### 2026-09-29
