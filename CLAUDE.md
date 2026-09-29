@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.6.0`** — Under `--client-cert-auth`, a client certificate's Common
+**`1.6.1`** — A Range's header revision is the revision its contents
+were read at (#50, P0). It was read after the range, so a concurrent
+commit made a Kubernetes LIST + WATCH skip that write for good
+(rustkube#146). `MvccStore::range_with_revision` returns the read's
+revision (engine snapshot taken under the write-state lock), and
+`ForwardRead` replies carry the leader's read revision after the result
+(older followers ignore it; from an older leader the follower falls
+back to its own revision and warns once).
+
+Previous: **`1.6.0`** — Under `--client-cert-auth`, a client certificate's Common
 Name is its etcd user (#20), as in etcd: no token → the verified leaf's
 CN (`authz::identify`, used by the interceptor and the Auth service); a
 token wins; an invalid token is refused, not replaced. Roles now scope
@@ -905,27 +914,31 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] Tests (`crates/server/tests/metrics.rs`), docs, changelog;
       release; close #29.
 
-30. **A Range's header revision is its snapshot's revision (#50, P0) — in progress.**
+30. **A Range's header revision is its snapshot's revision (#50, P0) — done, shipped in v1.6.1.**
     `KvService::range` read `current_revision()` *after* the read, so a
     commit in between stamped the response with a later revision than
     its contents; a Kubernetes LIST then WATCHes from after that and
     never sees the write in between (rustkube#146). A forwarded read
     also took the serving member's local revision, not the leader's.
     etcd: the header is the read txn's revision.
-    - [ ] storage: `MvccStore::range_with_revision` returns the
+    - [x] storage: `MvccStore::range_with_revision` returns the
       revision the read was taken at (the `current_rev` it copied under
       the write-state lock, which is what its contents are filtered to).
-    - [ ] raft `ForwardRead`: the leader appends that revision to its
+    - [x] raft `ForwardRead`: the leader appends that revision to its
       reply (`(Result<RangeResult,String>, i64)`; bincode 1 ignores the
       trailing bytes, so an older follower still decodes it). An older
       leader's reply has no revision: fall back to the local revision
       (the old behaviour), logged once — transient during an upgrade.
-    - [ ] server: header from that revision; txn headers already come
+    - [x] server: header from that revision; txn headers already come
       from the txn's own revision (under the lock).
-    - [ ] Tests: concurrent writers + LIST readers, single node and
+    - [x] Tests: concurrent writers + LIST readers, single node and
       through a follower (every acknowledged write <= header is in the
       list, none above); wire compat both ways; docs, changelog;
       release; close #50.
+    - Verified: sc-build of 1335734, whole workspace green. With the old
+      header logic patched back in on the build box, the gRPC tests fail
+      as the issue did: single node 89 of 132 LISTs missing a write,
+      3-member 62 of 119.
 
 ## Constraints & rules
 
