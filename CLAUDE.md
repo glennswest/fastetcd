@@ -1018,6 +1018,27 @@ Tracked live in the Claude task system. Snapshot of the order:
       the v3lock / v3election gateways (fastetcd has no Lock/Election
       services).
 
+32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — in progress.**
+    GHCR is deliberately unused on this platform, yet `docs/03-deploy.md`,
+    the README and the Helm chart's default image pointed at
+    `ghcr.io/glennswest/fastetcd`. The issue's premise (a release tarball
+    fetched by stormpump's `build-goldens.sh`) is out of date: the build
+    moved to stormcos (2026-09-22) and since 2026-09-28 compiles fastetcd
+    from source (`cargo build --release --locked --target
+    x86_64-unknown-linux-musl`, `/root/fastetcd` fast-forwarded to
+    `origin/main`) into a stormd golden `fastetcd` (+ `fastetcd-data`).
+    Nothing is downloaded from a release. Work items:
+    - [ ] 03-deploy: "How fastetcd reaches a StormCOS node" (the golden
+      recipe, what it requires of this repo: `main` is what ships,
+      `Cargo.lock` current, musl builds), link stormcos/docs/goldens.md;
+      drop the GHCR push; container images are build-your-own.
+    - [ ] Packages section: GitHub Releases carry rpm/deb/tarball only
+      up to v1.2.0; later versions are tags; build-release.sh by hand.
+    - [ ] README quick path, chart default image (no registry assumed),
+      build-release.sh's stale Actions comment.
+    - [ ] Verify: the documented golden compile command on dev; chart
+      renders; changelog; close #24.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
