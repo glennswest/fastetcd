@@ -1073,6 +1073,20 @@ Tracked live in the Claude task system. Snapshot of the order:
     start a pod: `--auto-defrag=true`), #54, #55, #56, #57, #58, #59, #60 (migrate drops leases/auth), #61 (P1, a live
     snapshot cannot be restored by anything).
 
+34. **`--auto-compaction-retention` units (#21) — waiting on the owner.**
+    Documented (revisions, not hours) in the #26 pass. The fix needs a
+    decision (asked on #21, 2026-09-29): etcd's `--auto-compaction-mode`
+    defaults to `periodic` (a bare number = hours); fastetcd's bare number
+    is revisions, and flowsdn's ClusterMesh spec (§2.7 F18, §6.6) sets it
+    that way (`max(100 x agents, 10000)`). Options put to the owner:
+    (1) etcd parity, default `periodic`, MAJOR bump, flowsdn adds
+    `--auto-compaction-mode=revision`; (2) add the mode flag but default
+    `revision` (non-breaking, etcd configs still misread); (3) a non-zero
+    retention without an explicit mode refuses to start. Recommended: (1).
+    Either way: `--auto-compaction-mode periodic|revision`, etcd's
+    duration parsing (`1h`, `30m`, bare = hours in periodic), and
+    `ETCD_AUTO_COMPACTION_MODE`.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
