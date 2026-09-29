@@ -4,23 +4,38 @@ A Rust implementation of the **etcd v3 wire protocol**, focused on
 low resource overhead and predictable latency. Wire-compatible with
 unmodified etcd v3 clients (third-party `etcd-client` Rust crate
 exercises the full surface in the integration tests). Multi-node
-Raft via `openraft`.
-Two storage engines: cross-platform `redb` (default) and Linux-only
-`iouring` (via `tokio-uring`).
+Raft via `openraft`. Data is stored in `redb`, a single-file ACID
+B-tree.
 
 ## Status
 
-`v0.7.0` — production-shaped: TLS, Auth (token + per-key
-permissions), Prometheus `/metrics`, gRPC health, distroless
-container, Helm chart, rpm/deb/tarball packaging. Multi-node client
-write forwarding to the leader. Built and tested by hand on
-`dev.g8.lo` (see `docs/03-deploy.md`) — GitHub Actions is disabled
-for this repo. See `CHANGELOG.md` for the full release history.
+`v1.8.0` (see `CHANGELOG.md`). What works today, all through Raft,
+single- and multi-member, with linearizable reads by default:
+
+- The etcd v3 gRPC API: KV (Range, Put, DeleteRange, Txn, Compact),
+  Watch, Lease, Cluster, Maintenance, Auth, plus `grpc.health.v1`.
+- etcd's v3 JSON gateway (`POST /v3/...`) and `GET /health`, `/livez`,
+  `/readyz` on the client port; Prometheus `/metrics` on its own port.
+- Auth: users, roles, per-key permissions, replicated through Raft;
+  tokens; a TLS client certificate's CN as the user; admin RPCs
+  root-only.
+- TLS on the client and peer ports, independently.
+- A bounded on-disk footprint (reclaim, NOSPACE alarm), periodic
+  backups with self-restore of a lone member from a corrupt file,
+  offline `backup` / `restore` / `fsck` / `defrag`, volume sizing.
+- Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
+
+Not implemented (each has an issue): nested Txn (#56), MoveLeader and
+Downgrade (#57), watch response fragmentation (#58), raising an alarm by
+hand (deliberate), the etcd v2 API (out of scope). Differences from
+etcd are listed under [Compatibility boundary](#compatibility-boundary).
 
 ## Quick start
 
 ```
 cargo run --release -p fastetcd-server --bin fastetcd
+# (on the StormCOS build setup: never build on the session VM; push and
+#  run `sc-build`, which builds and tests on dev.g8.lo)
 # in another terminal:
 etcdctl --endpoints=127.0.0.1:2379 put hello world
 etcdctl --endpoints=127.0.0.1:2379 get hello
@@ -49,8 +64,9 @@ fastetcd-ctl snapshot-save /tmp/snapshot.db
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ tonic gRPC: KV / Watch / Lease / Maintenance / Cluster / Auth /      │
-│             grpc.health.v1  + Prometheus /metrics side port          │
+│ client port: tonic gRPC KV / Watch / Lease / Maintenance / Cluster / │
+│   Auth / grpc.health.v1, HTTP /health, v3 JSON gateway /v3/...       │
+│ metrics port: Prometheus /metrics                                     │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │   AuthInterceptor (token + per-key authz)
                              │   writes proposed to Raft
@@ -63,15 +79,14 @@ fastetcd-ctl snapshot-save /tmp/snapshot.db
 ┌──────────────────────────────────────────────────────────────────────┐
 │ MVCC: revisions · generations · leases · events · compact · Txn     │
 └────────────────────────────┬─────────────────────────────────────────┘
-                             │   KvStore trait (runtime-selectable)
+                             │   KvStore trait
                              ▼
-        ┌────────────────────┴───────────────────┐
-        │                                        │
-    redb engine                          wal / iouring engine
-   (default, cross-platform,             (wal-engine: tokio fs;
-    ACID single-file B-tree)              iouring: tokio-uring,
-                                          Linux-only feature)
+                redb engine (ACID single-file B-tree)
 ```
+
+`fastetcd-storage` also has `wal` and (Linux, feature `iouring`)
+`iouring` engines behind the same trait. The server does not use them:
+it always opens redb (#55).
 
 ## fastetcd vs etcd
 
@@ -88,36 +103,27 @@ goal is a drop-in replacement, not a fork of behavior.
 | Wire protocol | etcd v3 gRPC | etcd v3 gRPC (wire-compatible) |
 | v2 HTTP API | Present (deprecated) | Not implemented (out of scope) |
 | Consensus | Raft (etcd-io/raft) | Raft (`openraft`) |
-| Storage engine | BoltDB (bbolt), mmap B+tree | Pluggable `KvStore`: `redb` (default) or `iouring` |
-| Storage selection | Fixed | Runtime-selectable engine |
+| Storage engine | BoltDB (bbolt), mmap B+tree | `redb`, behind a `KvStore` trait |
 | MVCC model | Revisions, generations, leases | Same model, reimplemented |
-| Watch / Lease / Txn | Full | Full, wire-compatible |
+| Watch / Lease / Txn | Full | Wire-compatible; no nested Txn (#56), no watch fragmentation (#58) |
 | Auth | Token / per-key RBAC | Token / per-key RBAC |
 | TLS | Yes | Yes |
 | Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
-| Health | grpc.health.v1 | grpc.health.v1 |
+| Health | grpc.health.v1, `/health` | grpc.health.v1, `/health`, `/livez`, `/readyz` |
 | JSON gateway | `/v3/...` (grpc-gateway) | `/v3/...`, same routes and JSON ([docs](docs/03-deploy.md#v3-json-gateway)) |
 | Data import | n/a | `fastetcd-migrate` reads etcd BoltDB snapshots |
 
 ### Storage
 
 etcd stores all data in a single mmap'd BoltDB (bbolt) file: an
-ACID B+tree with copy-on-write pages. It is robust and battle-tested
-but page-oriented and tied to mmap semantics.
+ACID B+tree with copy-on-write pages.
 
-fastetcd abstracts storage behind a `KvStore` trait with two
-first-class engines selectable at runtime:
-
-- **`redb`** (default) — a pure-Rust embedded ACID B-tree in a
-  single file. Cross-platform, no unsafe mmap dependencies, easy to
-  reason about.
-- **`iouring`** (Linux-only, cargo feature) — a custom WAL plus
-  `tokio-uring` with `O_DIRECT`, bypassing the page cache for the
-  apply path. Aimed at predictable tail latency under sustained
-  write load.
-
-Because the engine is a trait, future backends (e.g. SPDK) can drop
-in without touching the MVCC or Raft layers.
+fastetcd stores everything (MVCC data, the raft log, auth, leases) in
+one `redb` file, `<data-dir>/fastetcd.redb`: a pure-Rust embedded ACID
+B-tree, behind a `KvStore` trait. Raft snapshots are files beside it
+(`<data-dir>/snapshots/`). The trait leaves room for other engines;
+`fastetcd-storage` has a WAL engine and an experimental io_uring one,
+not used by the server (#55).
 
 ### Latency and resource profile
 
@@ -125,7 +131,8 @@ The main motivation for a Rust reimplementation is the absence of a
 garbage collector on the hot path. etcd's apply and compaction paths
 can experience GC-induced jitter under load; fastetcd has
 deterministic, allocation-controlled apply with no stop-the-world
-pauses. Targets:
+pauses. Targets (goals, not measured claims; `fastetcd-bench` measures
+a running server):
 
 - Smaller resident-memory (RSS) floor at idle.
 - p99 write latency at or below upstream under sustained load.
@@ -135,18 +142,26 @@ pauses. Targets:
 
 fastetcd implements the etcd **v3 gRPC** surface — KV, Watch, Lease,
 Txn, Maintenance, Cluster, Auth, and grpc.health.v1 — and is
-exercised in CI by the third-party `etcd-client` Rust crate, which
-shares zero code with fastetcd. Anything that speaks etcd v3
+exercised in its test suite by the third-party `etcd-client` Rust crate,
+which shares zero code with fastetcd. Anything that speaks etcd v3
 (including `etcdctl` and Kubernetes' `kube-apiserver`) is the
 intended client. The deprecated **v2 HTTP API is not implemented**
 and is out of scope — it is gone from upstream's roadmap too.
 
-One known difference in timing: a `Put` naming a lease that does not
-exist is refused with etcd's `etcdserver: requested lease not found`,
-but the check runs on the leader just before the write is proposed,
-not when it is applied as in etcd. So a lease that expires in that
-instant still gets the key attached. Moving the check to apply waits on
-the lease tables travelling in raft snapshots (#41).
+Differences from etcd:
+
+- `--auto-compaction-retention` counts revisions; etcd's default mode
+  counts hours (#21).
+- `MoveLeader` and `Downgrade` answer `Unimplemented` (#57); a nested
+  Txn is refused (#56); raising an alarm by hand is refused.
+- `--log-level` and `--max-request-bytes` are accepted and ignored;
+  logging is set with `RUST_LOG` (#54).
+- A `Put` naming a lease that does not exist is refused with etcd's
+  `etcdserver: requested lease not found`, but the check runs on the
+  leader just before the write is proposed, not when it is applied as
+  in etcd. So a lease that expires in that instant still gets the key
+  attached. Moving the check to apply waits on the lease tables
+  travelling in raft snapshots (#41).
 
 ### Migration
 
@@ -169,20 +184,12 @@ fastetcd-migrate --from snap.db --to data-dir --preserve-revisions
 
 ## Testing
 
-Three concentric rings — see `docs/02-testing.md` for the full
-strategy.
-
-- **Ring 1** — `cargo test --workspace` (workspace unit + integration).
-- **Ring 2** — `cargo test -p fastetcd-server --test etcd_client_compat`:
-  third-party Rust `etcd-client` crate drives the full surface.
-  Zero shared code with fastetcd; if this works, real etcd
-  consumers work too.
-- **Ring 3** — `./tests/etcdctl_smoke.sh` (requires upstream
-  `etcdctl`); etcd-io/etcd's robustness suite (out-of-tree
-  follow-up); Jepsen; Kubernetes e2e.
-
-Current count: 151 tests pass workspace-wide (on Linux; a few are
-Linux-only, so a macOS run reports fewer).
+`cargo test --workspace`: 271 tests in 34 test binaries at v1.8.0,
+including 3-member clusters over the real gRPC transport and the
+third-party `etcd-client` crate (`crates/server/tests/etcd_client_compat.rs`).
+GitHub Actions is off for this repo: on the StormCOS setup every push is
+built and tested with `sc-build` on `dev.g8.lo`. See
+`docs/02-testing.md`.
 
 ## Backups and a corrupt data file
 
@@ -248,6 +255,18 @@ fastetcd-ctl auth members                        # what each member holds
 fastetcd-ctl --user root:pw auth adopt <member>  # replicate one to all
 ```
 
+## Ports and configuration
+
+| Port | Default bind | Serves |
+|---|---|---|
+| 2379 | `127.0.0.1` (`--listen-client-urls`) | etcd gRPC, `grpc.health.v1`, `/health` `/livez` `/readyz`, `/v3/...` gateway |
+| 2380 | `127.0.0.1` (`--listen-peer-urls`) | raft between members |
+| 2381 | `127.0.0.1` (`--listen-metrics-url`) | Prometheus `/metrics` |
+
+Every flag, its default, its `FASTETCD_*` variable and the `ETCD_*`
+variable read as a fallback: [docs/01-configuration.md](docs/01-configuration.md).
+Metrics: [docs/03-deploy.md § Metrics](docs/03-deploy.md#metrics).
+
 ## Deployment
 
 See `docs/03-deploy.md` for the full guide. Quick paths:
@@ -258,6 +277,9 @@ See `docs/03-deploy.md` for the full guide. Quick paths:
 - **Container**: no image is published (GHCR is not used); `docker build
   -t fastetcd:dev .` and run or push that.
 - **Kubernetes**: `helm install fastetcd ./deploy/charts/fastetcd`
+  with your own image. The chart currently passes `--auto-defrag=true`,
+  which the binary rejects, so its pods do not start until #53 is fixed
+  (workaround: remove that line from the template).
 - **Fedora/RHEL**, **Debian/Ubuntu**: `dnf install` the `.rpm` or
   `dpkg -i` the `.deb` that `deploy/packaging/build-release.sh` builds
   (on GitHub Releases up to v1.2.0)
