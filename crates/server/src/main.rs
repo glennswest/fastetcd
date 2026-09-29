@@ -33,9 +33,9 @@ use fastetcd_storage::redb_engine::RedbEngine;
 
 /// fastetcd — a Rust implementation of the etcd v3 wire protocol.
 ///
-/// With no subcommand, runs the server. Subcommands operate on the data
-/// directory offline (the server must be stopped): `backup`, `restore`,
-/// `fsck`.
+/// With no subcommand, runs the server. `backup`, `restore`, `fsck` and
+/// `defrag` operate on the data directory offline (the server must be
+/// stopped); `sizing` needs no data directory.
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd", version, about)]
 struct Args {
@@ -88,15 +88,14 @@ struct Args {
     )]
     listen_peer_urls: String,
 
-    /// Advertised peer URLs that other members will use to reach
-    /// this node. Accepted for etcd compatibility; fastetcd
-    /// currently uses `listen_peer_urls` for advertising too.
+    /// This member's peer URLs: its raft address and the peer URLs
+    /// `MemberList` reports. Defaults to `--listen-peer-urls`. Other
+    /// members dial the URL their own `--initial-cluster` gives for it.
     #[arg(long = "initial-advertise-peer-urls", env = "FASTETCD_INITIAL_ADVERTISE_PEER_URLS")]
     initial_advertise_peer_urls: Option<String>,
 
-    /// Advertised client URLs. Accepted for etcd compatibility;
-    /// reported back in Member.client_urls when no other source
-    /// is available.
+    /// This member's client URLs, as `MemberList` reports them.
+    /// Defaults to `--listen-client-urls`.
     #[arg(long = "advertise-client-urls", env = "FASTETCD_ADVERTISE_CLIENT_URLS")]
     advertise_client_urls: Option<String>,
 
@@ -365,11 +364,13 @@ struct Args {
     )]
     on_corruption: fastetcd_server::recovery::OnCorruption,
 
-    /// (etcd compat) Maximum gRPC request size.
+    /// (etcd compat) Maximum gRPC request size. Accepted and ignored
+    /// (fastetcd#54): requests are limited by tonic's 4 MiB default.
     #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES")]
     max_request_bytes: Option<u64>,
 
-    /// (etcd compat) Log level: debug / info / warn / error.
+    /// (etcd compat) Log level. Accepted and ignored (fastetcd#54): set
+    /// `RUST_LOG` (e.g. `RUST_LOG=debug`); the default is `info`.
     #[arg(long, env = "FASTETCD_LOG_LEVEL")]
     log_level: Option<String>,
 
