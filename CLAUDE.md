@@ -1043,6 +1043,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       builds all three binaries static-pie, leaves the tree clean;
       `helm lint` passes and the chart renders `image: "fastetcd:1.8.0"`.
 
+33. **Documentation refreshed from the code (#26) — in progress.** Every
+    flag and default taken from the binaries' own `--help` (captured on
+    dev at a65c17f), checked against main.rs. Work items:
+    - [ ] `docs/01-configuration.md`: every flag, default, env var and
+      `ETCD_*` fallback; subcommands; fastetcd-ctl, -migrate, -bench.
+    - [ ] README: status, ports/endpoints, how it builds and ships, what
+      is not implemented; no false engine / CI / test-count claims.
+    - [ ] 00-design: what is design and what the code does; 02-testing:
+      sc-build, the test files; 03-deploy: storage engine, TLS version.
+    - [ ] Stale `--help` text in main.rs (advertise URLs, about text,
+      ignored compat flags).
+    - [ ] CLAUDE.md architecture/layout; changelog.
+    Filed from promises the code does not keep: #53 (P1, chart cannot
+    start a pod: `--auto-defrag=true`), #54, #55, #56, #57, #58, #59.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
