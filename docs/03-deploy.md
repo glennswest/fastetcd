@@ -64,6 +64,24 @@ GitHub Actions is disabled for this repo (a repo-level setting, off
 since 2026-05-24). Builds and tests run on `dev.g8.lo` through
 `sc-build`. Packages are built there by hand (below).
 
+## Helm chart
+
+`deploy/charts/fastetcd` runs a StatefulSet (3 replicas by default), a
+headless service for the peers, a client service and an optional
+ServiceMonitor, with `tls`, `peerTls` and `space` blocks mapped onto the
+flags. It is for running fastetcd *inside* a Kubernetes cluster; a
+StormCOS control plane does not use it (it runs the golden above).
+
+- **Image:** none is published; set `image.repository` to one you built.
+- **Storage:** each replica gets a PVC of `persistence.size` (10Gi;
+  `fastetcd sizing` says what the cluster needs). On a StormCOS cluster
+  a PVC is a stormblock volume, provisioned by the kubelet's built-in
+  stormblock driver (class `stormblock`, the default class), so leave
+  `persistence.storageClass` empty.
+- **Known break (#53):** the template passes `--auto-defrag=true`, which
+  the binary rejects at argument parsing, so no pod starts until that is
+  fixed. Workaround: delete that line from `templates/statefulset.yaml`.
+
 ## Linux packages (rpm / deb)
 
 For hosts outside StormCOS (the platform does not use these):
@@ -178,13 +196,14 @@ With peer TLS on:
   naming its URL. A listen URL with no scheme (`0.0.0.0:2380`) is
   accepted either way.
 
-Before v1.5.0, `--cert-file` was also served on the peer port and the
+Before v1.4.1, `--cert-file` was also served on the peer port and the
 `--peer-*` flags were parsed and ignored. Members still dialled each
 other in plaintext, so a multi-member cluster with `--cert-file` set
 could not form (fastetcd#23).
 
 The Helm chart has a separate `peerTls` block for this (see
-`values.yaml`).
+`values.yaml`). Note that `fastetcd-ctl` has no TLS options and cannot
+reach a TLS client port (#59); use `etcdctl` there.
 
 Every flag above is also settable via its env var — `FASTETCD_*` or,
 as a drop-in for existing etcd config, `ETCD_*` (e.g.
@@ -344,36 +363,32 @@ one: scope untrusted clients with mTLS and a proxy.
 
 ## Storage engine
 
-fastetcd ships two engines:
-
-- `redb` (default): cross-platform, ACID single-file B-tree. Good
-  for development, smaller deployments, and any environment where
-  single-file ops simplicity matters.
-- `iouring` (Linux-only, opt-in at build time with
-  `--features iouring`): tokio-uring-backed append-only WAL +
-  in-memory index. Architectural fit for high write throughput
-  with predictable p99 once the O_DIRECT + group-commit tuning
-  lands (tracked).
-
-Switch at runtime by recompiling with the right features and
-pointing `--data-dir` at a fresh directory; cross-engine migration
-is not currently supported in place.
+The server always runs on `redb`: one ACID single-file B-tree,
+`<data-dir>/fastetcd.redb`, holding the MVCC data, the raft log and
+vote, leases, auth and node metadata. Raft snapshots are files in
+`<data-dir>/snapshots/`. There is no engine choice to make:
+`fastetcd-storage` also has `wal` and `iouring` engines, but the server
+cannot use them (#55).
 
 ## Multi-node
 
 ```
 # On node-a:
 fastetcd --name=node-a --data-dir=/var/lib/fastetcd-a \
-    --listen-client-url=127.0.0.1:23791 \
-    --listen-peer-url=127.0.0.1:23801 \
+    --listen-client-urls=http://127.0.0.1:23791 \
+    --listen-peer-urls=http://127.0.0.1:23801 \
+    --initial-cluster-token=my-cluster \
     --initial-cluster=node-a=http://127.0.0.1:23801,node-b=http://127.0.0.1:23802,node-c=http://127.0.0.1:23803
 
 # Same flags on node-b/c with their own data dirs and listen URLs.
 ```
 
-Each node calls `raft.initialize` with the same member set;
-openraft elects a leader among them. After bootstrap, `MemberAdd`
-adds new nodes; `MemberRemove` removes them.
+With `--initial-cluster-state=new` (the default) each node calls
+`raft.initialize` with the same member set; openraft elects a leader
+among them. After bootstrap, `MemberAdd` adds new nodes (start them
+with `--initial-cluster-state=existing`); `MemberRemove` removes them.
+On separate hosts, listen on a routable address and set
+`--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 
 ### Cluster id
 
@@ -429,15 +444,19 @@ Full details, flags, metrics and recovery procedures:
 
 ## Backups
 
-```
-etcdctl --endpoints=$ENDPOINT snapshot save snapshot.db
-```
+Backups that restore:
 
-`Maintenance.Snapshot` streams the entire engine state to the
-client in 64 KiB chunks, read from the snapshot file on disk rather
-than buffered in memory. The snapshot file can be re-imported on a
-fresh fastetcd via `fastetcd-migrate --from=snapshot.db
---to=/var/lib/fastetcd-new`.
+- **Periodic backups** with `--backup-dir` on another volume, restored
+  with `fastetcd restore <file>` (or automatically, on a lone member
+  whose data file is corrupt). See `docs/05-backup-and-recovery.md`.
+- **`fastetcd backup --out <file>`** with the server stopped, restored
+  with `fastetcd restore <file>`.
+
+`etcdctl snapshot save` (and `fastetcd-ctl snapshot-save`) do work, and
+stream a snapshot from the file on disk in 64 KiB chunks, but the file
+is fastetcd's raft snapshot, not a BoltDB file: neither
+`fastetcd-migrate`, `fastetcd restore` nor `etcdctl snapshot restore`
+can restore it yet (#61). Do not rely on it as a backup.
 
 ## v3 JSON gateway
 

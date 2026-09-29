@@ -46,7 +46,7 @@ Or via the shipped client:
 ```
 fastetcd-ctl put hello world
 fastetcd-ctl get hello
-fastetcd-ctl snapshot-save /tmp/snapshot.db
+fastetcd-ctl status
 ```
 
 ## Goals

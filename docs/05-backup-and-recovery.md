@@ -38,8 +38,9 @@ Nothing is written while nothing changes.
 point-in-time view: the MVCC data, the raft log and vote, leases, users
 and roles, and node-local metadata such as the cluster id. It is exactly
 the state a crash at that instant would have left. (The raft snapshot
-that `etcdctl snapshot save` streams holds only the MVCC tables.
-Restoring from that would lose leases, users and the cluster id.)
+that `etcdctl snapshot save` streams holds the MVCC and auth tables but
+not leases or the cluster id, and no fastetcd tool can restore it yet:
+#61. Use these backups, or `fastetcd backup` offline.)
 
 **File format.** `fastetcd-backup-<unix-ms>-rev<revision>.fbak`: an
 8-byte magic `FEBACKUP`, a format version, a header (version, time,

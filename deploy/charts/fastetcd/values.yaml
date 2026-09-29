@@ -23,6 +23,8 @@ ports:
 
 persistence:
   enabled: true
+  # Empty = the cluster's default class. On StormCOS that is `stormblock`:
+  # the kubelet's built-in stormblock driver provisions the PVC.
   storageClass: ""
   # Size this against the cluster, not against the data: a raft snapshot
   # is a full copy of the database, so the volume runs ~10x the live
