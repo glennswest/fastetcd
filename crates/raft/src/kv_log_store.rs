@@ -12,6 +12,7 @@
 //! engine commits with `WriteOptions::sync = true` by default).
 
 use std::ops::{Bound, RangeBounds};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use openraft::storage::LogFlushed;
@@ -43,11 +44,30 @@ const META_LAST_PURGED: &[u8] = b"last_purged_log_id";
 #[derive(Clone)]
 pub struct KvLogStore {
     engine: Arc<dyn KvStore>,
+    /// Index of the last committed entry openraft has told us about
+    /// (0 = none), for `etcd_server_proposals_committed_total` (#29).
+    committed_index: Arc<AtomicU64>,
 }
 
 impl KvLogStore {
     pub fn new(engine: Arc<dyn KvStore>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            committed_index: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The committed index, kept current as openraft saves it. Every
+    /// clone of this store shares it, so take the handle before the
+    /// store is handed to openraft.
+    pub fn committed_index(&self) -> Arc<AtomicU64> {
+        self.committed_index.clone()
+    }
+
+    fn note_committed(&self, committed: &Option<LogId<NodeId>>) {
+        if let Some(c) = committed {
+            self.committed_index.fetch_max(c.index, Ordering::Relaxed);
+        }
     }
 }
 
@@ -190,6 +210,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
+        self.note_committed(&committed);
         Ok(())
     }
 
@@ -207,6 +228,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             Some(b) => {
                 let committed: Option<LogId<NodeId>> =
                     bincode::deserialize(&b).map_err(|e| io_err(ErrorVerb::Read, e))?;
+                self.note_committed(&committed);
                 Ok(committed)
             }
             None => Ok(None),

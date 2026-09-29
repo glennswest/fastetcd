@@ -45,6 +45,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::authz::{authorize, RequiredPerm, UserIdentity};
 use crate::conv::record_to_kv;
 use crate::state::{response_header, ServerState};
+use crate::traffic::GaugeHold;
 
 #[derive(Clone)]
 pub struct WatchService {
@@ -79,18 +80,21 @@ impl Watch for WatchService {
         // same lock that publishes `current_rev`).
         let subscribed_at = state.sm.mvcc().current_revision().await;
 
-        // Spawn the event-forwarder task.
+        // Spawn the event-forwarder task. It runs for as long as the
+        // client holds the stream, so it holds the stream's place in
+        // the open-stream gauge (#29).
         {
             let state = state.clone();
             let stream_state = stream_state.clone();
             let tx = tx.clone();
-            tokio::spawn(forward_events(
-                state,
-                stream_state,
-                tx,
-                event_rx,
-                subscribed_at,
-            ));
+            let open = GaugeHold::new(&state.traffic.watch_streams, 1);
+            tokio::spawn(async move {
+                forward_events(state, stream_state.clone(), tx, event_rx, subscribed_at).await;
+                // The client is gone (or the store closed): its
+                // watchers are too.
+                stream_state.lock().await.watchers.clear();
+                drop(open);
+            });
         }
 
         // Spawn the progress-notify ticker. Sends a `ProgressNotify`
@@ -169,6 +173,8 @@ struct Watcher {
     /// First revision this watcher has not yet been given. Live batches
     /// below it are already covered (by replay or resync) and skipped.
     next_rev: i64,
+    /// This watcher's place in the watcher gauge (#29).
+    _counted: GaugeHold,
 }
 
 /// Times a watcher was caught up from history after missing live
@@ -388,6 +394,7 @@ async fn handle_create(
         filter_no_delete,
         prev_kv: create.prev_kv,
         next_rev,
+        _counted: GaugeHold::new(&state.traffic.watchers, 1),
     };
 
     // Acknowledge the create.
@@ -406,8 +413,14 @@ async fn handle_create(
 
     // Historical replay of `[start_revision, current_rev]`. The stream
     // lock is still held, so the forwarder cannot interleave live
-    // events ahead of (or duplicate) the history being sent.
-    match replay_history(state, tx, watch_id, &watcher, current_rev).await? {
+    // events ahead of (or duplicate) the history being sent. Until it
+    // is done the watcher is behind the head, as etcd's unsynced
+    // watchers are (#29).
+    let catching_up = (watcher.next_rev <= current_rev)
+        .then(|| GaugeHold::new(&state.traffic.slow_watchers, 1));
+    let replayed = replay_history(state, tx, watch_id, &watcher, current_rev).await;
+    drop(catching_up);
+    match replayed? {
         Replay::Done => {}
         Replay::Compacted { compact_rev } => {
             drop(ss);
@@ -589,7 +602,13 @@ async fn forward_events(
     // either seen on the broadcast or covered by a resync.
     let mut last_rev = subscribed_at;
     loop {
-        let batch = match event_rx.recv().await {
+        // Stop as soon as the client drops the stream, rather than at
+        // the next send that fails (which might never come).
+        let received = tokio::select! {
+            r = event_rx.recv() => r,
+            _ = tx.closed() => return,
+        };
+        let batch = match received {
             Ok(batch) => batch,
             Err(RecvError::Lagged(n)) => {
                 tracing::warn!(
@@ -656,7 +675,11 @@ async fn forward_events(
         }
         // Send while still holding the stream lock so a concurrent
         // cancel/create cannot slip a response between a cursor advance
-        // and the events it accounts for.
+        // and the events it accounts for. If the outbound buffer cannot
+        // take them all, the client is not keeping up: every watcher on
+        // the stream is behind until they are sent (#29).
+        let _behind = (tx.capacity() < deliveries.len())
+            .then(|| GaugeHold::new(&state.traffic.slow_watchers, ss.watchers.len() as i64));
         let header = response_header(&state, batch.revision).await;
         for (watch_id, events) in deliveries {
             if tx
@@ -682,6 +705,9 @@ async fn resync(
 ) -> Result<i64, ()> {
     let mut ss = stream_state.lock().await;
     let upto = state.sm.mvcc().current_revision().await;
+    // Watchers being caught up are behind the head until it is done (#29).
+    let behind = ss.watchers.values().filter(|w| w.next_rev <= upto).count();
+    let _behind = GaugeHold::new(&state.traffic.slow_watchers, behind as i64);
     let mut cancelled: Vec<(i64, i64, String)> = Vec::new();
     for (watch_id, w) in ss.watchers.iter_mut() {
         if w.next_rev > upto {
@@ -724,7 +750,10 @@ async fn progress_notify_ticker(
     // Skip the immediate first tick.
     ticker.tick().await;
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = tx.closed() => return,
+        }
         let ss = stream_state.lock().await;
         let has_progress_subscriber = ss.watchers.values().any(|w| w.progress_notify);
         drop(ss);

@@ -804,6 +804,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let mut log = KvLogStore::new(engine);
+    let committed_index = log.committed_index();
 
     // Snapshot + purge is what bounds the raft log: openraft snapshots
     // every `snapshot_count` applied entries and then purges the log,
@@ -1049,7 +1050,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_space(space)
         .with_recovery(recovery_alarm)
-        .with_client_cert_auth(args.client_cert_auth),
+        .with_client_cert_auth(args.client_cert_auth)
+        .with_committed_index(committed_index),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).
@@ -1150,6 +1152,8 @@ async fn main() -> anyhow::Result<()> {
     let admin = AdminService::new(server_state.clone());
     // The store's own auth state, updated by raft apply (#32).
     let auth_state = server_state.auth.clone();
+    // Every gRPC call on the client port is counted for /metrics (#29).
+    let traffic = server_state.traffic.clone();
     let auth = AuthService::new(server_state);
 
     let peer_service = RaftPeerService::new(raft, peer_mvcc);
@@ -1233,7 +1237,11 @@ async fn main() -> anyhow::Result<()> {
                 .into_axum_router()
                 .route("/health", axum::routing::get(health_http_handler))
                 .route("/livez", axum::routing::get(livez_http_handler))
-                .route("/readyz", axum::routing::get(livez_http_handler));
+                .route("/readyz", axum::routing::get(livez_http_handler))
+                .layer(axum::middleware::from_fn_with_state(
+                    traffic,
+                    fastetcd_server::traffic::grpc_middleware,
+                ));
 
             let mut builder = Server::builder().accept_http1(true);
             if let Some(t) = tls_for_client {
