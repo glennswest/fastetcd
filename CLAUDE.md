@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.7.1`** — Build fix: `Cargo.lock` records `fastetcd-server`'s `http-body` dependency, which v1.7.0 added without a lock update, so `cargo build --locked` fails on v1.7.0 (#52). No code change.
+**`1.8.0`** — etcd's v3 JSON gateway on the client port (#28):
+`POST /v3/...` for every KV, Lease, Watch, Cluster, Maintenance and Auth
+method at etcd v3.6's routes, with its JSON (serde from `pbjson-build`,
+proto names, int64 as strings, base64 bytes, enums by name) and
+grpc-gateway's errors. `crates/server/src/gateway.rs` runs each call
+through `AuthInterceptor` and the gRPC service code; the token comes
+from `Authorization` (gRPC now accepts `authorization` metadata too).
+`--enable-grpc-gateway` (default on). Docs: `docs/03-deploy.md`.
+
+Previous: **`1.7.1`** — Build fix: `Cargo.lock` records `fastetcd-server`'s `http-body` dependency, which v1.7.0 added without a lock update, so `cargo build --locked` fails on v1.7.0 (#52). No code change.
 
 Previous: **`1.7.0`** — `/metrics` shows traffic (#29), with etcd's names:
 `grpc_server_started_total`/`grpc_server_handled_total` by method and
@@ -957,7 +966,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       as the issue did: single node 89 of 132 LISTs missing a write,
       3-member 62 of 119.
 
-31. **etcd's v3 JSON gateway on the client port (#28) — in progress.**
+31. **etcd's v3 JSON gateway on the client port (#28) — done, shipped in v1.8.0.**
     stormconsole#20 is an HTTP/JSON client and can't read status,
     members or the keyspace over gRPC. Serve etcd's own grpc-gateway
     surface, as etcd v3.6.11 does (`server/embed/serve.go`, routes from
@@ -991,15 +1000,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Then: `/v3/watch` and `/v3/lease/keepalive` (bidi streams:
       newline-delimited JSON requests in the body, results streamed).
     Work items:
-    - [ ] proto: pbjson serde for etcdserverpb / mvccpb / authpb.
-    - [ ] server `gateway.rs`: routes, JSON, errors, interceptor, snapshot
+    - [x] proto: pbjson serde for etcdserverpb / mvccpb / authpb.
+    - [x] server `gateway.rs`: routes, JSON, errors, interceptor, snapshot
       stream, metrics; main wiring + flag; `authorization` metadata.
-    - [ ] Tests (`crates/server/tests/gateway.rs`): status, member list,
+    - [x] Tests (`crates/server/tests/gateway.rs`): status, member list,
       alarm get/deactivate, range with base64 keys, put/txn/compaction,
       error mapping, auth (no token 401, token via Authorization, RBAC
       denial 403, root-only admin), snapshot stream.
-    - [ ] Watch / keepalive streams.
-    - [ ] Docs, changelog; release; close #28.
+    - [x] Watch / keepalive streams.
+    - [x] Docs, changelog; release; close #28.
+    - Verified: sc-build of 6f4eb4c, `--locked`, whole workspace green
+      (`--no-fail-fast`). The real binary on dev answers curl with
+      etcd's JSON byte for byte; `--enable-grpc-gateway=false` and
+      `ETCD_ENABLE_GRPC_GATEWAY=false` turn it off. With the interceptor
+      bypassed, the auth test fails (a tokenless range gets 200).
+    - Not served: WebSocket upgrades of the streams (etcd's wsproxy), and
+      the v3lock / v3election gateways (fastetcd has no Lock/Election
+      services).
 
 ## Constraints & rules
 
