@@ -1019,7 +1019,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       the v3lock / v3election gateways (fastetcd has no Lock/Election
       services).
 
-32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — in progress.**
+32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — done (docs; unreleased).**
     GHCR is deliberately unused on this platform, yet `docs/03-deploy.md`,
     the README and the Helm chart's default image pointed at
     `ghcr.io/glennswest/fastetcd`. The issue's premise (a release tarball
@@ -1029,16 +1029,19 @@ Tracked live in the Claude task system. Snapshot of the order:
     x86_64-unknown-linux-musl`, `/root/fastetcd` fast-forwarded to
     `origin/main`) into a stormd golden `fastetcd` (+ `fastetcd-data`).
     Nothing is downloaded from a release. Work items:
-    - [ ] 03-deploy: "How fastetcd reaches a StormCOS node" (the golden
+    - [x] 03-deploy: "How fastetcd reaches a StormCOS node" (the golden
       recipe, what it requires of this repo: `main` is what ships,
       `Cargo.lock` current, musl builds), link stormcos/docs/goldens.md;
       drop the GHCR push; container images are build-your-own.
-    - [ ] Packages section: GitHub Releases carry rpm/deb/tarball only
+    - [x] Packages section: GitHub Releases carry rpm/deb/tarball only
       up to v1.2.0; later versions are tags; build-release.sh by hand.
-    - [ ] README quick path, chart default image (no registry assumed),
+    - [x] README quick path, chart default image (no registry assumed),
       build-release.sh's stale Actions comment.
-    - [ ] Verify: the documented golden compile command on dev; chart
+    - [x] Verify: the documented golden compile command on dev; chart
       renders; changelog; close #24.
+    - Verified on dev (sc-build of 2fb4bc4): the golden's compile command
+      builds all three binaries static-pie, leaves the tree clean;
+      `helm lint` passes and the chart renders `image: "fastetcd:1.8.0"`.
 
 ## Constraints & rules
 
