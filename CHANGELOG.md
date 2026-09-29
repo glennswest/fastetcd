@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.7.0] — 2026-09-29
+
 ### 2026-09-29
 - **feat:** `/metrics` shows traffic (#29), with etcd's names so
   existing dashboards work:
