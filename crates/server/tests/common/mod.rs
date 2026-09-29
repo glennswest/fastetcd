@@ -157,7 +157,8 @@ pub async fn start_test_server_with_space(
 
     let peers = fastetcd_raft::network::empty_peers();
     let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
-    let mut state = ServerState::new(raft, sm, 7, 1, forwarder);
+    let mut state = ServerState::new(raft, sm, 7, 1, forwarder)
+        .with_committed_index(log.committed_index());
     if let Some(cfg) = space {
         state = state.with_space(Arc::new(fastetcd_server::space::SpaceGuard::new(
             dir.path().to_path_buf(),

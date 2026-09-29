@@ -1,5 +1,6 @@
 //! Shared state passed into each gRPC service.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use openraft::Raft;
@@ -9,6 +10,7 @@ use crate::auth::AuthState;
 use crate::auth_sync::AuthGate;
 use crate::recovery::RecoveryAlarm;
 use crate::space::SpaceGuard;
+use crate::traffic::{GaugeHold, Traffic};
 use fastetcd_raft::precheck::{self, PrecheckError};
 use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
@@ -42,6 +44,12 @@ pub struct ServerState {
     /// The CORRUPT alarm, raised after this store was restored from a
     /// backup (fastetcd#37). Empty by default.
     pub recovery: Arc<RecoveryAlarm>,
+    /// Watch, proposal and gRPC call accounting for `/metrics` (#29).
+    pub traffic: Arc<Traffic>,
+    /// The raft log's committed index, from the log store (#29). `None`
+    /// when the embedding did not provide it; `/metrics` then reports
+    /// the applied index, which the committed index is never below.
+    pub committed_index: Option<Arc<AtomicU64>>,
 }
 
 impl ServerState {
@@ -64,7 +72,31 @@ impl ServerState {
             forwarder,
             space: Arc::new(SpaceGuard::disabled()),
             recovery: Arc::new(RecoveryAlarm::default()),
+            traffic: Arc::new(Traffic::default()),
+            committed_index: None,
         }
+    }
+
+    /// Report the log store's committed index on `/metrics`
+    /// (`KvLogStore::committed_index`).
+    pub fn with_committed_index(mut self, committed: Arc<AtomicU64>) -> Self {
+        self.committed_index = Some(committed);
+        self
+    }
+
+    /// Index of the last committed raft entry this member knows of.
+    pub fn committed_index(&self) -> u64 {
+        let applied = self
+            .raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map_or(0, |l| l.index);
+        let committed = self
+            .committed_index
+            .as_ref()
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        committed.max(applied)
     }
 
     /// Under `--client-cert-auth`, identify callers without a token by
@@ -102,6 +134,7 @@ impl ServerState {
         &self,
         entry: FastetcdLogEntry,
     ) -> Result<FastetcdLogResponse, Status> {
+        let _pending = GaugeHold::new(&self.traffic.proposals_pending, 1);
         // On the leader, refuse a put naming a lease that does not exist
         // before proposing it (#19; see `fastetcd_raft::precheck`). A
         // follower forwards and the leader checks.

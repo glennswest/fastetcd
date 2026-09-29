@@ -20,10 +20,29 @@
 //!     went back to, while the CORRUPT alarm is raised; 0 otherwise
 //!   - `etcd_debugging_mvcc_current_revision` (gauge)
 //!   - `etcd_debugging_mvcc_compact_revision` (gauge)
-//!   - `fastetcd_engine` (info: redb / wal / iouring)
+//!   - `etcd_debugging_mvcc_{put,delete,range,txn}_total` (counters):
+//!     operations this member executed (`MvccStore::op_counts`)
+//!   - `etcd_server_is_leader` (gauge 0/1): whether *this* member leads
+//!   - `etcd_server_id{server_id=<hex>}` (gauge, always 1)
+//!   - `etcd_server_proposals_committed_total` /
+//!     `etcd_server_proposals_applied_total` (gauges, as in etcd): the
+//!     raft committed and applied indexes
+//!   - `fastetcd_engine_info{engine=…}` (info: redb / wal / iouring)
+//!   - `fastetcd_watch_resyncs_total` / `fastetcd_watch_lag_cancels_total`
+//!     (counters, process-wide): watchers caught up from history, and
+//!     watchers cancelled because that history was gone (#16)
+//!
+//! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
+//! when the endpoint starts (fastetcd#29; see that module):
+//!   - `grpc_server_started_total` / `grpc_server_handled_total`
+//!   - `etcd_debugging_mvcc_watch_stream_total`,
+//!     `etcd_debugging_mvcc_watcher_total`,
+//!     `etcd_debugging_mvcc_slow_watcher_total` (gauges)
+//!   - `etcd_server_proposals_pending` (gauge)
 //!
 //! Metrics are refreshed lazily on every scrape — no background
-//! task — so we always report the current truth.
+//! task — so we always report the current truth. Scrapes are
+//! serialized, so two at once cannot count a counter's increase twice.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -39,7 +58,9 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::Registry;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -65,6 +86,15 @@ pub struct Metrics {
     pub current_revision: Gauge,
     pub compact_revision: Gauge,
     pub auth_diverged: Gauge,
+    pub is_leader: Gauge,
+    pub proposals_committed: Gauge,
+    pub proposals_applied: Gauge,
+    pub put_total: Counter,
+    pub delete_total: Counter,
+    pub range_total: Counter,
+    pub txn_total: Counter,
+    pub watch_resyncs_total: Counter,
+    pub watch_lag_cancels_total: Counter,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -88,6 +118,15 @@ impl Metrics {
         let current_revision = Gauge::default();
         let compact_revision = Gauge::default();
         let auth_diverged = Gauge::default();
+        let is_leader = Gauge::default();
+        let proposals_committed = Gauge::default();
+        let proposals_applied = Gauge::default();
+        let put_total = Counter::default();
+        let delete_total = Counter::default();
+        let range_total = Counter::default();
+        let txn_total = Counter::default();
+        let watch_resyncs_total = Counter::default();
+        let watch_lag_cancels_total = Counter::default();
         let m = Arc::new(Self {
             registry: Mutex::new(registry),
             has_leader: has_leader.clone(),
@@ -105,6 +144,15 @@ impl Metrics {
             current_revision: current_revision.clone(),
             compact_revision: compact_revision.clone(),
             auth_diverged: auth_diverged.clone(),
+            is_leader: is_leader.clone(),
+            proposals_committed: proposals_committed.clone(),
+            proposals_applied: proposals_applied.clone(),
+            put_total: put_total.clone(),
+            delete_total: delete_total.clone(),
+            range_total: range_total.clone(),
+            txn_total: txn_total.clone(),
+            watch_resyncs_total: watch_resyncs_total.clone(),
+            watch_lag_cancels_total: watch_lag_cancels_total.clone(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -202,8 +250,113 @@ impl Metrics {
                  `fastetcd-ctl auth adopt` (fastetcd#32)",
                 auth_diverged,
             );
+            reg.register(
+                "etcd_server_is_leader",
+                "Whether this member is the leader (1) or not (0)",
+                is_leader,
+            );
+            reg.register(
+                "etcd_server_proposals_committed_total",
+                "The total number of consensus proposals committed (the raft committed index)",
+                proposals_committed,
+            );
+            reg.register(
+                "etcd_server_proposals_applied_total",
+                "The total number of consensus proposals applied (the raft applied index)",
+                proposals_applied,
+            );
+            // prometheus-client appends `_total` to a counter's name.
+            reg.register(
+                "etcd_debugging_mvcc_put",
+                "Total number of puts seen by this member",
+                put_total,
+            );
+            reg.register(
+                "etcd_debugging_mvcc_delete",
+                "Total number of deletes seen by this member",
+                delete_total,
+            );
+            reg.register(
+                "etcd_debugging_mvcc_range",
+                "Total number of ranges seen by this member",
+                range_total,
+            );
+            reg.register(
+                "etcd_debugging_mvcc_txn",
+                "Total number of txns seen by this member",
+                txn_total,
+            );
+            reg.register(
+                "fastetcd_watch_resyncs",
+                "Watchers caught up from MVCC history after missing live events",
+                watch_resyncs_total,
+            );
+            reg.register(
+                "fastetcd_watch_lag_cancels",
+                "Watchers cancelled because the history they had missed was compacted \
+                 or unreadable",
+                watch_lag_cancels_total,
+            );
         }
         m
+    }
+
+    /// Register what belongs to a running server: its traffic handles,
+    /// its member id and its engine. Called once, by [`spawn_server`].
+    pub async fn attach(&self, state: &ServerState) {
+        let mut reg = self.registry.lock().await;
+        let t = &state.traffic;
+        reg.register(
+            "grpc_server_started",
+            "Total number of RPCs started on the server",
+            t.grpc_started.clone(),
+        );
+        reg.register(
+            "grpc_server_handled",
+            "Total number of RPCs completed on the server, regardless of success or failure",
+            t.grpc_handled.clone(),
+        );
+        reg.register(
+            "etcd_debugging_mvcc_watch_stream_total",
+            "Total number of watch streams",
+            t.watch_streams.clone(),
+        );
+        reg.register(
+            "etcd_debugging_mvcc_watcher_total",
+            "Total number of watchers",
+            t.watchers.clone(),
+        );
+        reg.register(
+            "etcd_debugging_mvcc_slow_watcher_total",
+            "Total number of unsynced slow watchers",
+            t.slow_watchers.clone(),
+        );
+        reg.register(
+            "etcd_server_proposals_pending",
+            "The current number of pending proposals to commit",
+            t.proposals_pending.clone(),
+        );
+        let server_id: Family<Vec<(String, String)>, Gauge> = Family::default();
+        server_id
+            .get_or_create(&vec![(
+                "server_id".to_string(),
+                format!("{:x}", state.member_id),
+            )])
+            .set(1);
+        reg.register(
+            "etcd_server_id",
+            "Server or member ID in hexadecimal format. 1 for 'server_id' label with current ID",
+            server_id,
+        );
+        // prometheus-client appends `_info` to an info metric's name.
+        reg.register(
+            "fastetcd_engine",
+            "The storage engine this member runs on",
+            Info::new(vec![(
+                "engine".to_string(),
+                state.sm.mvcc().engine().engine_name().to_string(),
+            )]),
+        );
     }
 
     /// Refresh gauges from live server state. Counters are not
@@ -216,11 +369,19 @@ impl Metrics {
             self.leader_changes_total.inc();
         }
         self.has_leader.set(if leader != 0 { 1 } else { 0 });
-        let recoveries = state.recovery.recoveries();
-        let counted = self.recovered_total.get();
-        if recoveries > counted {
-            self.recovered_total.inc_by(recoveries - counted);
-        }
+        self.is_leader
+            .set((leader != 0 && leader == state.member_id) as i64);
+        self.proposals_applied
+            .set(raft_m.last_applied.map_or(0, |l| l.index) as i64);
+        self.proposals_committed.set(state.committed_index() as i64);
+        let ops = state.sm.mvcc().op_counts();
+        catch_up(&self.put_total, ops.put);
+        catch_up(&self.delete_total, ops.delete);
+        catch_up(&self.range_total, ops.range);
+        catch_up(&self.txn_total, ops.txn);
+        catch_up(&self.watch_resyncs_total, crate::watch::resync_count());
+        catch_up(&self.watch_lag_cancels_total, crate::watch::lag_cancel_count());
+        catch_up(&self.recovered_total, state.recovery.recoveries());
         self.recovered_revision.set(
             state
                 .recovery
@@ -256,10 +417,20 @@ impl Metrics {
     }
 }
 
+/// Bring a counter up to `total`, a count kept elsewhere. Callers hold
+/// the registry lock, so two scrapes cannot both add the same increase.
+fn catch_up(counter: &Counter, total: u64) {
+    let counted = counter.get();
+    if total > counted {
+        counter.inc_by(total - counted);
+    }
+}
+
 /// Spawn a minimal hyper HTTP/1 server on `addr` that serves the
 /// Prometheus exposition text on `GET /metrics`.
 pub fn spawn_server(addr: SocketAddr, metrics: Arc<Metrics>, state: Arc<ServerState>) {
     tokio::spawn(async move {
+        metrics.attach(&state).await;
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -307,9 +478,10 @@ async fn handle(
         *r.status_mut() = StatusCode::NOT_FOUND;
         return Ok(r);
     }
+    // Refresh under the registry lock: scrapes take turns.
+    let reg = metrics.registry.lock().await;
     metrics.refresh(&state).await;
     let mut buf = String::new();
-    let reg = metrics.registry.lock().await;
     if let Err(e) = encode(&mut buf, &reg) {
         let body = Bytes::from(format!("encode error: {e}\n"));
         let mut r = Response::new(Full::new(body));

@@ -29,6 +29,7 @@
 //! drives this `MvccStore` via the same `apply_*` entrypoints.
 
 use std::ops::Bound;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -264,6 +265,28 @@ pub struct TxnResult {
     pub op_results: Vec<TxnOpResult>,
 }
 
+/// How many operations this store has executed since the process
+/// started, by kind (fastetcd#29; etcd's `etcd_debugging_mvcc_*_total`).
+/// Puts and deletes are counted as they are applied, so every member
+/// counts every write, including those inside a txn and the deletes a
+/// lease revoke cascades into. Ranges are counted where they are served
+/// (a range inside a txn included). Txns count each `txn` executed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpCounts {
+    pub put: u64,
+    pub delete: u64,
+    pub range: u64,
+    pub txn: u64,
+}
+
+#[derive(Default)]
+struct OpCounters {
+    put: AtomicU64,
+    delete: AtomicU64,
+    range: AtomicU64,
+    txn: AtomicU64,
+}
+
 /// The MVCC layer. Thin handle; cheaply clonable.
 #[derive(Clone)]
 pub struct MvccStore {
@@ -293,6 +316,8 @@ struct Inner {
     /// (fastetcd#32). Owned here so the state machine updates it on
     /// apply and the server's interceptor reads the same state.
     auth: AuthMemory,
+    /// Operations executed, by kind (fastetcd#29).
+    ops: OpCounters,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -336,10 +361,22 @@ impl MvccStore {
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
                 auth: AuthMemory::default(),
+                ops: OpCounters::default(),
             }),
         };
         store.reload_auth().await?;
         Ok(store)
+    }
+
+    /// Operations executed since the process started (fastetcd#29).
+    pub fn op_counts(&self) -> OpCounts {
+        let o = &self.inner.ops;
+        OpCounts {
+            put: o.put.load(Ordering::Relaxed),
+            delete: o.delete.load(Ordering::Relaxed),
+            range: o.range.load(Ordering::Relaxed),
+            txn: o.txn.load(Ordering::Relaxed),
+        }
     }
 
     /// Auth's in-memory state (enabled flag, tokens). Every clone of
@@ -1217,6 +1254,7 @@ impl MvccStore {
         if produced_any {
             self.commit_ctx(&mut state, main, ctx).await?;
         }
+        self.inner.ops.txn.fetch_add(1, Ordering::Relaxed);
         let revision = if produced_any { main } else { state.current_rev };
         Ok(TxnResult {
             succeeded,
@@ -1251,6 +1289,22 @@ impl MvccStore {
     /// whether it changed anything. The index and record caches in
     /// `ctx` are updated, so later ops in the same batch see it.
     async fn apply_one(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &mut ApplyContext,
+        rev: Revision,
+        mutation: &Mutation,
+    ) -> MvccResult<(MutationResult, bool)> {
+        let out = self.apply_one_uncounted(snap, ctx, rev, mutation).await?;
+        let counter = match mutation {
+            Mutation::Put { .. } => &self.inner.ops.put,
+            Mutation::DeleteRange { .. } => &self.inner.ops.delete,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    async fn apply_one_uncounted(
         &self,
         snap: &dyn Snapshot,
         ctx: &mut ApplyContext,
@@ -1484,6 +1538,7 @@ impl MvccStore {
         keys_only: bool,
         count_only: bool,
     ) -> MvccResult<RangeResult> {
+        self.inner.ops.range.fetch_add(1, Ordering::Relaxed);
         let current_rev = state.current_rev;
         let compact_rev = state.compact_rev;
 
@@ -1958,6 +2013,45 @@ mod tests {
         let (_d, s) = open_mvcc().await;
         assert_eq!(s.current_revision().await, 0);
         assert_eq!(s.compact_revision().await, 0);
+    }
+
+    #[tokio::test]
+    async fn op_counts_count_each_operation_by_kind() {
+        let (_d, s) = open_mvcc().await;
+        assert_eq!(s.op_counts(), OpCounts::default());
+        s.apply(&[put(b"a", b"1"), put(b"b", b"2")]).await.unwrap();
+        s.apply(&[del_range(b"a", b"")]).await.unwrap();
+        s.range(b"b", b"", 0, 0, false, false).await.unwrap();
+        // A txn counts once, and so does each op of the branch it ran.
+        s.txn(
+            &[],
+            &[
+                TxnOp::Mutation(put(b"c", b"3")),
+                TxnOp::Range(RangeOp {
+                    key: b"c".to_vec(),
+                    range_end: Vec::new(),
+                    limit: 0,
+                    revision: 0,
+                    keys_only: false,
+                    count_only: false,
+                }),
+                TxnOp::Mutation(del_range(b"b", b"")),
+            ],
+            &[TxnOp::Mutation(put(b"never", b"x"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.op_counts(),
+            OpCounts {
+                put: 3,
+                delete: 2,
+                range: 2,
+                txn: 1
+            }
+        );
+        // Clones share the counters.
+        assert_eq!(s.clone().op_counts().put, 3);
     }
 
     #[tokio::test]

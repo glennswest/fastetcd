@@ -42,6 +42,8 @@ x509-parser = "0.16"
 prometheus-client = "0.22"
 hyper = { version = "1", features = ["server", "http1"] }
 http-body-util = "0.1"
+# The client port's gRPC call counters wrap response bodies (#29).
+http-body = "1"
 hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 # Must track the axum version tonic 0.12 embeds internally
 # (tonic::service::Routes converts to/from axum::Router) so the

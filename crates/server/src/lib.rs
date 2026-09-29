@@ -33,6 +33,7 @@ pub mod sizing;
 pub mod space;
 pub mod state;
 pub mod tls;
+pub mod traffic;
 pub mod watch;
 
 pub use state::ServerState;
