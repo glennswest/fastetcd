@@ -509,30 +509,44 @@ Version locations (keep in sync):
 
 ## Architecture pillars
 
-- **Storage**: trait-first abstraction (`KvStore`) with two first-class
-  engines selectable at runtime: `redb` (default, cross-platform) and
-  `iouring` (Linux, `glommio` + `O_DIRECT` + custom WAL; behind cargo
-  feature `iouring`).
-- **Consensus**: `openraft` — core, not optional. Single-node is a
+- **Storage**: trait-first (`KvStore`). The server always runs on
+  `redb`: one file, `<data-dir>/fastetcd.redb`, holds MVCC, the raft
+  log, leases, auth and node metadata; raft snapshots are files in
+  `<data-dir>/snapshots/`. `fastetcd-storage` also has `wal` and
+  `iouring` (tokio-uring, feature `iouring`) engines that the server
+  cannot select (#55).
+- **Consensus**: `openraft` 0.9 — core, not optional. Single-node is a
   cluster-of-one.
-- **gRPC**: `tonic` + `prost`, generated from vendored etcd `.proto` files.
-- **Async runtime**: `tokio` for the gRPC frontend and Raft node;
-  `glommio` runtime is internal to the iouring engine.
-- **Logging/tracing**: `tracing` + `tracing-subscriber`.
+- **gRPC**: `tonic` 0.12 + `prost`, generated from vendored etcd v3.6.11
+  `.proto` files; pbjson serde for the v3 JSON gateway.
+- **Client port**: gRPC + `/health` `/livez` `/readyz` + `/v3/...`
+  gateway (tonic routes → axum). **Peer port**: `fastetcd.raft.RaftPeer`.
+  **Metrics port**: hyper, `/metrics`.
+- **Async runtime**: `tokio`.
+- **Logging/tracing**: `tracing` + `tracing-subscriber`, `RUST_LOG`.
+- **Ships as**: a stormd golden built by stormcos from `main`
+  (`docs/03-deploy.md`); no stormcentral component entry.
+- **Docs**: `docs/01-configuration.md` is the flag reference, generated
+  by hand from the binaries' `--help`. Keep it in step when adding a
+  flag.
 
 ## Repo layout
 
 ```
 crates/
-  proto/      # tonic-generated etcd v3 stubs
-  storage/    # MVCC state machine over redb
-  raft/       # openraft glue: log storage, state machine adapter, transport
-  server/     # binary: gRPC frontend + raft node + lifecycle
-  migrate/    # binary: read etcd BoltDB → write into fastetcd
-  ctl/        # binary: minimal etcdctl-compat smoke client
-docs/
-  00-design.md
-benches/
+  proto/      # etcd v3 + fastetcd protos: tonic stubs, pbjson serde
+  storage/    # KvStore trait + engines; MVCC store (revisions, leases,
+              # auth tables, events)
+  raft/       # openraft glue: log store, state machine, snapshot files,
+              # gRPC peer transport, forwarding, lease precheck
+  server/     # binary `fastetcd`: services, auth, watch, gateway,
+              # metrics, space monitor, backups, recovery, CLI
+  migrate/    # binary `fastetcd-migrate`: etcd BoltDB snapshot → data dir
+  ctl/        # binaries `fastetcd-ctl`, `fastetcd-bench`
+docs/         # 00 design, 01 configuration, 02 testing, 03 deploy,
+              # 04 disk space, 05 backup and recovery
+deploy/       # Helm chart, systemd unit, packaging scripts
+tests/        # etcdctl_smoke.sh
 ```
 
 ## Work plan
@@ -1043,20 +1057,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       builds all three binaries static-pie, leaves the tree clean;
       `helm lint` passes and the chart renders `image: "fastetcd:1.8.0"`.
 
-33. **Documentation refreshed from the code (#26) — in progress.** Every
+33. **Documentation refreshed from the code (#26) — done (docs; unreleased).** Every
     flag and default taken from the binaries' own `--help` (captured on
     dev at a65c17f), checked against main.rs. Work items:
-    - [ ] `docs/01-configuration.md`: every flag, default, env var and
+    - [x] `docs/01-configuration.md`: every flag, default, env var and
       `ETCD_*` fallback; subcommands; fastetcd-ctl, -migrate, -bench.
-    - [ ] README: status, ports/endpoints, how it builds and ships, what
+    - [x] README: status, ports/endpoints, how it builds and ships, what
       is not implemented; no false engine / CI / test-count claims.
-    - [ ] 00-design: what is design and what the code does; 02-testing:
+    - [x] 00-design: what is design and what the code does; 02-testing:
       sc-build, the test files; 03-deploy: storage engine, TLS version.
-    - [ ] Stale `--help` text in main.rs (advertise URLs, about text,
+    - [x] Stale `--help` text in main.rs (advertise URLs, about text,
       ignored compat flags).
-    - [ ] CLAUDE.md architecture/layout; changelog.
+    - [x] CLAUDE.md architecture/layout; changelog.
     Filed from promises the code does not keep: #53 (P1, chart cannot
-    start a pod: `--auto-defrag=true`), #54, #55, #56, #57, #58, #59.
+    start a pod: `--auto-defrag=true`), #54, #55, #56, #57, #58, #59, #60 (migrate drops leases/auth), #61 (P1, a live
+    snapshot cannot be restored by anything).
 
 ## Constraints & rules
 

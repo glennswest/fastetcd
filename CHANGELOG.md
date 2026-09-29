@@ -3,6 +3,28 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-29 — documentation from the code (#26)
+- **docs:** `docs/01-configuration.md`: every server flag with its
+  default, `FASTETCD_*` variable and `ETCD_*` fallback, the ports, the
+  offline subcommands and the other binaries, taken from the binaries'
+  own `--help`.
+- **docs:** README: current status (v1.8.0) and what is not implemented;
+  ports; the server is redb-only (it claimed runtime-selectable engines);
+  no CI claim; real test count (271 in 34 binaries).
+- **docs:** 00-design marks design vs code (storage engines, apply-thread
+  pinning, OTLP, migration scope, wire-compat table); 02-testing
+  describes sc-build and the real test files; 03-deploy: storage engine,
+  backups that actually restore, multi-node flags, a Helm chart section
+  (PVCs are stormblock volumes on StormCOS), peer-TLS fix version
+  (v1.4.1, not v1.5.0).
+- **docs:** `--help` text: `--initial-advertise-peer-urls` and
+  `--advertise-client-urls` are used (help said they were not);
+  `--log-level` / `--max-request-bytes` say they are ignored; the
+  subcommand list is complete. `fastetcd-migrate`'s module doc.
+- **docs:** Filed what the docs promised and the code does not do: #53
+  (the Helm chart's `--auto-defrag=true` stops every pod), #54, #55, #56,
+  #57, #58, #59, #60, #61 (a live snapshot cannot be restored).
+
 ### 2026-09-29
 - **docs:** Deploy docs say how fastetcd really ships, and drop GHCR,
   which this platform deliberately does not use (#24).
