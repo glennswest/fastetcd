@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.6.1] — 2026-09-29
+
 ### 2026-09-29
 - **fix:** A Range's header revision is the revision its contents were
   read at (#50, P0). The handler read `current_revision()` *after* the
