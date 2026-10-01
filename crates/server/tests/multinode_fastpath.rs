@@ -313,7 +313,7 @@ async fn an_older_member_means_no_batches() {
     let deadline = Instant::now() + Duration::from_secs(30);
     while leader_of(&nodes).id == 3 {
         assert!(Instant::now() < deadline, "node 3 kept the leadership");
-        nodes[0].raft.trigger_elect().await.unwrap();
+        nodes[0].raft.trigger().elect().await.unwrap();
         sleep(Duration::from_secs(4)).await;
     }
     let leader = leader_of(&nodes);

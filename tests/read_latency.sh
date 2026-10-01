@@ -2,10 +2,12 @@
 # Read latency under write load (fastetcd#71), on this machine's disk.
 #
 #   tests/read_latency.sh [baseline-ref]
+#   MEMBERS=3 tests/read_latency.sh [baseline-ref]
 #
 # Builds this tree (release) and, if given, a baseline ref in a git
-# worktree, then runs each as a single member with its data dir under
-# tmp/ (a real disk, not tmpfs) and drives it with
+# worktree, then runs each with its data dirs under
+# tmp/ (a real disk, not tmpfs), as one member or MEMBERS local ones,
+# and drives it with
 # `fastetcd-bench --mode read-under-load`: 40 clients looping GET + CAS
 # Txn, a prefix Range every fifth loop, and a sequential probe of 200
 # linearizable then 200 serializable Ranges of one key. Run it through
@@ -22,24 +24,53 @@ cargo build --release --locked -p fastetcd-server -p fastetcd-ctl
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 BENCH=$TARGET/release/fastetcd-bench
 
-run() {
-    local name=$1 bin=$2 dir=$WORK/$1
-    mkdir -p "$dir"
-    "$bin" --data-dir "$dir/data" \
-        --listen-client-urls http://127.0.0.1:23790 \
-        --listen-peer-urls http://127.0.0.1:23800 \
-        --listen-metrics-url "" >"$dir/log" 2>&1 &
-    local pid=$!
-    for _ in $(seq 100); do
-        curl -sf http://127.0.0.1:23790/health >/dev/null && break
-        sleep 0.2
+MEMBERS=${MEMBERS:-1}
+
+# Start MEMBERS members of `bin` under $1's directory; print their pids.
+start_members() {
+    local dir=$1 bin=$2 cluster="" i
+    for i in $(seq "$MEMBERS"); do
+        cluster+="${cluster:+,}n$i=http://127.0.0.1:$((23800 + i))"
     done
-    sleep 2
-    echo "== $name ($("$bin" --version))"
-    "$BENCH" --endpoint http://127.0.0.1:23790 --mode read-under-load \
-        --conns 40 --duration-secs 20 --probes 200
-    kill "$pid"
-    wait "$pid" || true
+    for i in $(seq "$MEMBERS"); do
+        local args=(--data-dir "$dir/data$i"
+            --listen-client-urls "http://127.0.0.1:$((23790 + i))"
+            --listen-peer-urls "http://127.0.0.1:$((23800 + i))"
+            --listen-metrics-url "")
+        if [ "$MEMBERS" -gt 1 ]; then
+            args+=(--name "n$i" --initial-cluster "$cluster"
+                --initial-advertise-peer-urls "http://127.0.0.1:$((23800 + i))"
+                --initial-cluster-token read-latency)
+        fi
+        "$bin" "${args[@]}" >"$dir/log$i" 2>&1 &
+        echo $!
+    done
+}
+
+run() {
+    local name=$1 bin=$2 dir=$WORK/$1 i
+    mkdir -p "$dir"
+    local pids
+    pids=$(start_members "$dir" "$bin")
+    for i in $(seq "$MEMBERS"); do
+        for _ in $(seq 100); do
+            curl -sf "http://127.0.0.1:$((23790 + i))/health" >/dev/null && break
+            sleep 0.2
+        done
+    done
+    sleep 4
+    echo "== $name ($("$bin" --version)), $MEMBERS member(s)"
+    # One member's client port, or (several members) two of them: the
+    # leader may be either, so both a leader and a follower get measured.
+    for i in $(seq "$((MEMBERS > 1 ? 2 : 1))"); do
+        echo "-- client port of member $i"
+        "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
+            --conns 40 --duration-secs 20 --probes 200
+    done
+    # shellcheck disable=SC2086
+    kill $pids
+    # shellcheck disable=SC2086
+    wait $pids || true
 }
 
 if [ $# -ge 1 ]; then
