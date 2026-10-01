@@ -15,7 +15,7 @@ lock too.
 
 ## Ring 1 — Workspace unit + integration tests
 
-Run with: `cargo test --workspace` (271 tests in 34 binaries at v1.8.0;
+Run with: `cargo test --workspace` (273 tests in 36 binaries at v1.9.0;
 one is `#[ignore]`d).
 
 - **Unit tests** in each crate: MVCC (revisions, txn, compaction, range

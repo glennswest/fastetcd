@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.9.0] — 2026-10-01
+
 ### 2026-10-01 — linearizable reads stop queueing behind writes (#71, P0)
 - **perf:** A linearizable Range on a single-member cluster no longer
   waits for the writes queued ahead of it. It went through openraft's
