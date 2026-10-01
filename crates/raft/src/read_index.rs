@@ -7,13 +7,29 @@
 //! ~58 writes/s on one member, with serializable reads at 0.2 ms
 //! (fastetcd#71).
 //!
+//! **The read index.** etcd waits for applied >= the commit index seen
+//! when the read arrived. Here it is the first index of the leader's
+//! current term (its blank entry), which needs no wait once that entry
+//! is applied (#75). The argument: a read must reflect every write
+//! acknowledged before it began. The leader acknowledges a write only
+//! after applying it itself (openraft answers `client_write` from the
+//! apply; forwarded writes and batches are answered from the leader's
+//! answer), so every write acknowledged in the current term is already
+//! applied here. Writes acknowledged in earlier terms, by any leader,
+//! were committed, so they are in this leader's log (leader
+//! completeness) below its blank entry. Applied >= that index therefore
+//! covers every acknowledged write, and the state the read sees only
+//! grows. What a read no longer waits for is writes nobody has been
+//! told about yet, which are concurrent with it either way. Under write
+//! load this matters: with one data file, a state-machine apply waits
+//! for the next log append's fsync to release redb's single writer, so
+//! waiting for the commit index cost about one fsync per read. If the
+//! first index of the term is not known, the read index falls back to
+//! the larger of the committed index and the last durable log index.
+//!
 //! When this node is the leader and the *only* voter, no other node can
 //! commit anything or become leader, so leadership needs no heartbeat
-//! round, and the read index is known locally: everything durably in
-//! the log, and everything openraft has marked committed. The read
-//! waits until the state machine has applied that far — etcd's
-//! ReadIndex: wait for applied >= the commit index seen when the read
-//! arrived — and never enters RaftCore's queue.
+//! round, and the read never enters RaftCore's queue.
 //!
 //! The sole-voter test reads openraft's metrics, which RaftCore
 //! publishes between messages and so may be a little behind. Behind is
@@ -33,12 +49,10 @@
 //! share a member; so if a quorum (in every config of a joint
 //! membership) answers term <= ours after the read arrived, no newer
 //! leader had been elected when it arrived, and nothing it commits can
-//! precede the read. The read index is the larger of the committed
-//! index and the first index of the leader's own term (its blank
-//! entry, which follows everything earlier leaders committed), taken
-//! after the read arrived; then the read waits for the state machine to
-//! apply that far. This is etcd's ReadIndex. Reads that arrive while a
-//! round is out join the next one, so a burst of reads costs one round.
+//! precede the read. The read index is the first index of the leader's
+//! own term, as above; the read waits for the state machine to apply
+//! that far. Reads that arrive while a round is out join the next one,
+//! so a burst of reads costs one round.
 //!
 //! Anything else — a follower, a pending membership change, a member
 //! that does not answer or is older than the RPC, a round with no
@@ -174,8 +188,9 @@ impl LocalReadIndex {
         if self.progress.saved_vote_term() != term {
             return None;
         }
-        let start = self.progress.term_start(term)?;
-        let index = self.progress.committed.load(Ordering::Acquire).max(start);
+        // See the module docs for why the first index of the term is
+        // the read index.
+        let index = self.progress.term_start(term)?;
 
         let mut confirmed: BTreeSet<NodeId> = BTreeSet::from([me]);
         let quorum = |c: &BTreeSet<NodeId>| {
@@ -229,6 +244,9 @@ impl LocalReadIndex {
             && configs[0].contains(&m.id);
         if !sole {
             return None;
+        }
+        if let Some(start) = self.progress.term_start(m.current_term) {
+            return Some(start);
         }
         let committed = self.progress.committed.load(Ordering::Acquire);
         let durable = self.progress.last_durable.load(Ordering::Acquire);

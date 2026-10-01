@@ -67,10 +67,14 @@ run() {
         "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
             --conns 40 --duration-secs 20 --probes 200
     done
-    # shellcheck disable=SC2086
-    kill $pids
-    # shellcheck disable=SC2086
-    wait $pids || true
+    local pid
+    for pid in $pids; do
+        if ! kill "$pid" 2>/dev/null; then
+            echo "member pid $pid had already exited; its log ends:"
+            tail -n 20 "$dir"/log* || true
+        fi
+    done
+    sleep 1
 }
 
 if [ $# -ge 1 ]; then
