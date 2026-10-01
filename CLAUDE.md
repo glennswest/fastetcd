@@ -1149,6 +1149,47 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Left for #75 (P2): a multi-member leader's reads still queue in
       RaftCore, and every write is its own fsync (no group commit).
 
+36. **Multi-member reads off RaftCore, and group commit (#75, P1) — in progress.**
+    After #71 a sole voter reads without RaftCore and a write costs one
+    fsync. Left: a multi-voter leader's `ensure_linearizable` is still a
+    message behind every queued write, and every `client_write` is its
+    own RaftCore message, append and fsync. openraft 0.10 is alpha
+    (alpha.36, 2026-09-29): not adopted under a control-plane store.
+    Plan:
+    - **ReadIndex outside RaftCore** (`read_index.rs`). New peer RPC
+      `ConfirmLeader { term }`, answered from the vote term the member's
+      log store last *saved* (openraft saves a vote before granting it or
+      acting on it: `SaveVote` precedes `Respond` in the command queue,
+      checked in 0.9.24). The leader, while metrics say leader, its own
+      saved term equals the metrics term, and no membership entry is
+      unshown, takes read index = max(committed, first index of its term)
+      and asks every other voter; a quorum (per joint config) answering
+      term <= its own proves no newer leader existed when the read
+      arrived. Reads arriving during a round join the next one (one
+      round in flight). Wait for applied >= read index on the SM watch.
+      Any failure, an old member (`Unimplemented`), or a timeout →
+      `ensure_linearizable`.
+    - **Batched proposals** (`proposer.rs`): proposals queue; up to 3
+      `client_write`s in flight; whatever queued meanwhile goes as one
+      `FastetcdLogEntry::Batch(Vec<entry>)` (a single entry still goes
+      plain). Forwarded writes on the leader go through it too. New
+      variant → only once every member (voters and learners) has
+      answered `ConfirmLeader`; re-checked when membership changes.
+    - **Batch apply is crash-exact**: before sub-entry j of the batch at
+      index I the SM stages `raft_batch_progress = (I, j+1)` (folded into
+      that sub-entry's commit), the last one also `last_applied = I`.
+      Deferred commits persist as a prefix, so on replay of I the first
+      `progress` sub-entries are skipped.
+    Work items:
+    - [ ] types/proto: `Batch` entry/response, `ConfirmLeader` RPC.
+    - [ ] log store: saved vote term, first index of the current term.
+    - [ ] SM: batch apply with progress; MvccStore progress meta.
+    - [ ] read_index multi-voter rounds; peer handler; forwarder call.
+    - [ ] proposer + gate; ServerState, ForwardWrite, main, harnesses.
+    - [ ] Tests: batch replay skip, proposer batches + right responses,
+      3-member reads under write load (local path taken, linearizable),
+      old member → no batches; bench numbers; docs, changelog; release.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
