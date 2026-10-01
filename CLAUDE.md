@@ -1087,6 +1087,45 @@ Tracked live in the Claude task system. Snapshot of the order:
     duration parsing (`1h`, `30m`, bare = hours in periodic), and
     `ETCD_AUTO_COMPACTION_MODE`.
 
+35. **A linearizable Range does not queue behind writes (#71, P0) — in progress.**
+    Under ~58 writes/s a linearizable Range took p50 157 ms, p99 6.9 s
+    (serializable 0.2 ms). Cause, read in openraft 0.9.24: `RaftCore`
+    runs each `client_write` to completion before the next message,
+    awaiting the log append's fsync and `save_committed`'s fsync inline,
+    and `ensure_linearizable` is a message in that same queue; then the
+    read waits for apply, which fsyncs once per entry. Three fsyncs per
+    write, all through redb's single writer, and `begin_write` blocks a
+    tokio worker while it waits for that writer. Plan:
+    - **Sole-voter read index without RaftCore**: when this node is the
+      leader and the only voter (metrics), and no membership entry has
+      been appended that metrics do not show yet (log store tracks it),
+      the read index is max(committed, last durable log index) from the
+      log store, and the read waits for the state machine's own applied
+      index (a watch in the SM, not openraft metrics, which RaftCore
+      only flushes between messages). Otherwise `ensure_linearizable`
+      as before. etcd's ReadIndex: wait for applied >= commit index.
+    - **Applies and `save_committed` commit without fsync** (redb
+      `Durability::None`). The durable raft log is the record: redb's
+      next durable commit (the next log append, vote, purge) persists
+      them, and a crash loses only applies that replay from the log.
+      Snapshot install, startup recovery and every other write stay
+      durable. `KvStore::sync` becomes a real durable flush, called on
+      shutdown.
+    - `RedbEngine::commit` opens its write transaction inside
+      `spawn_blocking`.
+    Work items:
+    - [ ] redb engine honours `WriteOptions::sync`; `sync()` flushes;
+      begin_write off the async thread.
+    - [ ] MvccStore apply-path commits deferred once the server enables
+      it (after startup recovery); log store `save_committed` deferred.
+    - [ ] Log store: durable last index + membership index; SM applied
+      watch; `read_barrier` helper used by serve_range, ForwardRead and
+      the lease precheck.
+    - [ ] Tests: crash-replay of deferred applies, sole-voter barrier
+      (waits for apply, falls back with 2 voters), read latency under
+      write load on a real disk (bench, via sc-build).
+    - [ ] Docs, changelog; release; close #71.
+
 ## Constraints & rules
 
 - **Wire compatibility is the bar.** If unmodified etcd v3 clients don't
