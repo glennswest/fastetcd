@@ -42,7 +42,13 @@ run() {
 }
 
 if [ $# -ge 1 ]; then
-    git worktree add --detach "$WORK/base-src" "$1" >/dev/null
+    # sc-build's checkout carries no tags: fetch the ref if it is missing.
+    base=$1
+    if ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
+        git fetch -q --depth=1 origin "$base"
+        base=FETCH_HEAD
+    fi
+    git worktree add --detach "$WORK/base-src" "$base" >/dev/null
     (cd "$WORK/base-src" && CARGO_TARGET_DIR=$ROOT/target/baseline \
         cargo build --release --locked -p fastetcd-server)
     run "baseline $1" "$ROOT/target/baseline/release/fastetcd"
