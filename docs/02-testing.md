@@ -23,7 +23,10 @@ one is `#[ignore]`d).
   flag rules, sizing, the gateway's JSON and status mapping.
 - **raft** (`crates/raft/tests/`): a single-node cluster, restart and
   membership recovery, log-state at scale, snapshot build/install and
-  transfer through files.
+  transfer through files; `read_barrier.rs`: a sole voter's read
+  barrier does not wait behind queued writes on a slow-fsync engine
+  (openraft's does, as the control) and still sees every acknowledged
+  write (#71).
 - **server** (`crates/server/tests/`), through real tonic clients and,
   where it matters, a client port built as `main.rs` builds it:
   - KV, watch (incl. forced lag), lease and lease expiry, cluster and
@@ -34,13 +37,22 @@ one is `#[ignore]`d).
     (`multinode_grpc.rs`: replication, forwarding, linearizable reads,
     LIST→WATCH revision contract), peer TLS, snapshot catch-up of a
     late learner;
-  - space alarm, corruption recovery from backups, `cluster_id`.
+  - space alarm, corruption recovery from backups, `cluster_id`;
+  - `apply_replay.rs`: SIGKILL the real binary after acknowledged puts;
+    the unsynced applies are missing from the file, and a restart
+    replays them from the log (#71).
 - **migrate** (`crates/migrate/tests/round_trip.rs`): etcd snapshot
   import.
 - `crates/storage/tests/two_phase_commit_cost.rs`: a measurement, not a
   pass/fail check.
 
 Known flake: `snapshot_transfer_grpc` (#45), about 1 run in 12.
+
+Read latency under write load, on a real disk (#71):
+`sc-build 'tests/read_latency.sh v1.8.0'` runs `fastetcd-bench --mode
+read-under-load` (40 clients looping GET + CAS Txn, a prefix Range every
+fifth loop, a probe of 200 linearizable and 200 serializable Ranges)
+against this tree and, if given, a baseline ref.
 
 ## Ring 2 — Third-party Rust client compatibility
 

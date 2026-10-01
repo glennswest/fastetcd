@@ -3,6 +3,41 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-01 — linearizable reads stop queueing behind writes (#71, P0)
+- **perf:** A linearizable Range on a single-member cluster no longer
+  waits for the writes queued ahead of it. It went through openraft's
+  `ensure_linearizable`, a message to RaftCore, which handles one client
+  write at a time and awaits that write's log fsync before the next
+  message; under ~58 writes/s that was p50 157 ms, p99 6.9 s, with
+  serializable reads at 0.2 ms (rustkube#177). A leader that is the only
+  voter now takes its read index from the log store (the larger of the
+  committed index and the last durable log index) and waits on the
+  state machine's own applied index, never entering RaftCore
+  (`crates/raft/src/read_index.rs`). Leadership, a single-voter
+  non-joint membership and no unshown membership change are checked
+  first; otherwise the read uses openraft's read-index as before.
+- **perf:** A write costs one fsync instead of three. State-machine
+  applies (with the `last_applied_log_id` folded into each) and openraft's
+  committed index commit without an fsync (redb `Durability::None`):
+  visible at once, persisted by the next durable commit, normally the
+  next log append. A crash loses at most the last few applies and their
+  applied position together, and they replay from the durable log into
+  the same state. Snapshot installs, bulk loads and startup recovery
+  stay durable. `KvStore::sync` on redb is now a real flush, run on a
+  ctrl-c shutdown.
+- **perf:** `RedbEngine::commit` opens its write transaction inside
+  `spawn_blocking`; redb's `begin_write` blocks the thread until the
+  previous writer finishes, which used to stall a tokio worker.
+- **feat:** `fastetcd-bench --mode read-under-load` (the #71 load: GET +
+  CAS Txn loops, a probe of linearizable and serializable Ranges) and
+  `tests/read_latency.sh [baseline-ref]` to run it on a real disk.
+- **test:** `crates/raft/tests/read_barrier.rs` (slow-fsync engine, 30
+  queued writes: the local barrier stays under 3 fsyncs and sees every
+  acknowledged write; openraft's own barrier, the control, queues for
+  seconds); `crates/server/tests/apply_replay.rs` (SIGKILL after
+  acknowledged puts loses unsynced applies on disk; a restart replays
+  them with the same revisions).
+
 ### 2026-09-29 — documentation from the code (#26)
 - **docs:** `docs/01-configuration.md`: every server flag with its
   default, `FASTETCD_*` variable and `ETCD_*` fallback, the ports, the

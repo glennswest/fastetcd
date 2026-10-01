@@ -66,10 +66,21 @@ consensus, snapshot install, log compaction. Mature enough to underpin a
 production system. We integrate by:
 
 - `KvLogStore`: `RaftLogStorage` over the `KvStore` trait, so the log
-  lives in the same redb file. Append is durable (fsync'd commit)
-  before ack.
+  lives in the same redb file. Append, vote, truncate and purge are
+  durable (fsync'd commit) before ack. The committed index is written
+  without an fsync: openraft only needs it to be no higher than the
+  truth (#71).
 - Implementing `RaftStateMachine` as the MVCC store applying committed
-  entries.
+  entries. Each apply commits its writes and its `last_applied_log_id`
+  in one batch **without an fsync** (redb `Durability::None`): it is
+  visible at once and reaches disk with the next durable commit,
+  normally the next log append. A crash loses at most the last few
+  applies, together with the applied position that records them, and
+  the state machine replays them from the durable log into the same
+  state (#71). Snapshot installs, migration bulk loads and startup
+  recovery stay durable, since the log cannot replay them. Before this
+  a write cost three fsyncs through redb's single writer (append,
+  committed index, apply).
 - Implementing `RaftNetwork` over our internal gRPC peer transport
   (`fastetcd.raft.RaftPeer` on the peer port), which also carries
   follower → leader forwarding of writes, linearizable reads and
@@ -130,7 +141,19 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 1. Client sends `Range` with default `serializable = false`.
 2. Server, if leader, issues a Raft read-index (no log append, just a
    heartbeat round-trip to confirm leadership) and waits for apply to
-   catch up to that index.
+   catch up to that index. A leader that is the only voter needs no
+   heartbeat: its read index is the larger of the committed index and
+   the last durable log index, both from the log store, and it waits on
+   the state machine's own applied index. This never enters openraft's
+   RaftCore, which handles one client write at a time and awaits its
+   log fsync, so a read there queued behind every write ahead of it
+   (150 ms to 7 s under load, #71). The local path is taken only while
+   openraft's metrics show this node as leader with a single-voter,
+   non-joint membership at least as new as any membership entry the log
+   store has been handed; anything else uses openraft's read-index
+   (`crates/raft/src/read_index.rs`). On a multi-member cluster the
+   leader's read-index still queues behind writes in RaftCore (fewer
+   now: one fsync per write instead of three).
 3. Server, if follower, forwards the whole Range to the leader over the
    peer transport (`ForwardRead`), which runs the barrier and reads its
    own state machine.
