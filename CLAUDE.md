@@ -10,7 +10,18 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.8.0`** — etcd's v3 JSON gateway on the client port (#28):
+**`1.9.0`** — A linearizable Range no longer queues behind writes
+(#71, P0; rustkube#177). openraft 0.9's RaftCore handles one client
+write at a time and awaits its log fsync, and `ensure_linearizable` is
+a message in that queue: 150 ms–7 s per read under load. A sole-voter
+leader now serves its read index from the log store and waits on the
+state machine's applied watch (`crates/raft/src/read_index.rs`); applies
+and the committed index commit without an fsync (the durable log
+replays them after a crash), so a write costs one fsync, not three.
+`fastetcd-bench --mode read-under-load`, `tests/read_latency.sh`.
+Multi-member reads and group commit: #75.
+
+Previous: **`1.8.0`** — etcd's v3 JSON gateway on the client port (#28):
 `POST /v3/...` for every KV, Lease, Watch, Cluster, Maintenance and Auth
 method at etcd v3.6's routes, with its JSON (serde from `pbjson-build`,
 proto names, int64 as strings, base64 bytes, enums by name) and
@@ -1087,7 +1098,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     duration parsing (`1h`, `30m`, bare = hours in periodic), and
     `ETCD_AUTO_COMPACTION_MODE`.
 
-35. **A linearizable Range does not queue behind writes (#71, P0) — in progress.**
+35. **A linearizable Range does not queue behind writes (#71, P0) — done, shipped in v1.9.0.**
     Under ~58 writes/s a linearizable Range took p50 157 ms, p99 6.9 s
     (serializable 0.2 ms). Cause, read in openraft 0.9.24: `RaftCore`
     runs each `client_write` to completion before the next message,
@@ -1114,17 +1125,29 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `RedbEngine::commit` opens its write transaction inside
       `spawn_blocking`.
     Work items:
-    - [ ] redb engine honours `WriteOptions::sync`; `sync()` flushes;
+    - [x] redb engine honours `WriteOptions::sync`; `sync()` flushes;
       begin_write off the async thread.
-    - [ ] MvccStore apply-path commits deferred once the server enables
+    - [x] MvccStore apply-path commits deferred once the server enables
       it (after startup recovery); log store `save_committed` deferred.
-    - [ ] Log store: durable last index + membership index; SM applied
+    - [x] Log store: durable last index + membership index; SM applied
       watch; `read_barrier` helper used by serve_range, ForwardRead and
       the lease precheck.
-    - [ ] Tests: crash-replay of deferred applies, sole-voter barrier
+    - [x] Tests: crash-replay of deferred applies, sole-voter barrier
       (waits for apply, falls back with 2 voters), read latency under
       write load on a real disk (bench, via sc-build).
-    - [ ] Docs, changelog; release; close #71.
+    - [x] Docs, changelog; release; close #71.
+    - Verified: sc-build of 8795060, whole workspace green (`--locked`,
+      `--no-fail-fast`). `read_barrier.rs`: 30 queued writes on a 100 ms
+      fsync engine, openraft's barrier 8.7 s (control), local 1.7 ms.
+      `apply_replay.rs`: after SIGKILL the file held revision 99 of 100
+      acknowledged; restart replayed it. `tests/read_latency.sh v1.8.0`
+      on dev's disk: linearizable p99 700 ms → 76 ms (serializable 57),
+      writes 72/s → 153/s. rustkube's `get-latency.sh` with
+      `RK_FASTETCD_REF=main` (the issue's rig): load, store linearizable
+      p50 2.6 ms, p99 46.8 ms; 0 failed checks; lease updates 177/s at
+      225 ms mean (issue: ~58/s at 286 ms).
+    - Left for #75 (P2): a multi-member leader's reads still queue in
+      RaftCore, and every write is its own fsync (no group commit).
 
 ## Constraints & rules
 
