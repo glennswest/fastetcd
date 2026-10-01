@@ -26,7 +26,10 @@ one is `#[ignore]`d).
   transfer through files; `read_barrier.rs`: a sole voter's read
   barrier does not wait behind queued writes on a slow-fsync engine
   (openraft's does, as the control) and still sees every acknowledged
-  write (#71).
+  write (#71); `batch_apply.rs`: a batched entry applies each proposal
+  at its own revision, a replay skips exactly the part already on disk,
+  and the proposer turns 40 concurrent proposals into a few entries
+  (#75).
 - **server** (`crates/server/tests/`), through real tonic clients and,
   where it matters, a client port built as `main.rs` builds it:
   - KV, watch (incl. forced lag), lease and lease expiry, cluster and
@@ -40,7 +43,11 @@ one is `#[ignore]`d).
   - space alarm, corruption recovery from backups, `cluster_id`;
   - `apply_replay.rs`: SIGKILL the real binary after acknowledged puts;
     the unsynced applies are missing from the file, and a restart
-    replays them from the log (#71).
+    replays them from the log (#71);
+  - `multinode_fastpath.rs`: 3 members, writers on the leader and a
+    follower, linearizable readers on both checked against every
+    acknowledged write; reads confirmed by quorum, writes batched; with a
+    member older than `ConfirmLeader`, nothing is batched (#75).
 - **migrate** (`crates/migrate/tests/round_trip.rs`): etcd snapshot
   import.
 - `crates/storage/tests/two_phase_commit_cost.rs`: a measurement, not a
@@ -52,7 +59,9 @@ Read latency under write load, on a real disk (#71):
 `sc-build 'tests/read_latency.sh v1.8.0'` runs `fastetcd-bench --mode
 read-under-load` (40 clients looping GET + CAS Txn, a prefix Range every
 fifth loop, a probe of 200 linearizable and 200 serializable Ranges)
-against this tree and, if given, a baseline ref.
+against this tree and, if given, a baseline ref; `MEMBERS=3` runs a
+local three-member cluster and measures through two members' client
+ports (#75).
 
 ## Ring 2 — Third-party Rust client compatibility
 

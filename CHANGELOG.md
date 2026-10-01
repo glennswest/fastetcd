@@ -3,6 +3,44 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-01 — multi-member reads off RaftCore, batched proposals (#75, P1)
+- **perf:** A leader with other voters serves linearizable reads without
+  openraft's RaftCore queue. It confirms leadership itself over a new
+  peer RPC, `ConfirmLeader`, which each member answers from the vote term
+  its log store last saved (openraft saves a vote before granting it, so
+  a quorum answering a term no newer than the leader's means no newer
+  leader existed when the read arrived). One round at a time; reads that
+  arrive meanwhile share the next. Followers' forwarded reads use it too.
+  Any failure, older member or lost quorum falls back to
+  `ensure_linearizable`.
+- **perf:** The read index is the first index of the leader's term, not
+  the commit index: the leader answers a write only after applying it,
+  and earlier terms' writes lie below its blank entry. Reads no longer
+  wait for the apply pipeline (about one fsync per read on one data
+  file). Single members too.
+- **perf:** Group commit. Proposals go through a `Proposer`: up to three
+  `client_write`s in flight; what queues meanwhile goes as one
+  `FastetcdLogEntry::Batch` (≤ 256 proposals, ≤ 512 KiB), one append and
+  one fsync, each proposal at its own revision with its own answer.
+  Forwarded writes are batched on the leader. Batches only once every
+  member answers `ConfirmLeader`; re-checked on membership changes.
+- **feat:** A batch's apply records `(index, done)` in `mvcc_meta` with
+  each proposal's commit, so a crash mid-batch replays exactly what did
+  not reach disk. New metrics: `fastetcd_read_index_total{path}`,
+  `fastetcd_proposal_batches_total`, `fastetcd_proposals_batched_total`,
+  `fastetcd_proposals_single_total`.
+- **BREAKING (mixed versions):** once batched entries are in the log, a
+  member older than this release cannot read it: do not add one, do not
+  downgrade below it (docs/03-deploy.md § Multi-node). Rolling upgrades
+  are safe: nothing is batched until every member is upgraded.
+- **test:** `crates/raft/tests/batch_apply.rs`,
+  `crates/server/tests/multinode_fastpath.rs`; `MEMBERS=3
+  tests/read_latency.sh` for a local three-member cluster.
+- Measured on dev (`tests/read_latency.sh v1.9.0`, 40 GET+CAS clients):
+  one member, writes 170 → 540/s (mean 235 → 58 ms); three members,
+  writes 141 → ~300/s (mean ~250 → ~97 ms), linearizable Range p50
+  31.8/17.2 → 0.69/0.55 ms and p99 298 → 66/57 ms through two members.
+
 ## [v1.9.0] — 2026-10-01
 
 ### 2026-10-01 — linearizable reads stop queueing behind writes (#71, P0)

@@ -1149,7 +1149,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Left for #75 (P2): a multi-member leader's reads still queue in
       RaftCore, and every write is its own fsync (no group commit).
 
-36. **Multi-member reads off RaftCore, and group commit (#75, P1) — in progress.**
+36. **Multi-member reads off RaftCore, and group commit (#75, P1) — done, shipped in v1.10.0.**
     After #71 a sole voter reads without RaftCore and a write costs one
     fsync. Left: a multi-voter leader's `ensure_linearizable` is still a
     message behind every queued write, and every `client_write` is its
@@ -1181,14 +1181,25 @@ Tracked live in the Claude task system. Snapshot of the order:
       Deferred commits persist as a prefix, so on replay of I the first
       `progress` sub-entries are skipped.
     Work items:
-    - [ ] types/proto: `Batch` entry/response, `ConfirmLeader` RPC.
-    - [ ] log store: saved vote term, first index of the current term.
-    - [ ] SM: batch apply with progress; MvccStore progress meta.
-    - [ ] read_index multi-voter rounds; peer handler; forwarder call.
-    - [ ] proposer + gate; ServerState, ForwardWrite, main, harnesses.
-    - [ ] Tests: batch replay skip, proposer batches + right responses,
+    - [x] types/proto: `Batch` entry/response, `ConfirmLeader` RPC.
+    - [x] log store: saved vote term, first index of the current term.
+    - [x] SM: batch apply with progress; MvccStore progress meta.
+    - [x] read_index multi-voter rounds; peer handler; forwarder call.
+    - [x] proposer + gate; ServerState, ForwardWrite, main, harnesses.
+    - [x] Tests: batch replay skip, proposer batches + right responses,
       3-member reads under write load (local path taken, linearizable),
       old member → no batches; bench numbers; docs, changelog; release.
+    - Changed while doing it: the read index is the first index of the
+      leader's term, not the commit index (the leader answers writes only
+      after applying them; earlier terms' writes lie below its blank), so
+      a read no longer waits ~one fsync for the apply pipeline.
+    - Verified: sc-build of d0481ef, whole workspace green (278 tests,
+      `--locked --no-fail-fast`). multinode_fastpath: 354 reads by quorum,
+      0 via raft, 546 of 619 writes in 63 batches, no stale read; older
+      member → 0 batches. batch_apply: 40 proposals → 4 log entries;
+      replay skips exactly the persisted prefix. read_latency.sh v1.9.0 →
+      d0481ef: 1 member writes 170 → 540/s; 3 members writes 141 →
+      ~300/s, linearizable p50 31.8 → 0.69 ms, p99 298 → 66 ms.
 
 ## Constraints & rules
 

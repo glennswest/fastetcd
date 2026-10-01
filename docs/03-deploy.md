@@ -390,6 +390,22 @@ with `--initial-cluster-state=existing`); `MemberRemove` removes them.
 On separate hosts, listen on a routable address and set
 `--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 
+**Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
+concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
+a member older than 1.10 cannot decode. It does so only once every
+member, learners included, answers the 1.10 `ConfirmLeader` peer RPC,
+so a rolling upgrade is safe: writes go one per entry, as before, until
+the last member is upgraded. After that:
+
+- **Do not add a member older than 1.10** (`MemberAdd`): the leader may
+  batch before it learns of the new member, and an older one stops at
+  the first batch in the log.
+- **Do not downgrade a member below 1.10** once the cluster has batched
+  (`fastetcd_proposal_batches_total` > 0 on any leader since then): it
+  cannot read the log. Replace it with an empty member instead.
+
+The same holds for replicated auth entries since 1.5.0.
+
 ### Cluster id
 
 Every response header carries a `cluster_id`. Clients that talk to
@@ -544,6 +560,9 @@ from deltas between scrapes.
 | `etcd_server_proposals_committed_total` | gauge | The raft committed index (a gauge, as in etcd). |
 | `etcd_server_proposals_applied_total` | gauge | The raft applied index. Committed minus applied is apply lag. |
 | `etcd_server_proposals_pending` | gauge | Proposals this member is waiting on. |
+| `fastetcd_read_index_total{path}` | counter | Linearizable read barriers this member served, by path: `sole_voter` (the only voter, from local state), `quorum` (leadership confirmed over `ConfirmLeader`), `raft` (openraft's read-index, which queues behind writes). Mostly `raft` on a leader means the fast path is not being taken: an older or unreachable member, or leadership changing. |
+| `fastetcd_proposal_batches_total` | counter | Batched log entries this member proposed (group commit). |
+| `fastetcd_proposals_batched_total` / `fastetcd_proposals_single_total` | counter | Proposals that went in batches, and alone. Stays all `single` while any member is older than 1.10. |
 
 **Store:** `etcd_debugging_mvcc_current_revision`,
 `etcd_debugging_mvcc_compact_revision`,

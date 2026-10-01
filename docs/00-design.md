@@ -139,21 +139,29 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 ## Read path (linearizable)
 
 1. Client sends `Range` with default `serializable = false`.
-2. Server, if leader, issues a Raft read-index (no log append, just a
-   heartbeat round-trip to confirm leadership) and waits for apply to
-   catch up to that index. A leader that is the only voter needs no
-   heartbeat: its read index is the larger of the committed index and
-   the last durable log index, both from the log store, and it waits on
-   the state machine's own applied index. This never enters openraft's
-   RaftCore, which handles one client write at a time and awaits its
-   log fsync, so a read there queued behind every write ahead of it
-   (150 ms to 7 s under load, #71). The local path is taken only while
-   openraft's metrics show this node as leader with a single-voter,
-   non-joint membership at least as new as any membership entry the log
-   store has been handed; anything else uses openraft's read-index
-   (`crates/raft/src/read_index.rs`). On a multi-member cluster the
-   leader's read-index still queues behind writes in RaftCore (fewer
-   now: one fsync per write instead of three).
+2. Server, if leader, establishes a read index and waits for its state
+   machine to apply that far, without entering openraft's RaftCore,
+   which handles one client write at a time and awaits its fsync, so a
+   read queued there waited behind every write ahead of it (150 ms to
+   7 s under load, #71; `crates/raft/src/read_index.rs`):
+   - **Leadership.** A sole voter needs no confirmation. With other
+     voters the leader asks each, over the `ConfirmLeader` peer RPC,
+     for the term of the vote it last saved; openraft saves a vote
+     before granting it, so a quorum (in every config of a joint
+     membership) answering a term no newer than the leader's, asked
+     after the read arrived, proves no newer leader existed then (#75).
+     Reads that arrive while a round is out share the next one.
+   - **Read index** = the first index of the leader's current term (its
+     blank entry). The leader answers a write only after applying it,
+     so every write acknowledged this term is applied, and writes
+     acknowledged in earlier terms are below the blank entry (leader
+     completeness). Waiting for the commit index instead (etcd) would
+     also wait for writes nobody has been told about, about one fsync
+     per read here, since an apply waits for redb's single writer (#75).
+   - Taken only while metrics show this node as leader with its saved
+     vote in the current term and no membership entry the metrics do not
+     show yet; anything else, an unreachable or older member, or a round
+     without quorum, uses openraft's read-index (`ensure_linearizable`).
 3. Server, if follower, forwards the whole Range to the leader over the
    peer transport (`ForwardRead`), which runs the barrier and reads its
    own state machine.
@@ -172,7 +180,17 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 
 1. Client `Put` arrives at any node.
 2. Non-leader forwards to leader (etcd does the same internally).
-3. Leader proposes through openraft; awaits commit.
+3. Leader proposes through openraft; awaits commit. Proposals queue in
+   a `Proposer` (`crates/raft/src/proposer.rs`): up to three
+   `client_write`s are in flight, and whatever queued meanwhile goes as
+   one `FastetcdLogEntry::Batch` — one RaftCore message, one log append,
+   one fsync for all of them (up to 256 proposals, 512 KiB), each
+   applied at its own revision with its own answer (#75). Batches are
+   proposed only once every member has answered `ConfirmLeader` (an
+   older member cannot decode one), re-checked on membership changes.
+   Applying a batch records `(index, done)` with each proposal's commit,
+   so a crash in the middle replays exactly the proposals that did not
+   reach disk.
 4. The state machine applies it to the MVCC store: assigns the next
    global revision, commits one redb write transaction (the mutation and
    the raft `last_applied` together), returns the response. A put
