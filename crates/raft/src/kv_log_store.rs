@@ -9,7 +9,11 @@
 //!
 //! Append fsyncs before invoking the `LogFlushed` callback, satisfying
 //! openraft's "log durable before ack" requirement (the underlying
-//! engine commits with `WriteOptions::sync = true` by default).
+//! engine commits with `WriteOptions::sync = true` by default). So do
+//! votes, truncation and purges. `save_committed` does not: the
+//! committed index is advisory (openraft only needs it to be no higher
+//! than the truth, and an older value is that), and its fsync used to
+//! run inline in RaftCore once per write (fastetcd#71).
 
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,6 +51,25 @@ pub struct KvLogStore {
     /// Index of the last committed entry openraft has told us about
     /// (0 = none), for `etcd_server_proposals_committed_total` (#29).
     committed_index: Arc<AtomicU64>,
+    progress: LogProgress,
+}
+
+/// What the log store has seen, read by the local read barrier
+/// (`crate::read_index`, fastetcd#71) without a round trip through
+/// RaftCore. Every value is `index + 1`, 0 meaning none, because the
+/// first log entry (a cluster's initial membership) is at index 0.
+#[derive(Clone, Default, Debug)]
+pub struct LogProgress {
+    /// Highest committed index openraft has saved.
+    pub(crate) committed: Arc<AtomicU64>,
+    /// Highest index durably in the log: at startup the last entry on
+    /// disk, then each append once its fsync returned.
+    pub(crate) last_durable: Arc<AtomicU64>,
+    /// Highest index of a membership entry handed to `append` since
+    /// this process started. Raised before the entry is written, so
+    /// openraft's metrics showing a membership at least this new means
+    /// they show every membership in the log.
+    pub(crate) membership: Arc<AtomicU64>,
 }
 
 impl KvLogStore {
@@ -54,7 +77,14 @@ impl KvLogStore {
         Self {
             engine,
             committed_index: Arc::new(AtomicU64::new(0)),
+            progress: LogProgress::default(),
         }
+    }
+
+    /// The store's progress, for [`crate::read_index::LocalReadIndex`].
+    /// Shared by every clone; take it before the store goes to openraft.
+    pub fn progress(&self) -> LogProgress {
+        self.progress.clone()
     }
 
     /// The committed index, kept current as openraft saves it. Every
@@ -67,6 +97,7 @@ impl KvLogStore {
     fn note_committed(&self, committed: &Option<LogId<NodeId>>) {
         if let Some(c) = committed {
             self.committed_index.fetch_max(c.index, Ordering::Relaxed);
+            self.progress.committed.fetch_max(c.index + 1, Ordering::Release);
         }
     }
 }
@@ -157,6 +188,9 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
         };
 
         let last_log_id = last.or(last_purged);
+        if let Some(l) = &last_log_id {
+            self.progress.last_durable.fetch_max(l.index + 1, Ordering::Release);
+        }
         Ok(LogState {
             last_purged_log_id: last_purged,
             last_log_id,
@@ -206,11 +240,14 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             bincode::serialize(&committed).map_err(|e| io_err(ErrorVerb::Write, e))?;
         let mut batch = WriteBatch::new();
         batch.put(TABLE_META, META_COMMITTED, &bytes);
+        // No fsync: the next durable commit (an append, a vote) carries
+        // it, and a crash that loses it leaves an older committed index,
+        // which openraft accepts (fastetcd#71).
+        self.note_committed(&committed);
         self.engine
-            .commit(batch, WriteOptions::default())
+            .commit(batch, WriteOptions { sync: false })
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
-        self.note_committed(&committed);
         Ok(())
     }
 
@@ -245,15 +282,25 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
         I::IntoIter: Send,
     {
         let mut batch = WriteBatch::new();
+        let mut last = None;
         for entry in entries {
+            if matches!(entry.payload, openraft::EntryPayload::Membership(_)) {
+                self.progress
+                    .membership
+                    .fetch_max(entry.log_id.index + 1, Ordering::Release);
+            }
             let bytes = bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?;
             batch.put(TABLE_LOG, &idx_key(entry.log_id.index), &bytes);
+            last = Some(entry.log_id.index);
         }
         // sync=true ensures fsync before commit returns.
         self.engine
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
+        if let Some(last) = last {
+            self.progress.last_durable.fetch_max(last + 1, Ordering::Release);
+        }
         callback.log_io_completed(Ok(()));
         Ok(())
     }
@@ -270,6 +317,11 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
+        // Only a follower truncates; the local read barrier is for a
+        // leader, but keep the value true.
+        self.progress
+            .last_durable
+            .fetch_min(log_id.index, Ordering::Release);
         Ok(())
     }
 

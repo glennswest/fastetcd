@@ -50,6 +50,9 @@ pub struct ServerState {
     /// when the embedding did not provide it; `/metrics` then reports
     /// the applied index, which the committed index is never below.
     pub committed_index: Option<Arc<AtomicU64>>,
+    /// Serves a sole-voter leader's read index without RaftCore
+    /// (fastetcd#71). `None`: every read barrier is openraft's.
+    pub read_index: Option<fastetcd_raft::LocalReadIndex>,
 }
 
 impl ServerState {
@@ -74,6 +77,7 @@ impl ServerState {
             recovery: Arc::new(RecoveryAlarm::default()),
             traffic: Arc::new(Traffic::default()),
             committed_index: None,
+            read_index: None,
         }
     }
 
@@ -81,6 +85,17 @@ impl ServerState {
     /// (`KvLogStore::committed_index`).
     pub fn with_committed_index(mut self, committed: Arc<AtomicU64>) -> Self {
         self.committed_index = Some(committed);
+        self
+    }
+
+    /// Let a sole-voter leader serve linearizable reads from its own
+    /// log and state machine progress (fastetcd#71): `progress` from
+    /// the node's `KvLogStore`, and its state machine's applied index.
+    pub fn with_local_read_index(mut self, progress: fastetcd_raft::kv_log_store::LogProgress) -> Self {
+        self.read_index = Some(fastetcd_raft::LocalReadIndex::new(
+            progress,
+            self.sm.applied_index(),
+        ));
         self
     }
 
@@ -139,7 +154,7 @@ impl ServerState {
         // before proposing it (#19; see `fastetcd_raft::precheck`). A
         // follower forwards and the leader checks.
         if precheck::is_leader(&self.raft) {
-            match precheck::check_leases(&self.raft, self.sm.mvcc(), &entry).await {
+            match precheck::check_leases(&self.raft, self.read_index.as_ref(), self.sm.mvcc(), &entry).await {
                 Ok(()) => {}
                 Err(PrecheckError::LeaseNotFound) => {
                     return Err(Status::not_found(precheck::LEASE_NOT_FOUND))
@@ -173,9 +188,11 @@ impl ServerState {
     /// older than a write that completed before the read began. On the
     /// leader, `ensure_linearizable` confirms leadership via a heartbeat
     /// quorum and waits for the state machine to catch up to the read
-    /// index. On a follower it returns `ForwardToLeader`, so we hand the
-    /// whole range to the leader, which does the barrier and reads its
-    /// own state machine (#10).
+    /// index; a sole voter does the same from local state, without
+    /// queueing behind writes in RaftCore (`read_barrier`, #71). On a
+    /// follower it returns `ForwardToLeader`, so we hand the whole range
+    /// to the leader, which does the barrier and reads its own state
+    /// machine (#10).
     ///
     /// Returns `Ok(None)` when the caller should read locally (this node
     /// is the leader and the barrier passed), or `Ok(Some((result,
@@ -186,8 +203,8 @@ impl ServerState {
         &self,
         read: &fastetcd_raft::ForwardedRead,
     ) -> Result<Option<(fastetcd_storage::mvcc::RangeResult, Option<i64>)>, Status> {
-        match self.raft.ensure_linearizable().await {
-            Ok(_) => Ok(None),
+        match fastetcd_raft::read_barrier(&self.raft, self.read_index.as_ref()).await {
+            Ok(()) => Ok(None),
             Err(e) => {
                 if let Some(fwd) = e.forward_to_leader::<openraft::BasicNode>() {
                     if let Some(leader_id) = fwd.leader_id {

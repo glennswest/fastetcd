@@ -475,7 +475,7 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // before proposing it (#19). A node that is not the leader skips
         // the check: `client_write` refuses it below anyway.
         if crate::precheck::is_leader(&self.raft) {
-            if let Err(e) = crate::precheck::check_leases(&self.raft, &self.mvcc, &entry).await {
+            if let Err(e) = crate::precheck::check_leases(&self.raft, None, &self.mvcc, &entry).await {
                 let result: Result<crate::types::FastetcdLogResponse, String> = Err(e.to_string());
                 let data = bincode::serialize(&result)
                     .map_err(|e| Status::internal(format!("encode response: {e}")))?;

@@ -91,6 +91,7 @@ async fn any_missing(mvcc: &MvccStore, entry: &FastetcdLogEntry) -> Result<bool,
 /// on the leader, before proposing.
 pub async fn check_leases(
     raft: &Raft<TypeConfig>,
+    local: Option<&crate::read_index::LocalReadIndex>,
     mvcc: &MvccStore,
     entry: &FastetcdLogEntry,
 ) -> Result<(), PrecheckError> {
@@ -98,7 +99,7 @@ pub async fn check_leases(
         return Ok(());
     }
     // Not found: make sure that is not just this leader lagging.
-    raft.ensure_linearizable()
+    crate::read_index::read_barrier(raft, local)
         .await
         .map_err(|e| PrecheckError::Unavailable(format!("lease check read barrier: {e}")))?;
     if any_missing(mvcc, entry).await.map_err(PrecheckError::Unavailable)? {

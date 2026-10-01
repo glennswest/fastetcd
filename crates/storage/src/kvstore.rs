@@ -81,8 +81,13 @@ impl StorageError {
 pub struct WriteOptions {
     /// If true (default), the engine must ensure the batch is durably
     /// flushed (fsync, `O_DSYNC`, or equivalent) before commit returns.
-    /// Setting this to false lets the engine batch fsyncs across commits
-    /// — useful for non-critical writes; never used for Raft log appends.
+    /// Setting this to false lets the engine batch fsyncs across commits:
+    /// the batch is visible to readers at once and is persisted by the
+    /// next commit with `sync = true` (or [`KvStore::sync`]). A crash may
+    /// lose non-sync commits, but only whole batches and only a suffix:
+    /// never one without the commits before it. The raft state machine
+    /// applies this way, because the raft log replays what is lost
+    /// (fastetcd#71); Raft log appends and votes never do.
     pub sync: bool,
 }
 
@@ -274,8 +279,7 @@ pub trait KvStore: Send + Sync + 'static {
     /// Atomically apply `batch` and (if `opts.sync`) flush durably.
     async fn commit(&self, batch: WriteBatch, opts: WriteOptions) -> StorageResult<()>;
 
-    /// Explicit flush of any data that has been committed with `sync =
-    /// false`. Engines that always fsync on commit may make this a no-op.
+    /// Durably flush every batch committed with `sync = false` so far.
     async fn sync(&self) -> StorageResult<()>;
 
     /// Best-effort estimate of the on-disk size in bytes. Used for

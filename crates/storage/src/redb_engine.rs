@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableTable, TableDefinition};
 use tokio::sync::{Notify, RwLock};
 use tokio::task;
 
@@ -32,7 +32,7 @@ pub struct RedbEngine {
 }
 
 struct RedbInner {
-    db: RwLock<Database>,
+    db: Arc<RwLock<Database>>,
     path: PathBuf,
     /// Snapshots currently outstanding. redb refuses to compact while
     /// any read transaction is live, and a `RedbSnapshot` keeps its
@@ -110,7 +110,7 @@ impl RedbEngine {
             .map_err(open_error)?;
         Ok(Self {
             inner: Arc::new(RedbInner {
-                db: RwLock::new(db),
+                db: Arc::new(RwLock::new(db)),
                 path,
                 live_readers: Arc::new(AtomicUsize::new(0)),
                 readers_drained: Arc::new(Notify::new()),
@@ -150,19 +150,20 @@ impl KvStore for RedbEngine {
         }))
     }
 
-    async fn commit(&self, batch: WriteBatch, _opts: WriteOptions) -> StorageResult<()> {
-        let inner = self.inner.clone();
-        // Hold the read lock across the spawn_blocking. We use a
-        // read lock because redb begin_write only needs &self;
-        // exclusive access is only required for compact (taken via
-        // db.write().await below).
-        let db_guard = inner.db.read().await;
-        let txn = db_guard.begin_write().map_err(StorageError::io)?;
-        // Move ownership of txn into the blocking task. The
-        // db_guard must outlive the txn; we keep it on the calling
-        // task and the blocking task only sees the txn.
+    async fn commit(&self, batch: WriteBatch, opts: WriteOptions) -> StorageResult<()> {
+        // The read lock is held for the whole commit (defragment takes
+        // the write lock). redb's `begin_write` blocks the calling
+        // thread until the previous write transaction finishes — up to
+        // a full fsync — so it runs in the blocking task with the rest,
+        // never on a tokio worker (fastetcd#71).
+        let db_guard = self.inner.db.clone().read_owned().await;
         let result = task::spawn_blocking(move || -> StorageResult<()> {
-            let txn = txn;
+            let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
+            if !opts.sync {
+                // Visible to readers at once, persisted by the next
+                // durable commit (fastetcd#71).
+                txn.set_durability(Durability::None);
+            }
             for op in batch.ops() {
                 match op {
                     BatchOp::Put { table, key, value } => {
@@ -201,18 +202,25 @@ impl KvStore for RedbEngine {
                 }
             }
             txn.commit().map_err(StorageError::io)?;
+            drop(db_guard);
             Ok(())
         })
         .await
         .map_err(|e| StorageError::Io(Box::new(e)))?;
-        drop(db_guard);
         result?;
         Ok(())
     }
 
     async fn sync(&self) -> StorageResult<()> {
-        // redb fsyncs on every `commit()`; nothing else to flush.
-        Ok(())
+        // An empty durable commit persists every non-durable commit
+        // before it (`WriteOptions { sync: false }`).
+        let db_guard = self.inner.db.clone().read_owned().await;
+        task::spawn_blocking(move || -> StorageResult<()> {
+            let txn = db_guard.begin_write().map_err(StorageError::io)?;
+            txn.commit().map_err(StorageError::io)
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?
     }
 
     async fn size_on_disk(&self) -> StorageResult<u64> {

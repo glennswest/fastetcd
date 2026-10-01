@@ -951,6 +951,13 @@ async fn main() -> anyhow::Result<()> {
     // Clone the MVCC handle before `sm` is moved into ServerState; the
     // peer service uses it to serve forwarded linearizable reads (#10).
     let peer_mvcc = sm.mvcc().clone();
+
+    // From here on the state machine's applies commit without their own
+    // fsync: the raft log, durable in the same file, replays whatever a
+    // crash loses, and the next log append persists them (#71). Startup
+    // recovery above wrote durably.
+    sm.mvcc().defer_apply_sync();
+    let log_progress = log.progress();
     let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
 
@@ -1064,7 +1071,8 @@ async fn main() -> anyhow::Result<()> {
         .with_space(space)
         .with_recovery(recovery_alarm)
         .with_client_cert_auth(args.client_cert_auth)
-        .with_committed_index(committed_index),
+        .with_committed_index(committed_index)
+        .with_local_read_index(log_progress),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).
@@ -1169,7 +1177,7 @@ async fn main() -> anyhow::Result<()> {
     let traffic = server_state.traffic.clone();
     let auth = AuthService::new(server_state);
 
-    let peer_service = RaftPeerService::new(raft, peer_mvcc);
+    let peer_service = RaftPeerService::new(raft, peer_mvcc.clone());
 
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
@@ -1297,6 +1305,12 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("ctrl-c received, shutting down");
         }
+    }
+
+    // Persist the deferred applies so the next start need not replay
+    // them (#71). Not needed for correctness: the log replays them.
+    if let Err(e) = peer_mvcc.sync().await {
+        tracing::warn!(error = %e, "flushing applied state on shutdown");
     }
 
     Ok(())

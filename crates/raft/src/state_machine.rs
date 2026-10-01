@@ -34,7 +34,7 @@ use openraft::StorageError;
 use openraft::StorageIOError;
 use openraft::StoredMembership;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use fastetcd_storage::mvcc::auth::AuthTables;
 use fastetcd_storage::mvcc::MvccStore;
@@ -57,6 +57,16 @@ pub struct FastetcdStateMachine {
     /// snapshots off so the volume holds a bounded number of copies
     /// (fastetcd#14).
     snapshots: SnapshotStore,
+    /// `last_applied_log_id.index + 1` (0 = nothing applied), published
+    /// as soon as an entry's writes are visible. The local read barrier
+    /// waits on this, not on openraft's metrics, which RaftCore only
+    /// publishes between messages (fastetcd#71).
+    applied: Arc<watch::Sender<u64>>,
+}
+
+/// `LogId` → the value [`FastetcdStateMachine::applied_index`] carries.
+pub(crate) fn next_index(log_id: Option<&LogId<NodeId>>) -> u64 {
+    log_id.map_or(0, |l| l.index + 1)
 }
 
 struct Inner {
@@ -190,7 +200,9 @@ impl FastetcdStateMachine {
         // — fastetcd#13).
         let current_snapshot = snapshots.latest_meta();
 
+        let applied = Arc::new(watch::Sender::new(next_index(last_applied_log_id.as_ref())));
         Ok(Self {
+            applied,
             inner: Arc::new(Mutex::new(Inner {
                 last_applied_log_id,
                 last_membership,
@@ -279,6 +291,12 @@ impl FastetcdStateMachine {
         &self.mvcc
     }
 
+    /// The applied position, `last_applied_log_id.index + 1` (0 = none),
+    /// updated as each entry's writes become visible (fastetcd#71).
+    pub fn applied_index(&self) -> watch::Receiver<u64> {
+        self.applied.subscribe()
+    }
+
     /// Recover a data directory written before `last_applied_log_id`
     /// was persisted (fastetcd#9).
     ///
@@ -312,6 +330,7 @@ impl FastetcdStateMachine {
         self.mvcc.stage_raft_meta(bytes, None).await;
         self.mvcc.flush_raft_meta().await?;
         g.last_applied_log_id = Some(floor);
+        self.applied.send_replace(floor.index + 1);
         Ok(Some(floor))
     }
 
@@ -461,6 +480,7 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
                 let rev = self.mvcc.current_revision().await;
                 responses.push(FastetcdLogResponse::Noop { revision: rev });
                 g.last_applied_log_id = Some(log_id);
+                self.applied.send_replace(log_id.index + 1);
                 continue;
             }
 
@@ -491,6 +511,7 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
 
             responses.push(response);
             g.last_applied_log_id = Some(log_id);
+            self.applied.send_replace(log_id.index + 1);
         }
 
         // Membership and blank entries mutate no MVCC state, so nothing
@@ -609,6 +630,7 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
 
         let mut g = self.inner.lock().await;
         g.last_applied_log_id = last_applied_log_id;
+        self.applied.send_replace(next_index(last_applied_log_id.as_ref()));
         g.last_membership = last_membership;
         g.current_snapshot = persisted.is_ok().then(|| meta.clone());
         Ok(())

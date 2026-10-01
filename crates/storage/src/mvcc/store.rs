@@ -29,7 +29,7 @@
 //! drives this `MvccStore` via the same `apply_*` entrypoints.
 
 use std::ops::Bound;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -318,6 +318,9 @@ struct Inner {
     auth: AuthMemory,
     /// Operations executed, by kind (fastetcd#29).
     ops: OpCounters,
+    /// Whether the `apply_*` commits fsync. True until the server calls
+    /// [`MvccStore::defer_apply_sync`] (fastetcd#71).
+    apply_sync: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -362,10 +365,43 @@ impl MvccStore {
                 pending_raft_meta: Mutex::new(Vec::new()),
                 auth: AuthMemory::default(),
                 ops: OpCounters::default(),
+                apply_sync: AtomicBool::new(true),
             }),
         };
         store.reload_auth().await?;
         Ok(store)
+    }
+
+    /// Stop fsyncing the commits of the `apply_*` calls (writes, leases,
+    /// compaction, auth, and the raft metadata folded into them): they
+    /// become visible at once and reach disk with the engine's next
+    /// durable commit (fastetcd#71).
+    ///
+    /// Only for a store driven by a raft state machine over a durable
+    /// log in the same engine. A crash then loses at most the last few
+    /// applies, together with the `last_applied_log_id` folded into
+    /// each, so the state machine restarts at an earlier applied
+    /// position and replays them from the log. That is the same state:
+    /// every apply is deterministic. Nothing the log cannot replay may
+    /// be deferred: snapshot installs, bulk loads and startup recovery
+    /// keep fsyncing.
+    ///
+    /// Without this, a write cost three fsyncs (log append, committed
+    /// index, apply), all through the engine's single writer, and a
+    /// linearizable read waited for the apply backlog behind them.
+    pub fn defer_apply_sync(&self) {
+        self.inner.apply_sync.store(false, Ordering::Release);
+    }
+
+    fn apply_write_options(&self) -> WriteOptions {
+        WriteOptions {
+            sync: self.inner.apply_sync.load(Ordering::Acquire),
+        }
+    }
+
+    /// Durably flush every deferred commit (fastetcd#71).
+    pub async fn sync(&self) -> MvccResult<()> {
+        Ok(self.inner.engine.sync().await?)
     }
 
     /// Operations executed since the process started (fastetcd#29).
@@ -430,7 +466,7 @@ impl MvccStore {
         if staged || !batch.is_empty() {
             self.inner
                 .engine
-                .commit(batch, WriteOptions::default())
+                .commit(batch, self.apply_write_options())
                 .await?;
         }
         effects.apply(&self.inner.auth);
@@ -470,7 +506,7 @@ impl MvccStore {
         }
         self.inner
             .engine
-            .commit(batch, WriteOptions::default())
+            .commit(batch, self.apply_write_options())
             .await?;
         Ok(())
     }
@@ -846,7 +882,7 @@ impl MvccStore {
         self.fold_raft_meta(&mut batch).await;
         self.inner
             .engine
-            .commit(batch, WriteOptions::default())
+            .commit(batch, self.apply_write_options())
             .await?;
         Ok(LeaseGrantResult {
             id: final_id,
@@ -881,7 +917,7 @@ impl MvccStore {
         self.fold_raft_meta(&mut batch).await;
         self.inner
             .engine
-            .commit(batch, WriteOptions::default())
+            .commit(batch, self.apply_write_options())
             .await?;
         Ok(LeaseTtlResult {
             id,
@@ -1009,7 +1045,7 @@ impl MvccStore {
             self.fold_raft_meta(&mut batch).await;
             self.inner
                 .engine
-                .commit(batch, WriteOptions::default())
+                .commit(batch, self.apply_write_options())
                 .await?;
         }
 
@@ -1096,7 +1132,7 @@ impl MvccStore {
 
         self.inner
             .engine
-            .commit(batch, WriteOptions::default())
+            .commit(batch, self.apply_write_options())
             .await?;
         state.compact_rev = rev;
 
@@ -1510,7 +1546,7 @@ impl MvccStore {
         self.fold_raft_meta(&mut ctx.batch).await;
         self.inner
             .engine
-            .commit(ctx.batch, WriteOptions::default())
+            .commit(ctx.batch, self.apply_write_options())
             .await?;
         state.current_rev = new_rev;
         // Broadcast the event batch. Send error here means no
