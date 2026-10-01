@@ -42,10 +42,13 @@ run() {
 }
 
 if [ $# -ge 1 ]; then
-    # sc-build's checkout carries no tags: fetch the ref if it is missing.
+    # sc-build's checkout carries no tags and no remote: fetch the ref
+    # if it is missing.
     base=$1
     if ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
-        git fetch -q --depth=1 origin "$base"
+        remote=$(git remote get-url origin 2>/dev/null ||
+            echo https://github.com/glennswest/fastetcd.git)
+        git fetch -q --depth=1 "$remote" "$base"
         base=FETCH_HEAD
     fi
     git worktree add --detach "$WORK/base-src" "$base" >/dev/null
