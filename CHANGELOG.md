@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.10.0] — 2026-10-01
+
 ### 2026-10-01 — multi-member reads off RaftCore, batched proposals (#75, P1)
 - **perf:** A leader with other voters serves linearizable reads without
   openraft's RaftCore queue. It confirms leadership itself over a new

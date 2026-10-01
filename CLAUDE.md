@@ -10,7 +10,21 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.9.0`** — A linearizable Range no longer queues behind writes
+**`1.10.0`** — Multi-member reads off RaftCore, and group commit (#75).
+A leader with other voters confirms leadership itself (peer RPC
+`ConfirmLeader`, answered from each member's last saved vote term; a
+quorum per joint config; shared rounds) instead of openraft's
+`ensure_linearizable`. The read index is the first index of the
+leader's term (writes are acknowledged only after the leader applies
+them), so reads do not wait for the apply pipeline. Proposals go through
+`crates/raft/src/proposer.rs`: what queues while up to three writes are
+in flight goes as one `FastetcdLogEntry::Batch` (one fsync), once every
+member answers `ConfirmLeader`; a batch's apply records `(index, done)`
+so a crash mid-batch replays exactly what was lost. 3 members: writes
+~2x, linearizable p50 32 → 0.7 ms. Mixed versions: do not add a member
+older than 1.10 or downgrade below it once batched (03-deploy).
+
+Previous: **`1.9.0`** — A linearizable Range no longer queues behind writes
 (#71, P0; rustkube#177). openraft 0.9's RaftCore handles one client
 write at a time and awaits its log fsync, and `ensure_linearizable` is
 a message in that queue: 150 ms–7 s per read under load. A sole-voter
