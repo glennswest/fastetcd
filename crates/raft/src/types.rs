@@ -94,6 +94,19 @@ pub enum AuthSyncResponse {
     Export(AuthTables),
 }
 
+/// A peer `ConfirmLeader` request (fastetcd#75): the leader's term.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmLeaderRequest {
+    pub term: u64,
+}
+
+/// The answer: the vote term this member last saved, and its version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmLeaderResponse {
+    pub saved_term: u64,
+    pub version: String,
+}
+
 /// The application-level log entry. Every committed Raft entry decodes
 /// to one of these variants and is dispatched to [`MvccStore`].
 ///
@@ -140,6 +153,13 @@ pub enum FastetcdLogEntry {
     /// variant cannot decode it, which is why the server only proposes
     /// one once every member has answered `AuthSync`.
     Auth(AuthOp),
+
+    /// Several proposals in one log entry (fastetcd#75): one append and
+    /// one fsync for all of them. Applied in order, each as if it were
+    /// its own entry (its own revision). Never nested. Appended last;
+    /// proposed only once every member has answered `ConfirmLeader`,
+    /// since an older member cannot decode it.
+    Batch(Vec<FastetcdLogEntry>),
 }
 
 /// Response shape from a state machine `apply()` call. Wire RPC
@@ -174,6 +194,8 @@ pub enum FastetcdLogResponse {
         log_index: u64,
         result: Result<(), AuthApplyError>,
     },
+    /// Result of a `Batch` entry: one response per proposal, in order.
+    Batch(Vec<FastetcdLogResponse>),
 }
 
 impl FastetcdLogResponse {
@@ -189,6 +211,9 @@ impl FastetcdLogResponse {
             FastetcdLogResponse::LeaseKeepAlive(_) => 0,
             FastetcdLogResponse::Noop { revision } => *revision,
             FastetcdLogResponse::Auth { revision, .. } => *revision,
+            FastetcdLogResponse::Batch(rs) => {
+                rs.iter().map(|r| r.header_revision()).max().unwrap_or(0)
+            }
         }
     }
 }

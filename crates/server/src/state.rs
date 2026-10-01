@@ -12,6 +12,7 @@ use crate::recovery::RecoveryAlarm;
 use crate::space::SpaceGuard;
 use crate::traffic::{GaugeHold, Traffic};
 use fastetcd_raft::precheck::{self, PrecheckError};
+use fastetcd_raft::{ProposeError, Proposer};
 use fastetcd_raft::types::MembershipChange;
 use fastetcd_raft::{
     FastetcdLogEntry, FastetcdLogResponse, FastetcdStateMachine, TypeConfig, WriteForwarder,
@@ -53,6 +54,9 @@ pub struct ServerState {
     /// Serves a sole-voter leader's read index without RaftCore
     /// (fastetcd#71). `None`: every read barrier is openraft's.
     pub read_index: Option<fastetcd_raft::LocalReadIndex>,
+    /// Batches proposals (group commit, fastetcd#75). `None`: each
+    /// proposal is its own `client_write`.
+    pub proposer: Option<Proposer>,
 }
 
 impl ServerState {
@@ -78,6 +82,7 @@ impl ServerState {
             traffic: Arc::new(Traffic::default()),
             committed_index: None,
             read_index: None,
+            proposer: None,
         }
     }
 
@@ -95,6 +100,27 @@ impl ServerState {
         self.read_index = Some(fastetcd_raft::LocalReadIndex::new(
             progress,
             self.sm.applied_index(),
+        ));
+        self
+    }
+
+    /// Serve linearizable reads and batch writes without RaftCore's
+    /// queue on a multi-member cluster too (fastetcd#75): leadership is
+    /// confirmed over the peer channel, and proposals go through a
+    /// [`Proposer`]. The peer service shares both (`read_index`,
+    /// `proposer`).
+    pub fn with_peer_read_index_and_batching(
+        mut self,
+        progress: fastetcd_raft::kv_log_store::LogProgress,
+    ) -> Self {
+        self.read_index = Some(
+            fastetcd_raft::LocalReadIndex::new(progress.clone(), self.sm.applied_index())
+                .with_peers(self.forwarder.clone()),
+        );
+        self.proposer = Some(Proposer::spawn(
+            self.raft.clone(),
+            progress,
+            self.forwarder.clone(),
         ));
         self
     }
@@ -162,23 +188,26 @@ impl ServerState {
                 Err(PrecheckError::Unavailable(m)) => return Err(Status::unavailable(m)),
             }
         }
-        match self.raft.client_write(entry.clone()).await {
-            Ok(w) => Ok(w.data),
-            Err(e) => {
-                if let Some(fwd) = e.forward_to_leader::<openraft::BasicNode>() {
-                    if let Some(leader_id) = fwd.leader_id {
-                        return self.forwarder.forward(leader_id, &entry).await.map_err(|msg| {
-                            if msg == precheck::LEASE_NOT_FOUND {
-                                return Status::not_found(msg);
-                            }
-                            Status::unavailable(format!(
-                                "forwarded write to leader {leader_id}: {msg}"
-                            ))
-                        });
+        let result = match &self.proposer {
+            Some(p) => p.propose(entry.clone()).await,
+            None => self
+                .raft
+                .client_write(entry.clone())
+                .await
+                .map(|w| w.data)
+                .map_err(ProposeError::from),
+        };
+        match result {
+            Ok(r) => Ok(r),
+            Err(ProposeError::ForwardToLeader { leader_id: Some(leader_id), .. }) => {
+                self.forwarder.forward(leader_id, &entry).await.map_err(|msg| {
+                    if msg == precheck::LEASE_NOT_FOUND {
+                        return Status::not_found(msg);
                     }
-                }
-                Err(Status::unavailable(format!("raft client_write: {e}")))
+                    Status::unavailable(format!("forwarded write to leader {leader_id}: {msg}"))
+                })
             }
+            Err(e) => Err(Status::unavailable(format!("raft client_write: {e}"))),
         }
     }
 

@@ -241,6 +241,16 @@ pub enum AuthSyncError {
     Unreachable(String),
 }
 
+/// Why a member's `ConfirmLeader` answer could not be had (#75).
+#[derive(Debug, Clone)]
+pub enum ConfirmError {
+    /// The member answered `Unimplemented`: it is older than the RPC
+    /// and cannot decode a batched log entry.
+    Older,
+    /// Unreachable, timed out, or the call failed.
+    Unreachable(String),
+}
+
 #[derive(Clone)]
 pub struct WriteForwarder {
     peers: PeerEndpoints,
@@ -336,6 +346,33 @@ impl WriteForwarder {
         bincode::deserialize(&resp.data).map_err(|e| AuthSyncError::Unreachable(e.to_string()))
     }
 
+    /// Ask `target` for the vote term it last saved (fastetcd#75), within
+    /// `timeout`. `term` is the caller's term, for the record.
+    pub async fn confirm_leader(
+        &self,
+        target: NodeId,
+        term: u64,
+        timeout: std::time::Duration,
+    ) -> Result<crate::types::ConfirmLeaderResponse, ConfirmError> {
+        let data = bincode::serialize(&crate::types::ConfirmLeaderRequest { term })
+            .map_err(|e| ConfirmError::Unreachable(e.to_string()))?;
+        let call = async {
+            let mut cli = self.client(target).await.map_err(ConfirmError::Unreachable)?;
+            match cli.confirm_leader(Request::new(pb::RaftPayload { data })).await {
+                Ok(r) => Ok(r.into_inner()),
+                Err(s) if s.code() == tonic::Code::Unimplemented => Err(ConfirmError::Older),
+                Err(s) => {
+                    self.clients.write().await.remove(&target);
+                    Err(ConfirmError::Unreachable(s.message().to_string()))
+                }
+            }
+        };
+        let resp = tokio::time::timeout(timeout, call)
+            .await
+            .map_err(|_| ConfirmError::Unreachable(format!("no answer in {timeout:?}")))??;
+        bincode::deserialize(&resp.data).map_err(|e| ConfirmError::Unreachable(e.to_string()))
+    }
+
     /// Forward a linearizable Range to `target`'s `ForwardRead` RPC and
     /// return the leader's `RangeResult` (#10) with the revision the
     /// leader read at (#50; `None` from a leader older than that, see
@@ -404,11 +441,36 @@ impl WriteForwarder {
 pub struct RaftPeerService {
     raft: Raft<TypeConfig>,
     mvcc: fastetcd_storage::mvcc::MvccStore,
+    /// Answers `ConfirmLeader` (#75); without it the RPC is
+    /// `Unimplemented`, as from an older member.
+    progress: Option<crate::kv_log_store::LogProgress>,
+    /// Forwarded writes are batched with local ones (#75).
+    proposer: Option<crate::proposer::Proposer>,
+    /// The read barrier for forwarded reads and the lease precheck.
+    read_index: Option<crate::read_index::LocalReadIndex>,
 }
 
 impl RaftPeerService {
     pub fn new(raft: Raft<TypeConfig>, mvcc: fastetcd_storage::mvcc::MvccStore) -> Self {
-        Self { raft, mvcc }
+        Self { raft, mvcc, progress: None, proposer: None, read_index: None }
+    }
+
+    /// Answer `ConfirmLeader` from this node's log store (#75).
+    pub fn with_log_progress(mut self, progress: crate::kv_log_store::LogProgress) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// Serve forwarded linearizable reads behind `read_index` (#75).
+    pub fn with_read_index(mut self, read_index: crate::read_index::LocalReadIndex) -> Self {
+        self.read_index = Some(read_index);
+        self
+    }
+
+    /// Propose forwarded writes through `proposer` (#75).
+    pub fn with_proposer(mut self, proposer: crate::proposer::Proposer) -> Self {
+        self.proposer = Some(proposer);
+        self
     }
 }
 
@@ -475,15 +537,16 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // before proposing it (#19). A node that is not the leader skips
         // the check: `client_write` refuses it below anyway.
         if crate::precheck::is_leader(&self.raft) {
-            if let Err(e) = crate::precheck::check_leases(&self.raft, None, &self.mvcc, &entry).await {
+            if let Err(e) = crate::precheck::check_leases(&self.raft, self.read_index.as_ref(), &self.mvcc, &entry).await {
                 let result: Result<crate::types::FastetcdLogResponse, String> = Err(e.to_string());
                 let data = bincode::serialize(&result)
                     .map_err(|e| Status::internal(format!("encode response: {e}")))?;
                 return Ok(Response::new(pb::RaftPayload { data }));
             }
         }
-        let result: Result<crate::types::FastetcdLogResponse, String> =
-            match self.raft.client_write(entry).await {
+        let result: Result<crate::types::FastetcdLogResponse, String> = match &self.proposer {
+            Some(p) => p.propose(entry).await.map_err(|e| e.to_string()),
+            None => match self.raft.client_write(entry).await {
                 Ok(resp) => Ok(resp.data),
                 // Stringify rather than propagate ForwardToLeader
                 // further — a forwarding hop that itself needs
@@ -491,8 +554,28 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 // the original caller gets a plain error and, same
                 // as any raft client, retries.
                 Err(e) => Err(e.to_string()),
-            };
+            },
+        };
         let data = bincode::serialize(&result)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn confirm_leader(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let Some(progress) = &self.progress else {
+            return Err(Status::unimplemented("ConfirmLeader is not served by this node"));
+        };
+        let _req: crate::types::ConfirmLeaderRequest =
+            bincode::deserialize(&request.into_inner().data)
+                .map_err(|e| Status::invalid_argument(format!("decode ConfirmLeader: {e}")))?;
+        let resp = crate::types::ConfirmLeaderResponse {
+            saved_term: progress.saved_vote_term(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let data = bincode::serialize(&resp)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
     }
@@ -510,8 +593,7 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // on, stringify the error (as forward_write does) and let the
         // original caller retry against the new leader.
         let result: Result<(fastetcd_storage::mvcc::RangeResult, i64), String> = async {
-            self.raft
-                .ensure_linearizable()
+            crate::read_index::read_barrier(&self.raft, self.read_index.as_ref())
                 .await
                 .map_err(|e| e.to_string())?;
             self.mvcc

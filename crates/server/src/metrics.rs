@@ -28,6 +28,14 @@
 //!     `etcd_server_proposals_applied_total` (gauges, as in etcd): the
 //!     raft committed and applied indexes
 //!   - `fastetcd_engine_info{engine=…}` (info: redb / wal / iouring)
+//!   - `fastetcd_read_index_total{path=sole_voter|quorum|raft}`
+//!     (counters): linearizable read barriers this member served, by how
+//!     (#71, #75): from local state as the only voter, confirmed by a
+//!     quorum over `ConfirmLeader`, or through openraft's RaftCore
+//!   - `fastetcd_proposal_batches_total` / `fastetcd_proposals_batched_total`
+//!     / `fastetcd_proposals_single_total` (counters): batched log entries
+//!     this member proposed, the proposals in them, and proposals that
+//!     went alone (#75)
 //!   - `fastetcd_watch_resyncs_total` / `fastetcd_watch_lag_cancels_total`
 //!     (counters, process-wide): watchers caught up from history, and
 //!     watchers cancelled because that history was gone (#16)
@@ -95,6 +103,10 @@ pub struct Metrics {
     pub txn_total: Counter,
     pub watch_resyncs_total: Counter,
     pub watch_lag_cancels_total: Counter,
+    pub read_index_total: Family<Vec<(String, String)>, Counter>,
+    pub proposal_batches_total: Counter,
+    pub proposals_batched_total: Counter,
+    pub proposals_single_total: Counter,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -127,6 +139,10 @@ impl Metrics {
         let txn_total = Counter::default();
         let watch_resyncs_total = Counter::default();
         let watch_lag_cancels_total = Counter::default();
+        let read_index_total: Family<Vec<(String, String)>, Counter> = Family::default();
+        let proposal_batches_total = Counter::default();
+        let proposals_batched_total = Counter::default();
+        let proposals_single_total = Counter::default();
         let m = Arc::new(Self {
             registry: Mutex::new(registry),
             has_leader: has_leader.clone(),
@@ -153,6 +169,10 @@ impl Metrics {
             txn_total: txn_total.clone(),
             watch_resyncs_total: watch_resyncs_total.clone(),
             watch_lag_cancels_total: watch_lag_cancels_total.clone(),
+            read_index_total: read_index_total.clone(),
+            proposal_batches_total: proposal_batches_total.clone(),
+            proposals_batched_total: proposals_batched_total.clone(),
+            proposals_single_total: proposals_single_total.clone(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -297,6 +317,26 @@ impl Metrics {
                  or unreadable",
                 watch_lag_cancels_total,
             );
+            reg.register(
+                "fastetcd_read_index",
+                "Linearizable read barriers served, by path: sole_voter, quorum or raft",
+                read_index_total,
+            );
+            reg.register(
+                "fastetcd_proposal_batches",
+                "Batched log entries proposed (group commit)",
+                proposal_batches_total,
+            );
+            reg.register(
+                "fastetcd_proposals_batched",
+                "Proposals that went in batched log entries",
+                proposals_batched_total,
+            );
+            reg.register(
+                "fastetcd_proposals_single",
+                "Proposals that went as a log entry of their own",
+                proposals_single_total,
+            );
         }
         m
     }
@@ -382,6 +422,21 @@ impl Metrics {
         catch_up(&self.watch_resyncs_total, crate::watch::resync_count());
         catch_up(&self.watch_lag_cancels_total, crate::watch::lag_cancel_count());
         catch_up(&self.recovered_total, state.recovery.recoveries());
+        if let Some(r) = &state.read_index {
+            let s = r.stats();
+            for (path, n) in [("sole_voter", &s.sole_voter), ("quorum", &s.quorum), ("raft", &s.raft)] {
+                catch_up(
+                    &self.read_index_total.get_or_create(&vec![("path".to_string(), path.to_string())]),
+                    n.load(Ordering::Relaxed),
+                );
+            }
+        }
+        if let Some(p) = &state.proposer {
+            let s = p.stats();
+            catch_up(&self.proposal_batches_total, s.batches.load(Ordering::Relaxed));
+            catch_up(&self.proposals_batched_total, s.batched.load(Ordering::Relaxed));
+            catch_up(&self.proposals_single_total, s.single.load(Ordering::Relaxed));
+        }
         self.recovered_revision.set(
             state
                 .recovery

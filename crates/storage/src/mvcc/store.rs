@@ -61,6 +61,9 @@ const META_KEY_NEXT_LEASE_ID: &[u8] = b"next_lease_id";
 /// crate encodes and decodes them; see [`MvccStore::stage_raft_meta`].
 pub const META_KEY_RAFT_APPLIED: &[u8] = b"raft_applied";
 pub const META_KEY_RAFT_MEMBERSHIP: &[u8] = b"raft_membership";
+/// How far into a batched log entry the state machine has applied
+/// (fastetcd#75); opaque to this crate, like the two keys above.
+pub const META_KEY_RAFT_BATCH: &[u8] = b"raft_batch_progress";
 /// On-disk data-format version. Absent on data directories written
 /// before v1.0.1 (which never persisted raft membership durably, so an
 /// upgrade could strand the cluster — see fastetcd#11). Its absence is
@@ -493,6 +496,22 @@ impl MvccStore {
         if let Some(m) = membership {
             pending.push((META_KEY_RAFT_MEMBERSHIP.to_vec(), m));
         }
+    }
+
+    /// Stage the batch progress (fastetcd#75) to be written by the next
+    /// `apply_*` commit, replacing any progress still staged. Folded in
+    /// like `stage_raft_meta`, so a sub-entry of a batched log entry and
+    /// the record that it was applied commit together.
+    pub async fn stage_batch_progress(&self, progress: Vec<u8>) {
+        let mut pending = self.inner.pending_raft_meta.lock().await;
+        pending.retain(|(k, _)| k.as_slice() != META_KEY_RAFT_BATCH);
+        pending.push((META_KEY_RAFT_BATCH.to_vec(), progress));
+    }
+
+    /// The batch progress as last committed, if any.
+    pub async fn read_batch_progress(&self) -> MvccResult<Option<Vec<u8>>> {
+        let snap = self.inner.engine.snapshot().await?;
+        Ok(snap.get(TABLE_META, META_KEY_RAFT_BATCH).await?)
     }
 
     /// Commit any staged raft metadata that no `apply_*` call picked up.

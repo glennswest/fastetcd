@@ -85,6 +85,10 @@ impl RaftPeer for OlderPeer {
     async fn auth_sync(&self, _: Request<rpb::RaftPayload>) -> R {
         Err(Status::unimplemented("AuthSync"))
     }
+    // Newer than replicated auth (#75), and older members lack it too.
+    async fn confirm_leader(&self, _: Request<rpb::RaftPayload>) -> R {
+        Err(Status::unimplemented("ConfirmLeader"))
+    }
 }
 
 #[derive(Clone, Copy, Default)]

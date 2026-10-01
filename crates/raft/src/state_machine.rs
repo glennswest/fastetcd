@@ -76,6 +76,21 @@ struct Inner {
     /// any. The body is read from disk on demand, not held here.
     current_snapshot: Option<SnapshotMeta<NodeId, openraft::BasicNode>>,
     snapshot_idx: u64,
+    /// `(log index, sub-entries applied)` of a batched entry, as last
+    /// committed (fastetcd#75). Read at open; see `apply_batch`.
+    batch_progress: Option<(u64, usize)>,
+}
+
+fn encode_progress(index: u64, done: usize) -> Vec<u8> {
+    let mut b = index.to_be_bytes().to_vec();
+    b.extend_from_slice(&(done as u64).to_be_bytes());
+    b
+}
+
+fn decode_progress(b: &[u8]) -> Option<(u64, usize)> {
+    let index = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
+    let done = u64::from_be_bytes(b.get(8..16)?.try_into().ok()?);
+    Some((index, done as usize))
 }
 
 /// Encoded snapshot payload. The MVCC state itself is large; we lean
@@ -199,6 +214,10 @@ impl FastetcdStateMachine {
         // (without this, a restart lost the snapshot and purge stalled
         // — fastetcd#13).
         let current_snapshot = snapshots.latest_meta();
+        let batch_progress = mvcc
+            .read_batch_progress()
+            .await?
+            .and_then(|b| decode_progress(&b));
 
         let applied = Arc::new(watch::Sender::new(next_index(last_applied_log_id.as_ref())));
         Ok(Self {
@@ -208,6 +227,7 @@ impl FastetcdStateMachine {
                 last_membership,
                 current_snapshot,
                 snapshot_idx: 0,
+                batch_progress,
             })),
             mvcc,
             snapshots,
@@ -289,6 +309,50 @@ impl FastetcdStateMachine {
 
     pub fn mvcc(&self) -> &MvccStore {
         &self.mvcc
+    }
+
+    /// Apply the sub-entries of the batched entry at `index` (#75).
+    ///
+    /// Each sub-entry is applied as its own entry would be, with its own
+    /// commit, and folds `raft_batch_progress = (index, j + 1)` into that
+    /// commit; the last one also folds `last_applied = index`. Applies
+    /// commit without an fsync and a crash keeps a prefix of them, so
+    /// the persisted progress says exactly which sub-entries are on disk
+    /// when `last_applied` is still below `index`. On replay the first
+    /// `skip` sub-entries are therefore not applied again (no client is
+    /// waiting for their answers: the process restarted). A sub-entry
+    /// that commits nothing (a refused auth change, a read-only txn)
+    /// leaves its progress staged for the next commit; it had no effect,
+    /// so skipping it is the same as applying it.
+    async fn apply_batch(
+        &self,
+        index: u64,
+        subs: &[FastetcdLogEntry],
+        skip: usize,
+        applied_bytes: Vec<u8>,
+    ) -> Result<FastetcdLogResponse, anyhow::Error> {
+        let mut out = Vec::with_capacity(subs.len());
+        let mut applied_staged = false;
+        for (j, sub) in subs.iter().enumerate() {
+            if matches!(sub, FastetcdLogEntry::Batch(_)) {
+                anyhow::bail!("nested batch in log entry {index}");
+            }
+            if j < skip {
+                let revision = self.mvcc.current_revision().await;
+                out.push(FastetcdLogResponse::Noop { revision });
+                continue;
+            }
+            self.mvcc.stage_batch_progress(encode_progress(index, j + 1)).await;
+            if j + 1 == subs.len() {
+                self.mvcc.stage_raft_meta(applied_bytes.clone(), None).await;
+                applied_staged = true;
+            }
+            out.push(apply_data(&self.mvcc, sub, index).await?);
+        }
+        if !applied_staged {
+            self.mvcc.stage_raft_meta(applied_bytes, None).await;
+        }
+        Ok(FastetcdLogResponse::Batch(out))
     }
 
     /// The applied position, `last_applied_log_id.index + 1` (0 = none),
@@ -479,6 +543,28 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
                 // Match openraft's contract — every entry produces one response.
                 let rev = self.mvcc.current_revision().await;
                 responses.push(FastetcdLogResponse::Noop { revision: rev });
+                g.last_applied_log_id = Some(log_id);
+                self.applied.send_replace(log_id.index + 1);
+                continue;
+            }
+
+            // A batched entry stages its own metadata, per sub-entry.
+            if let openraft::EntryPayload::Normal(FastetcdLogEntry::Batch(subs)) = &entry.payload {
+                let skip = match g.batch_progress {
+                    Some((index, done)) if index == log_id.index => done,
+                    _ => 0,
+                };
+                let response = self
+                    .apply_batch(log_id.index, subs, skip, applied_bytes)
+                    .await
+                    .map_err(|e| {
+                        StorageIOError::new(
+                            ErrorSubject::StateMachine,
+                            ErrorVerb::Write,
+                            AnyError::error(format!("apply failed: {e}")),
+                        )
+                    })?;
+                responses.push(response);
                 g.last_applied_log_id = Some(log_id);
                 self.applied.send_replace(log_id.index + 1);
                 continue;
@@ -770,6 +856,8 @@ async fn apply_data(
             let (revision, result) = mvcc.apply_auth(op).await?;
             Ok(FastetcdLogResponse::Auth { revision, log_index, result })
         }
+        // Applied by `FastetcdStateMachine::apply_batch`.
+        FastetcdLogEntry::Batch(_) => anyhow::bail!("nested batch in log entry {log_index}"),
     }
 }
 

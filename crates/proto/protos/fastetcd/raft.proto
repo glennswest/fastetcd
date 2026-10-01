@@ -41,6 +41,14 @@ service RaftPeer {
     // decode an auth log entry, so none is proposed); `fastetcd-ctl
     // auth adopt` asks the chosen member for its tables.
     rpc AuthSync(RaftPayload) returns (RaftPayload);
+
+    // A leader's read index outside openraft's RaftCore (#75): the
+    // leader asks each voter for the vote term it last saved; a quorum
+    // no newer than the leader's term confirms it was still leader when
+    // the read arrived. Answering at all also tells the leader this
+    // member can decode batched log entries. A member older than this
+    // RPC answers Unimplemented.
+    rpc ConfirmLeader(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

@@ -12,11 +12,13 @@
 //! - [`log_store`] — `RaftLogStorage` impl over an in-memory map (tests).
 //! - [`kv_log_store`] — the persistent `RaftLogStorage` the server runs.
 //! - [`read_index`] — the read barrier in front of linearizable reads.
+//! - [`proposer`] — batched proposals (group commit).
 
 pub mod kv_log_store;
 pub mod log_store;
 pub mod network;
 pub mod precheck;
+pub mod proposer;
 pub mod read_index;
 pub mod snapshot_data;
 pub mod snapshot_store;
@@ -28,6 +30,7 @@ pub use network::{
     RaftPeerService, WriteForwarder,
 };
 
+pub use proposer::{ProposeError, Proposer};
 pub use read_index::{read_barrier, LocalReadIndex, ReadBarrierError};
 pub use snapshot_data::SnapshotFile;
 pub use snapshot_store::SnapshotStore;

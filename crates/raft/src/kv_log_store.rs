@@ -70,6 +70,33 @@ pub struct LogProgress {
     /// openraft's metrics showing a membership at least this new means
     /// they show every membership in the log.
     pub(crate) membership: Arc<AtomicU64>,
+    /// Term of the vote this store last saved (durably). openraft saves
+    /// a vote before it grants it or acts on it, so no vote of a higher
+    /// term exists on this member while this says otherwise. A member
+    /// answers a leader's `ConfirmLeader` from it (fastetcd#75).
+    pub(crate) vote_term: Arc<AtomicU64>,
+    /// `(term, index + 1)` of the first entry appended in the newest term
+    /// seen, (0, 0) if unknown. A new leader's first entry (its blank)
+    /// is that index: its read index is never below it, so a read sees
+    /// what earlier leaders committed (fastetcd#75).
+    pub(crate) term_start: Arc<std::sync::Mutex<(u64, u64)>>,
+}
+
+impl LogProgress {
+    /// The term of the vote this member last saved.
+    pub fn saved_vote_term(&self) -> u64 {
+        self.vote_term.load(Ordering::Acquire)
+    }
+
+    /// `index + 1` of the first entry of `term` in the log, if known.
+    pub(crate) fn term_start(&self, term: u64) -> Option<u64> {
+        let (t, i) = *self.term_start.lock().unwrap();
+        (t == term && i > 0).then_some(i)
+    }
+
+    fn note_vote(&self, vote: &Vote<NodeId>) {
+        self.vote_term.fetch_max(vote.leader_id.term, Ordering::AcqRel);
+    }
 }
 
 impl KvLogStore {
@@ -209,6 +236,9 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             .commit(batch, WriteOptions::default())
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
+        // Before returning: openraft grants or acts on the vote only
+        // after this returns.
+        self.progress.note_vote(vote);
         Ok(())
     }
 
@@ -226,6 +256,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             Some(b) => {
                 let vote: Vote<NodeId> =
                     bincode::deserialize(&b).map_err(|e| io_err(ErrorVerb::Read, e))?;
+                self.progress.note_vote(&vote);
                 Ok(Some(vote))
             }
             None => Ok(None),
@@ -289,6 +320,12 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
                     .membership
                     .fetch_max(entry.log_id.index + 1, Ordering::Release);
             }
+            {
+                let mut ts = self.progress.term_start.lock().unwrap();
+                if entry.log_id.leader_id.term > ts.0 {
+                    *ts = (entry.log_id.leader_id.term, entry.log_id.index + 1);
+                }
+            }
             let bytes = bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?;
             batch.put(TABLE_LOG, &idx_key(entry.log_id.index), &bytes);
             last = Some(entry.log_id.index);
@@ -322,6 +359,12 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
         self.progress
             .last_durable
             .fetch_min(log_id.index, Ordering::Release);
+        {
+            let mut ts = self.progress.term_start.lock().unwrap();
+            if ts.1 > log_id.index {
+                *ts = (0, 0);
+            }
+        }
         Ok(())
     }
 

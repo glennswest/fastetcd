@@ -1072,7 +1072,9 @@ async fn main() -> anyhow::Result<()> {
         .with_recovery(recovery_alarm)
         .with_client_cert_auth(args.client_cert_auth)
         .with_committed_index(committed_index)
-        .with_local_read_index(log_progress),
+        // Linearizable reads and batched writes without queueing in
+        // openraft's RaftCore, on one member (#71) or several (#75).
+        .with_peer_read_index_and_batching(log_progress.clone()),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).
@@ -1175,9 +1177,20 @@ async fn main() -> anyhow::Result<()> {
     let auth_state = server_state.auth.clone();
     // Every gRPC call on the client port is counted for /metrics (#29).
     let traffic = server_state.traffic.clone();
+    let peer_read_index = server_state.read_index.clone();
+    let peer_proposer = server_state.proposer.clone();
     let auth = AuthService::new(server_state);
 
-    let peer_service = RaftPeerService::new(raft, peer_mvcc.clone());
+    // Answers other members' ConfirmLeader, serves forwarded reads behind
+    // the same read barrier and batches forwarded writes (#75).
+    let mut peer_service =
+        RaftPeerService::new(raft, peer_mvcc.clone()).with_log_progress(log_progress);
+    if let Some(r) = peer_read_index {
+        peer_service = peer_service.with_read_index(r);
+    }
+    if let Some(p) = peer_proposer {
+        peer_service = peer_service.with_proposer(p);
+    }
 
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
