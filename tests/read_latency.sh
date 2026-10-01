@@ -19,7 +19,8 @@ mkdir -p "$WORK"
 echo "data volume: $(df -hT "$WORK" | tail -1)"
 
 cargo build --release --locked -p fastetcd-server -p fastetcd-ctl
-BENCH=$ROOT/target/release/fastetcd-bench
+TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
+BENCH=$TARGET/release/fastetcd-bench
 
 run() {
     local name=$1 bin=$2 dir=$WORK/$1
@@ -52,9 +53,9 @@ if [ $# -ge 1 ]; then
         base=FETCH_HEAD
     fi
     git worktree add --detach "$WORK/base-src" "$base" >/dev/null
-    (cd "$WORK/base-src" && CARGO_TARGET_DIR=$ROOT/target/baseline \
+    (cd "$WORK/base-src" && CARGO_TARGET_DIR=$TARGET/baseline \
         cargo build --release --locked -p fastetcd-server)
-    run "baseline $1" "$ROOT/target/baseline/release/fastetcd"
+    run "baseline $1" "$TARGET/baseline/release/fastetcd"
     git worktree remove --force "$WORK/base-src"
 fi
-run "this tree $(git rev-parse --short HEAD)" "$ROOT/target/release/fastetcd"
+run "this tree $(git rev-parse --short HEAD)" "$TARGET/release/fastetcd"
