@@ -39,6 +39,12 @@
 //!   - `fastetcd_watch_resyncs_total` / `fastetcd_watch_lag_cancels_total`
 //!     (counters, process-wide): watchers caught up from history, and
 //!     watchers cancelled because that history was gone (#16)
+//!   - RAM cache (#82): `fastetcd_value_cache_{hits,misses,evictions}_total`
+//!     (counters), `fastetcd_value_cache_bytes` / `_entries` /
+//!     `_budget_bytes`, `fastetcd_key_index_keys` / `fastetcd_key_index_bytes`
+//!     (gauges), and `fastetcd_mvcc_get_duration_seconds{cache=hit|miss}`
+//!     (histogram): the store's time for each single-key Range, `hit` when
+//!     it read nothing from the engine
 //!
 //! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
 //! when the endpoint starts (fastetcd#29; see that module):
@@ -68,6 +74,7 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::Registry;
 use tokio::net::TcpListener;
@@ -107,6 +114,7 @@ pub struct Metrics {
     pub proposal_batches_total: Counter,
     pub proposals_batched_total: Counter,
     pub proposals_single_total: Counter,
+    pub cache: CacheMetrics,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -173,6 +181,7 @@ impl Metrics {
             proposal_batches_total: proposal_batches_total.clone(),
             proposals_batched_total: proposals_batched_total.clone(),
             proposals_single_total: proposals_single_total.clone(),
+            cache: CacheMetrics::new(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -337,6 +346,7 @@ impl Metrics {
                 "Proposals that went as a log entry of their own",
                 proposals_single_total,
             );
+            m.cache.register(&mut reg);
         }
         m
     }
@@ -397,6 +407,7 @@ impl Metrics {
                 state.sm.mvcc().engine().engine_name().to_string(),
             )]),
         );
+        state.sm.mvcc().set_get_observer(self.cache.observer());
     }
 
     /// Refresh gauges from live server state. Counters are not
@@ -422,6 +433,7 @@ impl Metrics {
         catch_up(&self.watch_resyncs_total, crate::watch::resync_count());
         catch_up(&self.watch_lag_cancels_total, crate::watch::lag_cancel_count());
         catch_up(&self.recovered_total, state.recovery.recoveries());
+        self.cache.refresh(state.sm.mvcc().cache_stats());
         if let Some(r) = &state.read_index {
             let s = r.stats();
             for (path, n) in [("sole_voter", &s.sole_voter), ("quorum", &s.quorum), ("raft", &s.raft)] {
@@ -469,6 +481,117 @@ impl Metrics {
             // measurement is O(database) and must not run on a scrape.
             self.db_size_in_use_bytes.set(stats.db_in_use_bytes as i64);
         }
+    }
+}
+
+/// Buckets of `fastetcd_mvcc_get_duration_seconds`: 25 µs to 2.5 s, so
+/// a RAM hit and a disk seek land in different buckets.
+const GET_BUCKETS: [f64; 16] = [
+    0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
+    0.25, 0.5, 1.0, 2.5,
+];
+
+fn get_histogram() -> Histogram {
+    Histogram::new(GET_BUCKETS.iter().copied())
+}
+
+type HistogramFamily = Family<Vec<(String, String)>, Histogram, fn() -> Histogram>;
+
+/// The RAM cache's metrics (fastetcd#82).
+pub struct CacheMetrics {
+    hits: Counter,
+    misses: Counter,
+    evictions: Counter,
+    bytes: Gauge,
+    entries: Gauge,
+    budget: Gauge,
+    index_keys: Gauge,
+    index_bytes: Gauge,
+    get_duration: HistogramFamily,
+}
+
+impl CacheMetrics {
+    fn new() -> Self {
+        Self {
+            hits: Counter::default(),
+            misses: Counter::default(),
+            evictions: Counter::default(),
+            bytes: Gauge::default(),
+            entries: Gauge::default(),
+            budget: Gauge::default(),
+            index_keys: Gauge::default(),
+            index_bytes: Gauge::default(),
+            get_duration: Family::new_with_constructor(get_histogram as fn() -> Histogram),
+        }
+    }
+
+    fn register(&self, reg: &mut Registry) {
+        reg.register(
+            "fastetcd_value_cache_hits",
+            "Record lookups the value cache answered",
+            self.hits.clone(),
+        );
+        reg.register(
+            "fastetcd_value_cache_misses",
+            "Record lookups the value cache could not answer (read from the engine)",
+            self.misses.clone(),
+        );
+        reg.register(
+            "fastetcd_value_cache_evictions",
+            "Entries evicted from the value cache to stay inside its budget",
+            self.evictions.clone(),
+        );
+        reg.register(
+            "fastetcd_value_cache_bytes",
+            "Bytes the value cache holds, entry overhead included",
+            self.bytes.clone(),
+        );
+        reg.register(
+            "fastetcd_value_cache_entries",
+            "Records the value cache holds",
+            self.entries.clone(),
+        );
+        reg.register(
+            "fastetcd_value_cache_budget_bytes",
+            "The value cache's byte budget (--value-cache-bytes); 0 = off",
+            self.budget.clone(),
+        );
+        reg.register(
+            "fastetcd_key_index_keys",
+            "Keys in the resident key index (every key with history)",
+            self.index_keys.clone(),
+        );
+        reg.register(
+            "fastetcd_key_index_bytes",
+            "Approximate bytes of the resident key index",
+            self.index_bytes.clone(),
+        );
+        reg.register(
+            "fastetcd_mvcc_get_duration_seconds",
+            "Store time of a single-key Range; cache=hit when it read nothing from the engine",
+            self.get_duration.clone(),
+        );
+    }
+
+    fn refresh(&self, s: fastetcd_storage::mvcc::CacheStats) {
+        catch_up(&self.hits, s.value_hits);
+        catch_up(&self.misses, s.value_misses);
+        catch_up(&self.evictions, s.value_evictions);
+        self.bytes.set(s.value_bytes as i64);
+        self.entries.set(s.value_entries as i64);
+        self.budget.set(s.value_budget_bytes as i64);
+        self.index_keys.set(s.index_keys as i64);
+        self.index_bytes.set(s.index_bytes as i64);
+    }
+
+    fn observer(&self) -> fastetcd_storage::mvcc::store::GetObserver {
+        let label = |v: &str| vec![("cache".to_string(), v.to_string())];
+        let hit = self.get_duration.get_or_create(&label("hit")).clone();
+        let miss = self.get_duration.get_or_create(&label("miss")).clone();
+        Arc::new(move |from_ram, took| {
+            let h = if from_ram { &hit } else { &miss };
+            h.observe(took.as_secs_f64());
+        })
     }
 }
 

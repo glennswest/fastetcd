@@ -909,9 +909,8 @@ async fn rebuild_mvcc(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let payload = &body.payload;
     use fastetcd_storage::mvcc::store::{META_KEY_RAFT_APPLIED, META_KEY_RAFT_MEMBERSHIP};
-    use fastetcd_storage::{WriteBatch, WriteOptions};
+    use fastetcd_storage::WriteBatch;
 
-    let engine = mvcc.engine().clone();
     // Delete-everything is implemented as: delete_range over each
     // table's full key space.
     let mut batch = WriteBatch::new();
@@ -947,12 +946,11 @@ async fn rebuild_mvcc(
     if let Some(auth) = &body.auth {
         auth.replace_into(&mut batch);
     }
-    engine.commit(batch, WriteOptions::default()).await?;
-
-    // The batch above went straight to the engine, so the MvccStore
-    // handle is still serving the counters it cached at open. Pick up
-    // the snapshot's revision before anyone reads or writes through it.
-    mvcc.reload_write_state().await?;
+    // The MvccStore handle keeps the revision counters and every key's
+    // index in RAM (fastetcd#8, #82). `install_tables` commits the batch
+    // and reloads them under its write lock, so no read sees the new
+    // tables with the old index or revision.
+    mvcc.install_tables(batch).await?;
     mvcc.reload_auth().await?;
     Ok(())
 }

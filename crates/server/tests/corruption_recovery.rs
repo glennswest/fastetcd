@@ -50,6 +50,7 @@ fn opts(d: &Dirs, members: usize) -> OpenOptions {
         on_corruption: OnCorruption::Restore,
         node_id: NODE,
         configured_members: members,
+        engine_cache_bytes: None,
     }
 }
 

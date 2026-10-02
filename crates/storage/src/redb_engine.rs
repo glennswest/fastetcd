@@ -82,6 +82,15 @@ impl RedbEngine {
     /// empty database over the last one, silently discarding the store
     /// and, on a cluster member, its raft vote.
     pub fn open<P: AsRef<Path>>(path: P) -> StorageResult<Self> {
+        Self::open_with_cache(path, None)
+    }
+
+    /// [`open`](Self::open) with redb's page cache set to `cache_bytes`
+    /// (fastetcd#82); `None` keeps redb's default (1 GiB).
+    pub fn open_with_cache<P: AsRef<Path>>(
+        path: P,
+        cache_bytes: Option<usize>,
+    ) -> StorageResult<Self> {
         let path = path.as_ref().to_path_buf();
         if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
             return Err(StorageError::Corrupted(format!(
@@ -96,7 +105,13 @@ impl RedbEngine {
         // `Btree::get_helper`. Unwinding out of `Database::create` drops
         // the file handle and its lock, so the panic is the corruption
         // report (fastetcd#37).
-        let db = std::panic::catch_unwind(|| Database::create(&path))
+        let db = std::panic::catch_unwind(|| {
+            let mut builder = Database::builder();
+            if let Some(bytes) = cache_bytes {
+                builder.set_cache_size(bytes);
+            }
+            builder.create(&path)
+        })
             .map_err(|panic| {
                 let msg = panic
                     .downcast_ref::<&str>()

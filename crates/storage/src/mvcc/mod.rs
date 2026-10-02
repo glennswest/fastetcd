@@ -19,12 +19,14 @@
 //! commit (tracked as task #17).
 
 pub mod auth;
+pub mod cache;
 pub mod event;
 pub mod lease;
 pub mod record;
 pub mod revision;
 pub mod store;
 
+pub use cache::{CacheConfig, CacheStats};
 pub use event::{EventBatch, EventKind, MvccEvent};
 pub use lease::{LeaseId, LeaseRecord};
 pub use record::{Generation, KeyIndex, KvRecord};

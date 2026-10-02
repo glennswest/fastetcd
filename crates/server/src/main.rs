@@ -327,6 +327,35 @@ struct Args {
     #[arg(long, env = "FASTETCD_MAX_SNAPSHOTS", default_value_t = 1)]
     max_snapshots: usize,
 
+    /// Byte budget of the latest-value cache: the newest record of
+    /// recently used keys, kept in RAM so a GET of a hot key never reads
+    /// the disk (fastetcd#82). Least recently used entries are evicted to
+    /// stay inside it. Unset (the default): the smaller of 128 MiB and 5%
+    /// of the memory this process may use (cgroup limit, else total
+    /// RAM). `0` turns the value cache off. Every key's index is kept in
+    /// RAM regardless, as etcd keeps its treeIndex.
+    #[arg(long, env = "FASTETCD_VALUE_CACHE_BYTES")]
+    value_cache_bytes: Option<u64>,
+
+    /// Values larger than this are not put in the value cache (an entry
+    /// is also never more than a quarter of one of its 16 shards).
+    #[arg(
+        long,
+        env = "FASTETCD_VALUE_CACHE_MAX_ENTRY_BYTES",
+        default_value_t = fastetcd_storage::mvcc::cache::DEFAULT_MAX_ENTRY_BYTES
+    )]
+    value_cache_max_entry_bytes: u64,
+
+    /// The storage engine's (redb's) own page cache, in bytes. redb's
+    /// default is 1 GiB; fastetcd sets 256 MiB, so memory stays near
+    /// this plus `--value-cache-bytes` plus the key index (fastetcd#82).
+    #[arg(
+        long,
+        env = "FASTETCD_ENGINE_CACHE_BYTES",
+        default_value_t = 256 * 1024 * 1024
+    )]
+    engine_cache_bytes: u64,
+
     /// Directory for periodic backups of the whole store, on a
     /// **different volume** from `--data-dir`: a device that loses writes
     /// can corrupt the data file and, on the same volume, the backups
@@ -774,6 +803,7 @@ async fn main() -> anyhow::Result<()> {
             on_corruption: args.on_corruption,
             node_id,
             configured_members,
+            engine_cache_bytes: Some(args.engine_cache_bytes as usize),
         },
     )
     .await?;
@@ -809,7 +839,20 @@ async fn main() -> anyhow::Result<()> {
              from another. Set a distinct --cluster-id or --initial-cluster-token."
         );
     }
-    let mvcc = MvccStore::open(engine.clone()).await?;
+    let cache_config = fastetcd_server::ram_cache::config(
+        args.value_cache_bytes,
+        args.value_cache_max_entry_bytes,
+    );
+    let mvcc = MvccStore::open_with(engine.clone(), cache_config).await?;
+    let cache_stats = mvcc.cache_stats();
+    tracing::info!(
+        value_cache_bytes = cache_stats.value_budget_bytes,
+        value_cache_max_entry_bytes = args.value_cache_max_entry_bytes,
+        engine_cache_bytes = args.engine_cache_bytes,
+        index_keys = cache_stats.index_keys,
+        index_bytes = cache_stats.index_bytes,
+        "RAM cache: every key's index is resident; latest values cached up to the budget"
+    );
     let sm = FastetcdStateMachine::open_with_retention(
         mvcc,
         args.data_dir.join("snapshots"),

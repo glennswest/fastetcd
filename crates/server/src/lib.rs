@@ -29,6 +29,7 @@ pub mod lease;
 pub mod lease_expiry;
 pub mod maintenance;
 pub mod metrics;
+pub mod ram_cache;
 pub mod recovery;
 pub mod sizing;
 pub mod space;

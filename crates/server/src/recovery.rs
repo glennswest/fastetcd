@@ -63,6 +63,9 @@ pub struct OpenOptions {
     pub node_id: NodeId,
     /// Members named by `--initial-cluster` (1 for a single node).
     pub configured_members: usize,
+    /// redb's page cache for the engine this returns
+    /// (`--engine-cache-bytes`, fastetcd#82); `None` = redb's default.
+    pub engine_cache_bytes: Option<usize>,
 }
 
 /// A recovery from backup, persisted until the alarm is disarmed.
@@ -93,7 +96,7 @@ pub async fn open_or_recover(
     opts: &OpenOptions,
 ) -> anyhow::Result<(RedbEngine, Option<RecoveryRecord>)> {
     finish_interrupted_restore(data_file)?;
-    let reason = match RedbEngine::open(data_file) {
+    let reason = match RedbEngine::open_with_cache(data_file, opts.engine_cache_bytes) {
         Ok(engine) => return Ok((engine, None)),
         Err(StorageError::Corrupted(reason)) => reason,
         Err(e) => return Err(e.into()),
@@ -200,7 +203,7 @@ pub async fn open_or_recover(
     move_snapshots_aside(data_dir, now)?;
     std::fs::rename(&restored, data_file)?;
     backup::sync_dir(data_dir);
-    let engine = RedbEngine::open(data_file)?;
+    let engine = RedbEngine::open_with_cache(data_file, opts.engine_cache_bytes)?;
 
     tracing::error!(
         target: "fastetcd::recovery",

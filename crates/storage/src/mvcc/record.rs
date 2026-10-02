@@ -175,21 +175,7 @@ impl KeyIndex {
     /// `None` if the key did not exist at that rev (either never
     /// created or last seen as a tombstone).
     pub fn revision_at(&self, target_rev: Revision) -> Option<Revision> {
-        // Walk generations in reverse so we hit the most recent first.
-        for g in self.generations.iter().rev() {
-            // If the generation started after the target, skip it.
-            if g.created > target_rev {
-                continue;
-            }
-            if let Some((rev, is_tombstone)) = g.latest_at_or_before(target_rev) {
-                if is_tombstone {
-                    // Key was deleted at this generation by `target_rev`.
-                    return None;
-                }
-                return Some(rev);
-            }
-        }
-        None
+        revision_at(&self.generations, target_rev)
     }
 
     /// Compact the index against `compact_rev`. Returns the set of
@@ -261,6 +247,37 @@ impl KeyIndex {
         self.generations = keep;
         dropped
     }
+}
+
+/// [`KeyIndex::revision_at`] over a key's generations alone (the
+/// resident index keeps no copy of the key inside them; fastetcd#82).
+pub fn revision_at(generations: &[Generation], target_rev: Revision) -> Option<Revision> {
+    // Walk generations in reverse so we hit the most recent first.
+    for g in generations.iter().rev() {
+        // If the generation started after the target, skip it.
+        if g.created > target_rev {
+            continue;
+        }
+        if let Some((rev, is_tombstone)) = g.latest_at_or_before(target_rev) {
+            if is_tombstone {
+                // Key was deleted at this generation by `target_rev`.
+                return None;
+            }
+            return Some(rev);
+        }
+    }
+    None
+}
+
+/// Whether [`KeyIndex::compact`] at `compact_rev` would change these
+/// generations, without cloning them: a closed generation at or below
+/// it goes, and so does every put older than the newest put at or below
+/// it. Revisions within a generation are ascending.
+pub fn compaction_changes(generations: &[Generation], compact_rev: Revision) -> bool {
+    generations.iter().any(|g| {
+        matches!(g.tombstone, Some(t) if t <= compact_rev)
+            || (g.revs.len() >= 2 && g.revs[1] <= compact_rev)
+    })
 }
 
 #[cfg(test)]
@@ -402,5 +419,26 @@ mod tests {
             idx.revision_at(Revision::new(50, 0)),
             Some(Revision::new(10, 0))
         );
+    }
+
+    #[test]
+    fn compaction_changes_agrees_with_compact() {
+        let mut idx = KeyIndex::new(b"k".to_vec());
+        idx.record_put(Revision::new(2, 0));
+        idx.record_put(Revision::new(4, 0));
+        idx.record_delete(Revision::new(6, 0));
+        idx.record_put(Revision::new(8, 0));
+        idx.record_put(Revision::new(9, 0));
+        for at in 0..12 {
+            let rev = Revision::new(at, i64::MAX);
+            let mut c = idx.clone();
+            let dropped = c.compact(rev);
+            assert_eq!(
+                compaction_changes(&idx.generations, rev),
+                !dropped.is_empty(),
+                "at {at}"
+            );
+            assert_eq!(revision_at(&idx.generations, rev), idx.revision_at(rev));
+        }
     }
 }

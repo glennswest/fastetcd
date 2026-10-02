@@ -30,7 +30,8 @@
 
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -41,12 +42,13 @@ use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 use super::auth::{
     self, AuthApplyError, AuthMemory, AuthOp, AuthTables, META_AUTH_ENABLED, TABLE_AUTH_STATE,
 };
+use super::cache::{CacheConfig, CacheStats, IndexRead, MvccCache};
 use super::event::{EventBatch, EventKind, MvccEvent};
 use super::lease::{
     lease_id_key, lease_key_index, lease_keys_bounds, parse_lease_keys_key, LeaseId, LeaseRecord,
     TABLE_LEASE, TABLE_LEASE_KEYS,
 };
-use super::record::{KeyIndex, KvRecord};
+use super::record::{compaction_changes, revision_at, Generation, KeyIndex, KvRecord};
 use super::revision::{make_kv_key, Revision};
 
 const TABLE_KV: &str = "mvcc_kv";
@@ -324,7 +326,20 @@ struct Inner {
     /// Whether the `apply_*` commits fsync. True until the server calls
     /// [`MvccStore::defer_apply_sync`] (fastetcd#71).
     apply_sync: AtomicBool,
+    /// Every key's index, and the latest records of recently used keys
+    /// (fastetcd#82). Changed only under `write_state`, after the engine
+    /// commit it describes; see the `cache` module.
+    cache: MvccCache,
+    /// Told the duration of every single-key Range and whether it was
+    /// served without an engine read (`/metrics`).
+    get_observer: OnceLock<GetObserver>,
 }
+
+/// Receives `(served_from_ram, duration)` for each single-key Range.
+pub type GetObserver = Arc<dyn Fn(bool, Duration) + Send + Sync>;
+
+/// Index entries read per engine call while loading the resident index.
+const INDEX_LOAD_CHUNK: usize = 10_000;
 
 #[derive(Debug, Clone, Copy)]
 struct WriteState {
@@ -339,6 +354,12 @@ impl MvccStore {
     /// initializes meta entries to `0`. On a populated engine, reads
     /// the stored counters.
     pub async fn open(engine: Arc<dyn KvStore>) -> MvccResult<Self> {
+        Self::open_with(engine, CacheConfig::default()).await
+    }
+
+    /// [`open`](Self::open) with the RAM cache sized by `cache`. Loads
+    /// every key's index from the engine into memory (fastetcd#82).
+    pub async fn open_with(engine: Arc<dyn KvStore>, cache: CacheConfig) -> MvccResult<Self> {
         let snap = engine.snapshot().await?;
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
@@ -369,9 +390,12 @@ impl MvccStore {
                 auth: AuthMemory::default(),
                 ops: OpCounters::default(),
                 apply_sync: AtomicBool::new(true),
+                cache: MvccCache::new(cache),
+                get_observer: OnceLock::new(),
             }),
         };
         store.reload_auth().await?;
+        store.load_index().await?;
         Ok(store)
     }
 
@@ -641,18 +665,83 @@ impl MvccStore {
     /// installed data is on disk but invisible — reads clamp to the old
     /// revision and new writes allocate revisions that collide with
     /// what the snapshot brought in (fastetcd#8).
+    ///
+    /// The resident key index is rebuilt and the value cache emptied
+    /// with them (fastetcd#82).
     pub async fn reload_write_state(&self) -> MvccResult<()> {
+        let mut state = self.inner.write_state.lock().await;
+        self.reload_locked(&mut state).await
+    }
+
+    /// Commit `batch`, which replaces MVCC tables wholesale (a raft
+    /// snapshot install), durably, and reload everything this handle
+    /// keeps of them, all under the write-state lock: no read sees the
+    /// new tables with the old revision or index, or the reverse.
+    pub async fn install_tables(&self, batch: WriteBatch) -> MvccResult<()> {
+        let mut state = self.inner.write_state.lock().await;
+        self.inner
+            .engine
+            .commit(batch, WriteOptions::default())
+            .await?;
+        self.reload_locked(&mut state).await
+    }
+
+    async fn reload_locked(&self, state: &mut WriteState) -> MvccResult<()> {
         let snap = self.inner.engine.snapshot().await?;
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         drop(snap);
-
-        let mut state = self.inner.write_state.lock().await;
+        self.load_index().await?;
         state.current_rev = current;
         state.compact_rev = compact;
         state.next_lease_id = next_lease;
         Ok(())
+    }
+
+    /// Replace the resident index with `mvcc_idx` as the engine holds it
+    /// now, and empty the value cache. Callers hold `write_state` (or
+    /// are `open`), so no commit can land in between.
+    async fn load_index(&self) -> MvccResult<()> {
+        let snap = self.inner.engine.snapshot().await?;
+        let mut loaded: Vec<(Vec<u8>, Vec<Generation>)> = Vec::new();
+        let mut start = Bound::Unbounded;
+        loop {
+            let chunk = snap
+                .range(TABLE_IDX, start, Bound::Unbounded, INDEX_LOAD_CHUNK)
+                .await?;
+            let n = chunk.len();
+            for (key, bytes) in chunk {
+                let idx: KeyIndex = bincode::deserialize(&bytes)
+                    .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+                loaded.push((key, idx.generations));
+            }
+            match loaded.last() {
+                Some((k, _)) if n == INDEX_LOAD_CHUNK => start = Bound::Excluded(k.clone()),
+                _ => break,
+            }
+        }
+        drop(snap);
+        {
+            let mut w = self.inner.cache.index.write();
+            w.clear();
+            for (key, gens) in loaded {
+                w.set(&key, gens);
+            }
+        }
+        self.inner.cache.values.clear();
+        Ok(())
+    }
+
+    /// Sizes and counters of the RAM cache (fastetcd#82).
+    pub fn cache_stats(&self) -> CacheStats {
+        self.inner.cache.stats()
+    }
+
+    /// Install the observer of single-key Range latency; the first one
+    /// set stays.
+    pub fn set_get_observer(&self, observer: GetObserver) {
+        let _ = self.inner.get_observer.set(observer);
     }
 
     pub async fn compact_revision(&self) -> i64 {
@@ -749,6 +838,7 @@ impl MvccStore {
             .engine
             .commit(batch, WriteOptions::default())
             .await?;
+        self.load_index().await?;
         state.current_rev = next_rev;
         Ok(())
     }
@@ -988,6 +1078,8 @@ impl MvccStore {
     /// Evaluate a Txn's compares against the current state, without
     /// applying anything: which branch the txn would take now.
     pub async fn txn_would_succeed(&self, compares: &[Compare]) -> MvccResult<bool> {
+        // Held throughout, so the resident index and `snap` agree.
+        let _state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
         self.evaluate_compares(&*snap, compares).await
     }
@@ -1116,35 +1208,41 @@ impl MvccStore {
 
         let compact_rev_packed = Revision::new(rev, i64::MAX);
 
-        // Walk every KeyIndex in mvcc_idx and apply compact.
-        let snap = self.inner.engine.snapshot().await?;
-        let entries = snap
-            .range(TABLE_IDX, Bound::Unbounded, Bound::Unbounded, 0)
-            .await?;
+        // Walk every key's index, in RAM (fastetcd#82): the resident
+        // index is what `mvcc_idx` holds, so compaction no longer reads
+        // the whole table from the engine. Only changed keys are copied.
+        let changed: Vec<KeyIndex> = {
+            let index = self.inner.cache.index.read();
+            index
+                .iter()
+                .filter(|(_, gens)| compaction_changes(gens, compact_rev_packed))
+                .map(|(key, gens)| KeyIndex {
+                    key: key.clone(),
+                    generations: gens.clone(),
+                })
+                .collect()
+        };
 
         let mut batch = WriteBatch::new();
         let mut dropped_records: u64 = 0;
         let mut dropped_indices: u64 = 0;
-        for (key, idx_bytes) in entries {
-            let mut idx: KeyIndex = bincode::deserialize(&idx_bytes)
-                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
+        let mut compacted: Vec<KeyIndex> = Vec::with_capacity(changed.len());
+        for mut idx in changed {
             let dropped = idx.compact(compact_rev_packed);
-            if dropped.is_empty() && !idx.generations.is_empty() {
-                continue; // no change for this key
-            }
             for r in dropped {
-                let kv_key = make_kv_key(&key, r);
+                let kv_key = make_kv_key(&idx.key, r);
                 batch.delete(TABLE_KV, &kv_key);
                 dropped_records += 1;
             }
             if idx.generations.is_empty() {
-                batch.delete(TABLE_IDX, &key);
+                batch.delete(TABLE_IDX, &idx.key);
                 dropped_indices += 1;
             } else {
                 let bytes = bincode::serialize(&idx)
                     .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                batch.put(TABLE_IDX, &key, &bytes);
+                batch.put(TABLE_IDX, &idx.key, &bytes);
             }
+            compacted.push(idx);
         }
         write_i64(&mut batch, META_KEY_COMPACT_REV, rev);
         self.fold_raft_meta(&mut batch).await;
@@ -1153,6 +1251,14 @@ impl MvccStore {
             .engine
             .commit(batch, self.apply_write_options())
             .await?;
+        {
+            // A key's latest live record survives compaction, so the
+            // value cache is unaffected; deleted keys are not in it.
+            let mut index = self.inner.cache.index.write();
+            for idx in compacted {
+                index.set(&idx.key, idx.generations);
+            }
+        }
         state.compact_rev = rev;
 
         tracing::info!(
@@ -1227,24 +1333,32 @@ impl MvccStore {
         keys_only: bool,
         count_only: bool,
     ) -> MvccResult<(RangeResult, i64)> {
+        let started = Instant::now();
+        self.inner.ops.range.fetch_add(1, Ordering::Relaxed);
         let state = self.inner.write_state.lock().await;
         let state_copy = *state;
+        let read_rev = check_read_rev(state_copy, target_rev)?;
         let snap = self.inner.engine.snapshot().await?;
-        drop(state);
-        let result = self
-            .range_inner(
-                &*snap,
-                &ApplyContext::default(),
-                state_copy,
-                key,
-                range_end,
-                limit,
-                target_rev,
-                keys_only,
-                count_only,
-            )
+        let ctx = ApplyContext::default();
+        // The index guard is taken before the write-state lock is let
+        // go, so the index agrees with `snap` and `state_copy`: a commit
+        // changes the index only while it holds that lock (fastetcd#82).
+        let plan = {
+            let index = self.inner.cache.index.read();
+            drop(state);
+            plan_range(&index, &ctx, key, range_end, read_rev, limit, count_only)
+        };
+        // Only a read of the latest revision fills the value cache.
+        let fill = target_rev == 0 || target_rev == state_copy.current_rev;
+        let (kvs, disk_reads) = self
+            .fetch_records(&*snap, &ctx, &plan.hits, keys_only, fill)
             .await?;
-        Ok((result, state_copy.current_rev))
+        if range_end.is_empty() {
+            if let Some(observe) = self.inner.get_observer.get() {
+                observe(disk_reads == 0, started.elapsed());
+            }
+        }
+        Ok((plan.into_result(kvs, count_only), state_copy.current_rev))
     }
 
     /// Transactional execute: evaluate `compares` against the current
@@ -1375,16 +1489,9 @@ impl MvccStore {
                 ignore_lease,
                 prev_kv,
             } => {
-                let mut idx =
-                    load_or_init_index(snap, &ctx.idx_cache, key.as_slice()).await?;
+                let mut idx = self.index_of(ctx, key);
                 let prev = if idx.is_live() {
-                    load_latest_record(
-                        snap,
-                        &ctx.latest_record_cache,
-                        key.as_slice(),
-                        &idx,
-                    )
-                    .await?
+                    self.latest_record_in(snap, ctx, key, &idx).await?
                 } else {
                     None
                 };
@@ -1473,32 +1580,15 @@ impl MvccStore {
                 range_end,
                 prev_kv,
             } => {
-                let live_keys = live_keys_in_range(
-                    snap,
-                    &ctx.idx_cache,
-                    key.as_slice(),
-                    range_end.as_slice(),
-                )
-                .await?;
+                let live_keys = self.live_keys_in_range(ctx, key, range_end);
                 let mut result = MutationResult::default();
                 for live_key in live_keys {
-                    let mut idx = load_or_init_index(
-                        snap,
-                        &ctx.idx_cache,
-                        live_key.as_slice(),
-                    )
-                    .await?;
+                    let mut idx = self.index_of(ctx, &live_key);
                     // Always load the prev record (regardless of
                     // the request's prev_kv flag) so the broadcast
                     // event carries it for watchers that want it.
                     let prev = if idx.is_live() {
-                        load_latest_record(
-                            snap,
-                            &ctx.latest_record_cache,
-                            live_key.as_slice(),
-                            &idx,
-                        )
-                        .await?
+                        self.latest_record_in(snap, ctx, &live_key, &idx).await?
                     } else {
                         None
                     };
@@ -1567,6 +1657,23 @@ impl MvccStore {
             .engine
             .commit(ctx.batch, self.apply_write_options())
             .await?;
+        // Only now, with the commit in the engine and the write-state
+        // lock still held, does RAM learn of it (fastetcd#82).
+        let values = &self.inner.cache.values;
+        for (key, rec) in ctx.latest_record_cache.drain() {
+            match ctx.idx_cache.get(&key).and_then(|i| i.current()) {
+                Some((rev, _)) if !rec.is_tombstone() => {
+                    values.insert(&key, rev, Arc::new(rec), false)
+                }
+                _ => values.remove(&key),
+            }
+        }
+        {
+            let mut index = self.inner.cache.index.write();
+            for (key, idx) in ctx.idx_cache.drain() {
+                index.set(&key, idx.generations);
+            }
+        }
         state.current_rev = new_rev;
         // Broadcast the event batch. Send error here means no
         // subscribers — fine, just drop on the floor.
@@ -1580,6 +1687,9 @@ impl MvccStore {
         Ok(())
     }
 
+    /// A Range inside a Txn: `state` is the txn's read state, `ctx` its
+    /// pending writes. The caller holds the write-state lock, so the
+    /// resident index is current.
     #[allow(clippy::too_many_arguments)]
     async fn range_inner(
         &self,
@@ -1594,131 +1704,148 @@ impl MvccStore {
         count_only: bool,
     ) -> MvccResult<RangeResult> {
         self.inner.ops.range.fetch_add(1, Ordering::Relaxed);
-        let current_rev = state.current_rev;
-        let compact_rev = state.compact_rev;
-
-        if target_rev > 0 {
-            if target_rev > current_rev {
-                return Err(MvccError::FutureRevision {
-                    requested: target_rev,
-                    current_rev,
-                });
-            }
-            if target_rev < compact_rev {
-                return Err(MvccError::Compacted {
-                    requested: target_rev,
-                    compact_rev,
-                });
-            }
-        }
-        let read_rev = if target_rev == 0 {
-            Revision::new(current_rev, i64::MAX)
-        } else {
-            Revision::new(target_rev, i64::MAX)
+        let read_rev = check_read_rev(state, target_rev)?;
+        let plan = {
+            let index = self.inner.cache.index.read();
+            plan_range(&index, ctx, key, range_end, read_rev, limit, count_only)
         };
-
-        let (start, end) = range_bounds(key, range_end);
-        let entries = snap
-            .range(TABLE_IDX, start, end, 0)
-            .await
-            .map_err(MvccError::Storage)?;
-
-        let mut matches: Vec<KvRecord> = Vec::new();
-        let mut total: i64 = 0;
-        // Avoid double-counting keys that also live in the ctx cache.
-        let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-
-        for (idx_key, idx_bytes) in entries {
-            let idx: KeyIndex = match ctx.idx_cache.get(&idx_key) {
-                Some(c) => c.clone(),
-                None => bincode::deserialize(&idx_bytes)
-                    .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?,
-            };
-            seen.insert(idx_key.clone());
-            self.range_match_one(
-                snap, ctx, &idx_key, &idx, read_rev, keys_only, count_only, &mut total, &mut matches,
-            )
+        let (kvs, _) = self
+            .fetch_records(snap, ctx, &plan.hits, keys_only, false)
             .await?;
-        }
-        // Cache-only keys (created within this same apply batch).
-        for (k, idx) in &ctx.idx_cache {
-            if seen.contains(k) {
-                continue;
-            }
-            if !in_range(k.as_slice(), key, range_end) {
-                continue;
-            }
-            self.range_match_one(
-                snap, ctx, k, idx, read_rev, keys_only, count_only, &mut total, &mut matches,
-            )
-            .await?;
-        }
-
-        matches.sort_by(|a, b| a.key.cmp(&b.key));
-
-        let more = limit > 0 && matches.len() > limit;
-        if more {
-            matches.truncate(limit);
-        }
-        Ok(RangeResult {
-            kvs: if count_only { Vec::new() } else { matches },
-            more,
-            count: total,
-        })
+        Ok(plan.into_result(kvs, count_only))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn range_match_one(
+    /// The records a range plan names, in its order: from the txn's
+    /// pending writes, else the value cache, else the engine. Returns
+    /// them and how many came from the engine. With `fill`, records
+    /// read from the engine go into the value cache.
+    async fn fetch_records(
         &self,
         snap: &dyn Snapshot,
         ctx: &ApplyContext,
-        idx_key: &[u8],
-        idx: &KeyIndex,
-        read_rev: Revision,
+        hits: &[(Vec<u8>, Revision)],
         keys_only: bool,
-        count_only: bool,
-        total: &mut i64,
-        matches: &mut Vec<KvRecord>,
-    ) -> MvccResult<()> {
-        let Some(rec_rev) = idx.revision_at(read_rev) else {
-            return Ok(());
-        };
-        *total += 1;
-        if count_only {
-            return Ok(());
-        }
-        // A record written earlier in this batch is only in the cache,
-        // not yet in `snap`. Use it only when it is the revision being
-        // read: a range at an older revision must read history.
-        if let Some(rec) = ctx.latest_record_cache.get(idx_key) {
-            if !rec.is_tombstone() && rec.mod_revision == rec_rev.main {
-                let mut r = rec.clone();
-                if keys_only {
-                    r.value.clear();
+        fill: bool,
+    ) -> MvccResult<(Vec<KvRecord>, usize)> {
+        let values = &self.inner.cache.values;
+        let mut out = Vec::with_capacity(hits.len());
+        let mut disk_reads = 0;
+        for (key, rev) in hits {
+            // A record written earlier in this batch is only in the
+            // context, not yet in `snap`. Use it only when it is the
+            // revision being read: a range at an older revision must
+            // read history.
+            if let Some(rec) = ctx.latest_record_cache.get(key) {
+                if !rec.is_tombstone() && rec.mod_revision == rev.main {
+                    out.push(trim(rec, keys_only));
+                    continue;
                 }
-                matches.push(r);
-                return Ok(());
+            }
+            if let Some(rec) = values.get(key, *rev) {
+                out.push(trim(&rec, keys_only));
+                continue;
+            }
+            disk_reads += 1;
+            let rec = read_record(snap, key, *rev).await?;
+            if fill {
+                let rec = Arc::new(rec);
+                values.insert(key, *rev, rec.clone(), true);
+                out.push(trim(&rec, keys_only));
+            } else {
+                out.push(trim(&rec, keys_only));
             }
         }
-        let kv_key = make_kv_key(idx_key, rec_rev);
-        let rec_bytes = snap
-            .get(TABLE_KV, &kv_key)
+        Ok((out, disk_reads))
+    }
+
+    /// The latest live record of `key` per `idx`, from the value cache
+    /// or the engine; `None` if the key is deleted or absent.
+    async fn latest_record(
+        &self,
+        snap: &dyn Snapshot,
+        key: &[u8],
+        idx: &KeyIndex,
+    ) -> MvccResult<Option<KvRecord>> {
+        let Some((rev, _ver)) = idx.current() else {
+            return Ok(None);
+        };
+        if let Some(rec) = self.inner.cache.values.get(key, rev) {
+            return Ok(Some((*rec).clone()));
+        }
+        let Some(bytes) = snap
+            .get(TABLE_KV, &make_kv_key(key, rev))
             .await
             .map_err(MvccError::Storage)?
-            .ok_or_else(|| {
-                MvccError::Internal(format!(
-                    "missing KvRecord for key {} at rev {:?}",
-                    String::from_utf8_lossy(idx_key),
-                    rec_rev
-                ))
-            })?;
-        let mut rec: KvRecord = bincode::deserialize(&rec_bytes)
+        else {
+            return Ok(None);
+        };
+        let rec: KvRecord = bincode::deserialize(&bytes)
             .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
-        if keys_only {
-            rec.value.clear();
+        Ok((!rec.is_tombstone()).then_some(rec))
+    }
+
+    /// `key`'s index as the apply in progress sees it: its own earlier
+    /// change, else the resident index, else a fresh one.
+    fn index_of(&self, ctx: &ApplyContext, key: &[u8]) -> KeyIndex {
+        if let Some(idx) = ctx.idx_cache.get(key) {
+            return idx.clone();
         }
-        matches.push(rec);
-        Ok(())
+        self.inner
+            .cache
+            .index
+            .read()
+            .get(key)
+            .unwrap_or_else(|| KeyIndex::new(key.to_vec()))
+    }
+
+    /// The key's latest record as the apply in progress sees it.
+    async fn latest_record_in(
+        &self,
+        snap: &dyn Snapshot,
+        ctx: &ApplyContext,
+        key: &[u8],
+        idx: &KeyIndex,
+    ) -> MvccResult<Option<KvRecord>> {
+        if let Some(r) = ctx.latest_record_cache.get(key) {
+            return Ok((!r.is_tombstone()).then(|| r.clone()));
+        }
+        self.latest_record(snap, key, idx).await
+    }
+
+    /// Live keys in `[key, range_end)` as the apply in progress sees
+    /// them, sorted.
+    fn live_keys_in_range(&self, ctx: &ApplyContext, key: &[u8], range_end: &[u8]) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        {
+            let index = self.inner.cache.index.read();
+            if let Some((start, end)) = index_bounds(key, range_end) {
+                for (k, gens) in index.range(start, end) {
+                    let live = match ctx.idx_cache.get(k) {
+                        Some(c) => c.is_live(),
+                        None => gens.last().is_some_and(|g| g.is_open()),
+                    };
+                    if live {
+                        keys.push(k.clone());
+                    }
+                }
+            }
+        }
+        // Keys first created in this same apply batch.
+        let from_index = keys.len();
+        let mut extra = false;
+        for (k, idx) in &ctx.idx_cache {
+            if in_range(k, key, range_end)
+                && idx.is_live()
+                && keys[..from_index].binary_search(k).is_err()
+            {
+                keys.push(k.clone());
+                extra = true;
+            }
+        }
+        if extra {
+            keys.sort();
+        }
+        keys
     }
 
     async fn evaluate_compares(
@@ -1742,32 +1869,43 @@ impl MvccStore {
         // For a single-key compare, look up the latest live record (or
         // implicit zero-record if absent) and compare against the target.
         // For a range compare, every key in the range must satisfy.
-        let (start, end) = range_bounds(&cmp.key, &cmp.range_end);
-        let entries = snap
-            .range(TABLE_IDX, start, end, 0)
-            .await
-            .map_err(MvccError::Storage)?;
+        let indexes: Vec<KeyIndex> = {
+            let index = self.inner.cache.index.read();
+            if cmp.range_end.is_empty() {
+                index.get(&cmp.key).into_iter().collect()
+            } else {
+                match index_bounds(&cmp.key, &cmp.range_end) {
+                    Some((start, end)) => index
+                        .range(start, end)
+                        .map(|(k, g)| KeyIndex {
+                            key: k.clone(),
+                            generations: g.clone(),
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                }
+            }
+        };
 
         if cmp.range_end.is_empty() {
             // Single-key compare. If absent, use the implicit zero record.
-            let rec = if entries.is_empty() {
-                implicit_zero_record(&cmp.key)
-            } else {
-                let (k, idx_bytes) = &entries[0];
-                debug_assert_eq!(k, &cmp.key);
-                let idx: KeyIndex = bincode::deserialize(idx_bytes)
-                    .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
-                load_latest_or_zero(snap, &idx, &cmp.key).await?
+            let rec = match indexes.first() {
+                None => implicit_zero_record(&cmp.key),
+                Some(idx) => self
+                    .latest_record(snap, &cmp.key, idx)
+                    .await?
+                    .unwrap_or_else(|| implicit_zero_record(&cmp.key)),
             };
             return Ok(eval_compare(&rec, &cmp.op, &cmp.target));
         }
 
         // Range compare. All matching keys must satisfy. Empty range
         // matches vacuously (matches etcd).
-        for (idx_key, idx_bytes) in entries {
-            let idx: KeyIndex = bincode::deserialize(&idx_bytes)
-                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?;
-            let rec = load_latest_or_zero(snap, &idx, &idx_key).await?;
+        for idx in &indexes {
+            let rec = self
+                .latest_record(snap, &idx.key, idx)
+                .await?
+                .unwrap_or_else(|| implicit_zero_record(&idx.key));
             if !eval_compare(&rec, &cmp.op, &cmp.target) {
                 return Ok(false);
             }
@@ -1844,28 +1982,6 @@ fn implicit_zero_record(key: &[u8]) -> KvRecord {
     }
 }
 
-async fn load_latest_or_zero(
-    snap: &dyn Snapshot,
-    idx: &KeyIndex,
-    key: &[u8],
-) -> MvccResult<KvRecord> {
-    if let Some((rev, _ver)) = idx.current() {
-        let kv_key = make_kv_key(key, rev);
-        if let Some(bytes) = snap
-            .get(TABLE_KV, &kv_key)
-            .await
-            .map_err(MvccError::Storage)?
-        {
-            let rec: KvRecord = bincode::deserialize(&bytes)
-                .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
-            if !rec.is_tombstone() {
-                return Ok(rec);
-            }
-        }
-    }
-    Ok(implicit_zero_record(key))
-}
-
 fn eval_compare(rec: &KvRecord, op: &CompareOp, target: &CompareTarget) -> bool {
     use std::cmp::Ordering;
     let ordering: Ordering = match target {
@@ -1898,87 +2014,162 @@ fn write_i64(batch: &mut WriteBatch, key: &[u8], value: i64) {
     batch.put(TABLE_META, key, &value.to_be_bytes());
 }
 
-async fn load_or_init_index(
-    snap: &dyn Snapshot,
-    cache: &std::collections::HashMap<Vec<u8>, KeyIndex>,
-    key: &[u8],
-) -> Result<KeyIndex, MvccError> {
-    if let Some(idx) = cache.get(key) {
-        return Ok(idx.clone());
+/// The revision a Range reads at, after etcd's checks: the current
+/// revision for `target_rev == 0`, else `target_rev` if it is neither in
+/// the future nor compacted.
+fn check_read_rev(state: WriteState, target_rev: i64) -> MvccResult<Revision> {
+    if target_rev > 0 {
+        if target_rev > state.current_rev {
+            return Err(MvccError::FutureRevision {
+                requested: target_rev,
+                current_rev: state.current_rev,
+            });
+        }
+        if target_rev < state.compact_rev {
+            return Err(MvccError::Compacted {
+                requested: target_rev,
+                compact_rev: state.compact_rev,
+            });
+        }
     }
-    match snap.get(TABLE_IDX, key).await.map_err(MvccError::Storage)? {
-        Some(bytes) => bincode::deserialize::<KeyIndex>(&bytes)
-            .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}"))),
-        None => Ok(KeyIndex::new(key.to_vec())),
-    }
-}
-
-async fn load_latest_record(
-    snap: &dyn Snapshot,
-    cache: &std::collections::HashMap<Vec<u8>, KvRecord>,
-    key: &[u8],
-    idx: &KeyIndex,
-) -> Result<Option<KvRecord>, MvccError> {
-    if let Some(r) = cache.get(key) {
-        return Ok(if r.is_tombstone() {
-            None
-        } else {
-            Some(r.clone())
-        });
-    }
-    let Some((rev, _ver)) = idx.current() else {
-        return Ok(None);
-    };
-    let kv_key = make_kv_key(key, rev);
-    let bytes = snap
-        .get(TABLE_KV, &kv_key)
-        .await
-        .map_err(MvccError::Storage)?;
-    let Some(bytes) = bytes else {
-        return Ok(None);
-    };
-    let rec: KvRecord = bincode::deserialize(&bytes)
-        .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))?;
-    if rec.is_tombstone() {
-        Ok(None)
+    let main = if target_rev == 0 {
+        state.current_rev
     } else {
-        Ok(Some(rec))
+        target_rev
+    };
+    Ok(Revision::new(main, i64::MAX))
+}
+
+/// What a Range found in the index: the keys to return with the
+/// revision of each one's record, the count of every match, and whether
+/// the limit cut it short.
+struct RangePlan {
+    hits: Vec<(Vec<u8>, Revision)>,
+    total: i64,
+    more: bool,
+}
+
+impl RangePlan {
+    fn into_result(self, kvs: Vec<KvRecord>, count_only: bool) -> RangeResult {
+        RangeResult {
+            kvs: if count_only { Vec::new() } else { kvs },
+            more: self.more,
+            count: self.total,
+        }
     }
 }
 
-async fn live_keys_in_range(
-    snap: &dyn Snapshot,
-    cache: &std::collections::HashMap<Vec<u8>, KeyIndex>,
+/// Find a Range's matches in the resident index (overlaid with the
+/// txn's pending index changes in `ctx`), without reading any record.
+/// Only the first `limit` matches are kept; every match is counted.
+fn plan_range(
+    index: &IndexRead<'_>,
+    ctx: &ApplyContext,
     key: &[u8],
     range_end: &[u8],
-) -> Result<Vec<Vec<u8>>, MvccError> {
-    let (start, end) = range_bounds(key, range_end);
-    // Pull all index entries in the byte range from the snapshot.
-    let entries = snap
-        .range(TABLE_IDX, start, end, 0)
+    read_rev: Revision,
+    limit: usize,
+    count_only: bool,
+) -> RangePlan {
+    let mut hits: Vec<(Vec<u8>, Revision)> = Vec::new();
+    let mut total: i64 = 0;
+    // With no pending changes the index walk is already in key order,
+    // so it can stop collecting at the limit; otherwise collect all,
+    // add the keys only `ctx` has, sort, then cut.
+    let overlay = !ctx.idx_cache.is_empty();
+    let cap = if count_only {
+        0
+    } else if limit > 0 && !overlay {
+        limit
+    } else {
+        usize::MAX
+    };
+    if let Some((start, end)) = index_bounds(key, range_end) {
+        for (k, gens) in index.range(start, end) {
+            let gens = match ctx.idx_cache.get(k) {
+                Some(c) => c.generations.as_slice(),
+                None => gens.as_slice(),
+            };
+            if let Some(rev) = revision_at(gens, read_rev) {
+                total += 1;
+                if hits.len() < cap {
+                    hits.push((k.clone(), rev));
+                }
+            }
+        }
+    }
+    if overlay {
+        let mut added = false;
+        for (k, idx) in &ctx.idx_cache {
+            if !in_range(k, key, range_end) || index.contains(k) {
+                continue;
+            }
+            if let Some(rev) = idx.revision_at(read_rev) {
+                total += 1;
+                if !count_only {
+                    hits.push((k.clone(), rev));
+                    added = true;
+                }
+            }
+        }
+        if added {
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
+    let more = !count_only && limit > 0 && total > limit as i64;
+    if limit > 0 {
+        hits.truncate(limit);
+    }
+    RangePlan { hits, total, more }
+}
+
+/// A Range's bounds for the resident index, or `None` when the range is
+/// empty (an end at or before the start; the index would panic on it).
+fn index_bounds<'a>(key: &'a [u8], range_end: &'a [u8]) -> Option<(Bound<&'a [u8]>, Bound<&'a [u8]>)> {
+    if range_end.is_empty() {
+        return Some((Bound::Included(key), Bound::Included(key)));
+    }
+    if range_end == [0u8] {
+        return Some((Bound::Included(key), Bound::Unbounded));
+    }
+    if range_end <= key {
+        return None;
+    }
+    Some((Bound::Included(key), Bound::Excluded(range_end)))
+}
+
+/// A copy of `rec` to return, without its value for `keys_only`.
+fn trim(rec: &KvRecord, keys_only: bool) -> KvRecord {
+    if keys_only {
+        KvRecord {
+            key: rec.key.clone(),
+            value: Vec::new(),
+            create_revision: rec.create_revision,
+            mod_revision: rec.mod_revision,
+            version: rec.version,
+            lease: rec.lease,
+            deleted: rec.deleted,
+        }
+    } else {
+        rec.clone()
+    }
+}
+
+/// The record of `key` at `rev` from the engine; it must exist.
+async fn read_record(snap: &dyn Snapshot, key: &[u8], rev: Revision) -> MvccResult<KvRecord> {
+    let bytes = snap
+        .get(TABLE_KV, &make_kv_key(key, rev))
         .await
-        .map_err(MvccError::Storage)?;
-    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    for (k, v) in entries {
-        // Index cache supersedes snapshot for in-batch changes.
-        let idx: KeyIndex = match cache.get(&k) {
-            Some(c) => c.clone(),
-            None => bincode::deserialize(&v)
-                .map_err(|e| MvccError::Internal(format!("deserialize KeyIndex: {e}")))?,
-        };
-        if idx.is_live() {
-            keys.push(k);
-        }
-    }
-    // Also include any keys present only in the cache (i.e., a key
-    // first created in this same apply batch).
-    for (cache_key, idx) in cache {
-        if in_range(cache_key.as_slice(), key, range_end) && idx.is_live() && !keys.contains(cache_key) {
-            keys.push(cache_key.clone());
-        }
-    }
-    keys.sort();
-    Ok(keys)
+        .map_err(MvccError::Storage)?
+        .ok_or_else(|| {
+            MvccError::Internal(format!(
+                "missing KvRecord for key {} at rev {:?}",
+                String::from_utf8_lossy(key),
+                rev
+            ))
+        })?;
+    bincode::deserialize(&bytes)
+        .map_err(|e| MvccError::Internal(format!("deserialize KvRecord: {e}")))
 }
 
 fn range_bounds(key: &[u8], range_end: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
@@ -2744,5 +2935,280 @@ mod tests {
             assert_eq!(r.mod_revision, 1);
             assert_eq!(r.create_revision, 1);
         }
+    }
+
+    // ---------- RAM cache (fastetcd#82) ----------
+
+    async fn open_with_budget(budget: u64) -> (tempfile::TempDir, MvccStore) {
+        let dir = tempdir().unwrap();
+        let eng = RedbEngine::open(dir.path().join("cache.redb")).unwrap();
+        let store = MvccStore::open_with(
+            Arc::new(eng),
+            CacheConfig {
+                value_cache_bytes: budget,
+                max_entry_bytes: crate::mvcc::cache::DEFAULT_MAX_ENTRY_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        (dir, store)
+    }
+
+    /// The resident index must hold exactly what `mvcc_idx` holds.
+    async fn assert_index_matches_disk(s: &MvccStore) {
+        let snap = s.engine().snapshot().await.unwrap();
+        let disk: Vec<(Vec<u8>, Vec<Generation>)> = snap
+            .range(TABLE_IDX, Bound::Unbounded, Bound::Unbounded, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| {
+                let idx: KeyIndex = bincode::deserialize(&v).unwrap();
+                assert_eq!(idx.key, k);
+                (k, idx.generations)
+            })
+            .collect();
+        let ram: Vec<(Vec<u8>, Vec<Generation>)> = s
+            .inner
+            .cache
+            .index
+            .read()
+            .iter()
+            .map(|(k, g)| (k.clone(), g.clone()))
+            .collect();
+        assert_eq!(ram, disk);
+    }
+
+    #[tokio::test]
+    async fn a_hot_get_is_served_from_ram() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v1")]).await.unwrap();
+        s.apply(&[put(b"k", b"v2")]).await.unwrap();
+        let before = s.cache_stats();
+        let out = s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"v2");
+        let after = s.cache_stats();
+        assert_eq!(after.value_hits, before.value_hits + 1);
+        assert_eq!(after.value_misses, before.value_misses);
+        // History is not in the value cache; it comes from the engine.
+        let old = s.range(b"k", b"", 0, 1, false, false).await.unwrap();
+        assert_eq!(old.kvs[0].value, b"v1");
+        assert_eq!(old.kvs[0].version, 1);
+        // keys_only from a hit carries no value.
+        let k = s.range(b"k", b"", 0, 0, true, false).await.unwrap();
+        assert!(k.kvs[0].value.is_empty());
+        assert_eq!(k.kvs[0].mod_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn a_miss_fills_the_cache_after_a_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fill.redb");
+        {
+            let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap()))
+                .await
+                .unwrap();
+            s.apply(&[put(b"k", b"v")]).await.unwrap();
+        }
+        let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(s.cache_stats().index_keys, 1);
+        assert_eq!(s.cache_stats().value_entries, 0);
+        s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        let st = s.cache_stats();
+        assert_eq!((st.value_misses, st.value_entries), (1, 1));
+        s.range(b"k", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(s.cache_stats().value_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_drops_the_cached_value() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"a", b"1"), put(b"b", b"2")]).await.unwrap();
+        assert_eq!(s.cache_stats().value_entries, 2);
+        s.apply(&[del_range(b"a", b"")]).await.unwrap();
+        assert_eq!(s.cache_stats().value_entries, 1);
+        let out = s.range(b"a", b"c", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.count, 1);
+        assert_eq!(out.kvs[0].key, b"b");
+    }
+
+    #[tokio::test]
+    async fn limit_and_count_come_from_the_index() {
+        let (_d, s) = open_with_budget(0).await;
+        for i in 0..20u8 {
+            s.apply(&[put(&[b'k', b'a' + i], b"v")]).await.unwrap();
+        }
+        let before = s.cache_stats();
+        let out = s.range(b"k", b"l", 3, 0, false, false).await.unwrap();
+        assert_eq!(out.count, 20);
+        assert!(out.more);
+        assert_eq!(out.kvs.len(), 3);
+        assert_eq!(out.kvs[0].key, b"ka");
+        // A budget of 0 is off: nothing counted, nothing kept.
+        assert_eq!(s.cache_stats().value_misses, before.value_misses);
+        assert_eq!(s.cache_stats().value_entries, 0);
+        let c = s.range(b"k", b"l", 3, 0, false, true).await.unwrap();
+        assert_eq!((c.count, c.more, c.kvs.len()), (20, false, 0));
+        // An end before the start is an empty range, not a panic.
+        let none = s.range(b"z", b"a", 0, 0, false, false).await.unwrap();
+        assert_eq!(none.count, 0);
+    }
+
+    #[tokio::test]
+    async fn the_resident_index_matches_the_disk_after_every_kind_of_write() {
+        let (_d, s) = open_mvcc().await;
+        for i in 0..30u8 {
+            s.apply(&[put(&[b'k', i % 7], &[i])]).await.unwrap();
+        }
+        s.apply(&[del_range(&[b'k', 2], &[b'k', 4])]).await.unwrap();
+        s.txn(
+            &[],
+            &[txn_put(b"t", b"1"), txn_delete(&[b'k', 5], b""), txn_put(b"t", b"2")],
+            &[],
+        )
+        .await
+        .unwrap();
+        let lease = s.apply_lease_grant(0, 60, 0).await.unwrap().id;
+        s.apply(&[Mutation::Put {
+            key: b"leased".to_vec(),
+            value: b"x".to_vec(),
+            lease,
+            ignore_value: false,
+            ignore_lease: false,
+            prev_kv: false,
+        }])
+        .await
+        .unwrap();
+        assert_index_matches_disk(&s).await;
+        s.apply_lease_revoke(lease).await.unwrap();
+        assert_index_matches_disk(&s).await;
+        let cur = s.current_revision().await;
+        s.compact(cur - 3).await.unwrap();
+        assert_index_matches_disk(&s).await;
+        s.compact(cur).await.unwrap();
+        assert_index_matches_disk(&s).await;
+        // And a store reopened over it builds the same index.
+        let reopened = MvccStore::open(s.engine().clone()).await.unwrap();
+        assert_index_matches_disk(&reopened).await;
+        let a = s.range(b"\0", b"\0", 0, 0, false, false).await.unwrap();
+        let b = reopened.range(b"\0", b"\0", 0, 0, false, false).await.unwrap();
+        assert_eq!(a.kvs, b.kvs);
+    }
+
+    #[tokio::test]
+    async fn the_index_loads_in_chunks() {
+        let (_d, s) = open_mvcc().await;
+        let n = INDEX_LOAD_CHUNK * 2 + 7;
+        let muts: Vec<Mutation> = (0..n)
+            .map(|i| put(format!("key-{i:06}").as_bytes(), b"v"))
+            .collect();
+        s.apply(&muts).await.unwrap();
+        let reopened = MvccStore::open(s.engine().clone()).await.unwrap();
+        assert_eq!(reopened.cache_stats().index_keys, n as u64);
+        assert_index_matches_disk(&reopened).await;
+    }
+
+    #[tokio::test]
+    async fn install_tables_reloads_the_index_and_empties_the_cache() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"old")]).await.unwrap();
+        assert_eq!(s.cache_stats().value_entries, 1);
+        // Tables as a snapshot from a member with only `other` in it.
+        let (_d2, src) = open_mvcc().await;
+        src.apply(&[put(b"other", b"v"), put(b"other", b"w")]).await.unwrap();
+        let snap = src.engine().snapshot().await.unwrap();
+        let mut batch = WriteBatch::new();
+        for t in [TABLE_KV, TABLE_IDX, TABLE_META] {
+            batch.delete_range(t, b"", &[0xFFu8; 64]);
+            for (k, v) in snap
+                .range(t, Bound::Unbounded, Bound::Unbounded, 0)
+                .await
+                .unwrap()
+            {
+                batch.put(t, &k, &v);
+            }
+        }
+        s.install_tables(batch).await.unwrap();
+        let st = s.cache_stats();
+        assert_eq!((st.value_entries, st.index_keys), (0, 1));
+        assert_eq!(s.current_revision().await, 1);
+        assert_eq!(s.range(b"k", b"", 0, 0, false, false).await.unwrap().count, 0);
+        let out = s.range(b"other", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(out.kvs[0].value, b"w");
+        assert_index_matches_disk(&s).await;
+    }
+
+    /// Readers racing a writer and compaction, with a cache small enough
+    /// to evict constantly, never see a record that disagrees with its
+    /// revision or a revision above the header (fastetcd#82, #50).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reads_stay_consistent_under_writes_compaction_and_eviction() {
+        let (_d, s) = open_with_budget(16 * 256).await;
+        const KEYS: usize = 25;
+        const WRITES: usize = 1500;
+        let writer = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                for i in 0..WRITES {
+                    // Revision i + 1 carries the value "i + 1", so a reader
+                    // can check any record against its own mod_revision.
+                    let key = format!("k{:02}", i % KEYS);
+                    let value = format!("{}", i + 1).repeat(1 + i % 5);
+                    if i % 97 == 96 {
+                        s.apply(&[del_range(key.as_bytes(), b"")]).await.unwrap();
+                    } else {
+                        s.apply(&[put(key.as_bytes(), value.as_bytes())]).await.unwrap();
+                    }
+                    if i % 50 == 49 {
+                        s.compact(i as i64 - 20).await.unwrap();
+                    }
+                }
+            })
+        };
+        let mut readers = Vec::new();
+        for r in 0..3 {
+            let s = s.clone();
+            readers.push(tokio::spawn(async move {
+                let mut n = 0u64;
+                let mut i = r;
+                while n < 3000 {
+                    i += 7;
+                    let (out, header) = if i % 3 == 0 {
+                        match s.range_with_revision(b"k", b"l", 0, 0, false, false).await {
+                            Ok(x) => x,
+                            Err(e) => panic!("list: {e}"),
+                        }
+                    } else {
+                        let key = format!("k{:02}", i % KEYS);
+                        s.range_with_revision(key.as_bytes(), b"", 0, 0, false, false)
+                            .await
+                            .unwrap()
+                    };
+                    for kv in &out.kvs {
+                        assert!(kv.mod_revision <= header, "record above its header");
+                        let expect = format!("{}", kv.mod_revision);
+                        assert!(
+                            !kv.value.is_empty()
+                                && kv.value.len() % expect.len() == 0
+                                && kv.value.chunks(expect.len()).all(|c| c == expect.as_bytes()),
+                            "value {:?} disagrees with mod_revision {}",
+                            String::from_utf8_lossy(&kv.value),
+                            kv.mod_revision
+                        );
+                    }
+                    n += 1;
+                }
+            }));
+        }
+        writer.await.unwrap();
+        for r in readers {
+            r.await.unwrap();
+        }
+        let st = s.cache_stats();
+        assert!(st.value_evictions > 0, "the cache never evicted: {st:?}");
+        assert!(st.value_bytes <= st.value_budget_bytes);
+        assert_index_matches_disk(&s).await;
     }
 }
