@@ -48,7 +48,8 @@
 //!
 //!   - raft WAL (#85): `fastetcd_wal_fsyncs_total`,
 //!     `fastetcd_wal_fsync_seconds_total`, `fastetcd_wal_bytes_appended_total`
-//!     (counters), `fastetcd_wal_segments`, `fastetcd_wal_cached_bytes`
+//!     (counters), `fastetcd_wal_segments`, `fastetcd_wal_cached_bytes`,
+//!     `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`
 //!     (gauges); background checkpoints of the data file:
 //!     `fastetcd_checkpoints_total`, `fastetcd_checkpoint_seconds_total`,
 //!     `fastetcd_checkpoint_failures_total` (counters),
@@ -613,6 +614,8 @@ impl CacheMetrics {
 pub struct WalMetrics {
     fsyncs: Counter,
     fsync_seconds: Counter<f64, AtomicU64>,
+    fsync_max_seconds: Gauge<f64, AtomicU64>,
+    checkpoint_max_seconds: Gauge<f64, AtomicU64>,
     bytes_appended: Counter,
     segments: Gauge,
     cached_bytes: Gauge,
@@ -627,6 +630,8 @@ impl WalMetrics {
         Self {
             fsyncs: Counter::default(),
             fsync_seconds: Counter::default(),
+            fsync_max_seconds: Gauge::default(),
+            checkpoint_max_seconds: Gauge::default(),
             bytes_appended: Counter::default(),
             segments: Gauge::default(),
             cached_bytes: Gauge::default(),
@@ -647,6 +652,16 @@ impl WalMetrics {
             "fastetcd_wal_fsync_seconds",
             "Time spent in raft WAL fdatasyncs",
             self.fsync_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_wal_fsync_max_seconds",
+            "Longest raft WAL fdatasync since the process started",
+            self.fsync_max_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_max_seconds",
+            "Longest background checkpoint of the data file since the process started",
+            self.checkpoint_max_seconds.clone(),
         );
         reg.register(
             "fastetcd_wal_bytes_appended",
@@ -685,6 +700,8 @@ impl WalMetrics {
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         catch_up(&self.fsyncs, load(&s.fsyncs));
         catch_up_seconds(&self.fsync_seconds, load(&s.fsync_nanos));
+        self.fsync_max_seconds.set(load(&s.fsync_max_nanos) as f64 / 1e9);
+        self.checkpoint_max_seconds.set(load(&s.checkpoint_max_nanos) as f64 / 1e9);
         catch_up(&self.bytes_appended, load(&s.bytes_appended));
         self.segments.set(load(&s.segments) as i64);
         self.cached_bytes.set(load(&s.cached_bytes) as i64);

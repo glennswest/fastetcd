@@ -11,7 +11,9 @@
 # `fastetcd-bench --mode read-under-load`: 40 clients looping GET + CAS
 # Txn, a prefix Range every fifth loop, and a sequential probe of 200
 # linearizable then 200 serializable Ranges of one key. Run it through
-# sc-build: `sc-build 'tests/read_latency.sh v1.8.0'`.
+# sc-build: `sc-build 'tests/read_latency.sh v1.8.0'`. METRICS=1 also
+# serves /metrics and prints each member's WAL and checkpoint lines
+# after the run (#85).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -36,7 +38,7 @@ start_members() {
         local args=(--data-dir "$dir/data$i"
             --listen-client-urls "http://127.0.0.1:$((23790 + i))"
             --listen-peer-urls "http://127.0.0.1:$((23800 + i))"
-            --listen-metrics-url "")
+            --listen-metrics-url "$([ "${METRICS:-0}" = 1 ] && echo "127.0.0.1:$((23810 + i))" || true)")
         if [ "$MEMBERS" -gt 1 ]; then
             args+=(--name "n$i" --initial-cluster "$cluster"
                 --initial-advertise-peer-urls "http://127.0.0.1:$((23800 + i))"
@@ -67,6 +69,13 @@ run() {
         "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
             --conns 40 --duration-secs 20 --probes 200
     done
+    if [ "${METRICS:-0}" = 1 ]; then
+        for i in $(seq "$MEMBERS"); do
+            echo "-- metrics of member $i"
+            curl -sf "http://127.0.0.1:$((23810 + i))/metrics" |
+                grep -E '^(fastetcd_wal|fastetcd_checkpoint)' || true
+        done
+    fi
     local pid
     for pid in $pids; do
         if ! kill "$pid" 2>/dev/null; then

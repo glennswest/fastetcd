@@ -94,11 +94,15 @@ impl Default for WalLogOptions {
 pub struct WalStats {
     pub fsyncs: AtomicU64,
     pub fsync_nanos: AtomicU64,
+    /// Longest single fdatasync since the process started.
+    pub fsync_max_nanos: AtomicU64,
     pub bytes_appended: AtomicU64,
     pub segments: AtomicU64,
     pub cached_bytes: AtomicU64,
     pub checkpoints: AtomicU64,
     pub checkpoint_nanos: AtomicU64,
+    /// Longest single checkpoint since the process started.
+    pub checkpoint_max_nanos: AtomicU64,
     pub checkpoint_failures: AtomicU64,
     /// `index + 1` of the last applied entry a checkpoint made durable
     /// in the data file (0 = none yet in this process).
@@ -247,10 +251,10 @@ fn writer(
                 tracing::error!(error = %e, "raft WAL fdatasync failed");
                 failed = Some((e.kind(), format!("raft WAL fdatasync: {e}")));
             }
+            let took = t.elapsed().as_nanos() as u64;
             stats.fsyncs.fetch_add(1, Ordering::Relaxed);
-            stats
-                .fsync_nanos
-                .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            stats.fsync_nanos.fetch_add(took, Ordering::Relaxed);
+            stats.fsync_max_nanos.fetch_max(took, Ordering::Relaxed);
         }
         if failed.is_none() {
             if let Some(d) = drop_upto {
@@ -843,11 +847,10 @@ pub fn spawn_checkpointer(
                 continue;
             }
             durable = Some(target);
+            let took = t.elapsed().as_nanos() as u64;
             store.stats.checkpoints.fetch_add(1, Ordering::Relaxed);
-            store
-                .stats
-                .checkpoint_nanos
-                .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            store.stats.checkpoint_nanos.fetch_add(took, Ordering::Relaxed);
+            store.stats.checkpoint_max_nanos.fetch_max(took, Ordering::Relaxed);
             store.stats.durable_applied.store(target, Ordering::Relaxed);
             // openraft purges only applied entries, so a purge seen
             // before this checkpoint's applied index is covered by it.
