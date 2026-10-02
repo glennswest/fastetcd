@@ -14,7 +14,7 @@ use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_proto::fastetcd_raft::raft_peer_server::RaftPeerServer;
-use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::wal_log_store::WalLogStore;
 use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_server::tls::{check_peer_url_schemes, Port, TlsFiles};
 use fastetcd_raft::types::{NodeId, TypeConfig};
@@ -355,6 +355,33 @@ struct Args {
         default_value_t = 256 * 1024 * 1024
     )]
     engine_cache_bytes: u64,
+
+    /// Size each raft WAL segment is preallocated to (fastetcd#85). The
+    /// raft log is appended to these files in `<data-dir>/wal/`; a
+    /// client's write waits for one sequential fsync of them.
+    #[arg(
+        long,
+        env = "FASTETCD_WAL_SEGMENT_BYTES",
+        default_value_t = fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES
+    )]
+    wal_segment_bytes: u64,
+
+    /// Recent raft log entries kept in RAM, in bytes, so replicating to
+    /// a follower rarely reads the WAL back from disk.
+    #[arg(long, env = "FASTETCD_WAL_CACHE_BYTES", default_value_t = 64 * 1024 * 1024)]
+    wal_cache_bytes: u64,
+
+    /// The data file is made durable (one redb commit) at most this many
+    /// milliseconds after an entry is applied. A crash loses at most
+    /// this much applied state from the data file, and the WAL replays
+    /// it on restart (fastetcd#85).
+    #[arg(long, env = "FASTETCD_WAL_CHECKPOINT_INTERVAL_MS", default_value_t = 100)]
+    wal_checkpoint_interval_ms: u64,
+
+    /// ...or as soon as this many raft entries were applied since the
+    /// last checkpoint, whichever comes first.
+    #[arg(long, env = "FASTETCD_WAL_CHECKPOINT_ENTRIES", default_value_t = 10_000)]
+    wal_checkpoint_entries: u64,
 
     /// Directory for periodic backups of the whole store, on a
     /// **different volume** from `--data-dir`: a device that loses writes
@@ -859,8 +886,21 @@ async fn main() -> anyhow::Result<()> {
         args.max_snapshots,
     )
     .await?;
-    let mut log = KvLogStore::new(engine);
+    // The raft log: a sequential WAL in `<data-dir>/wal/`, built from
+    // the data file's own log tables on the first start of this version
+    // (fastetcd#85).
+    let mut log = WalLogStore::open(
+        &fastetcd_raft::wal_log_store::wal_dir(&args.data_dir),
+        engine,
+        fastetcd_raft::wal_log_store::WalLogOptions {
+            segment_bytes: args.wal_segment_bytes,
+            cache_bytes: args.wal_cache_bytes as usize,
+        },
+    )
+    .await?;
     let committed_index = log.committed_index();
+    let wal_stats = log.stats();
+    let checkpoint_log = log.clone();
 
     // Snapshot + purge is what bounds the raft log: openraft snapshots
     // every `snapshot_count` applied entries and then purges the log,
@@ -996,10 +1036,19 @@ async fn main() -> anyhow::Result<()> {
     let peer_mvcc = sm.mvcc().clone();
 
     // From here on the state machine's applies commit without their own
-    // fsync: the raft log, durable in the same file, replays whatever a
-    // crash loses, and the next log append persists them (#71). Startup
-    // recovery above wrote durably.
+    // fsync (#71): the checkpointer makes the data file durable in the
+    // background, and the WAL replays whatever a crash loses (#85).
+    // Startup recovery above wrote durably.
     sm.mvcc().defer_apply_sync();
+    let _checkpointer = fastetcd_raft::wal_log_store::spawn_checkpointer(
+        checkpoint_log,
+        sm.applied_index(),
+        data_file.clone(),
+        fastetcd_raft::wal_log_store::CheckpointConfig {
+            interval: std::time::Duration::from_millis(args.wal_checkpoint_interval_ms.max(1)),
+            entries: args.wal_checkpoint_entries.max(1),
+        },
+    );
     let log_progress = log.progress();
     let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
@@ -1115,6 +1164,7 @@ async fn main() -> anyhow::Result<()> {
         .with_recovery(recovery_alarm)
         .with_client_cert_auth(args.client_cert_auth)
         .with_committed_index(committed_index)
+        .with_wal_stats(wal_stats)
         // Linearizable reads and batched writes without queueing in
         // openraft's RaftCore, on one member (#71) or several (#75).
         .with_peer_read_index_and_batching(log_progress.clone()),

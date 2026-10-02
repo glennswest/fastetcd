@@ -51,6 +51,8 @@ pub struct ServerState {
     /// when the embedding did not provide it; `/metrics` then reports
     /// the applied index, which the committed index is never below.
     pub committed_index: Option<Arc<AtomicU64>>,
+    /// The raft WAL's counters, for `/metrics` (fastetcd#85).
+    pub wal: Option<Arc<fastetcd_raft::wal_log_store::WalStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
     /// (fastetcd#71). `None`: every read barrier is openraft's.
     pub read_index: Option<fastetcd_raft::LocalReadIndex>,
@@ -81,13 +83,20 @@ impl ServerState {
             recovery: Arc::new(RecoveryAlarm::default()),
             traffic: Arc::new(Traffic::default()),
             committed_index: None,
+            wal: None,
             read_index: None,
             proposer: None,
         }
     }
 
+    /// Report the raft WAL's counters on `/metrics` (fastetcd#85).
+    pub fn with_wal_stats(mut self, stats: Arc<fastetcd_raft::wal_log_store::WalStats>) -> Self {
+        self.wal = Some(stats);
+        self
+    }
+
     /// Report the log store's committed index on `/metrics`
-    /// (`KvLogStore::committed_index`).
+    /// (`WalLogStore::committed_index`).
     pub fn with_committed_index(mut self, committed: Arc<AtomicU64>) -> Self {
         self.committed_index = Some(committed);
         self
@@ -95,7 +104,7 @@ impl ServerState {
 
     /// Let a sole-voter leader serve linearizable reads from its own
     /// log and state machine progress (fastetcd#71): `progress` from
-    /// the node's `KvLogStore`, and its state machine's applied index.
+    /// the node's `WalLogStore`, and its state machine's applied index.
     pub fn with_local_read_index(mut self, progress: fastetcd_raft::kv_log_store::LogProgress) -> Self {
         self.read_index = Some(fastetcd_raft::LocalReadIndex::new(
             progress,

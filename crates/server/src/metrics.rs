@@ -46,6 +46,14 @@
 //!     (histogram): the store's time for each single-key Range, `hit` when
 //!     it read nothing from the engine
 //!
+//!   - raft WAL (#85): `fastetcd_wal_fsyncs_total`,
+//!     `fastetcd_wal_fsync_seconds_total`, `fastetcd_wal_bytes_appended_total`
+//!     (counters), `fastetcd_wal_segments`, `fastetcd_wal_cached_bytes`
+//!     (gauges); background checkpoints of the data file:
+//!     `fastetcd_checkpoints_total`, `fastetcd_checkpoint_seconds_total`,
+//!     `fastetcd_checkpoint_failures_total` (counters),
+//!     `fastetcd_checkpoint_durable_applied_index` (gauge)
+//!
 //! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
 //! when the endpoint starts (fastetcd#29; see that module):
 //!   - `grpc_server_started_total` / `grpc_server_handled_total`
@@ -115,6 +123,7 @@ pub struct Metrics {
     pub proposals_batched_total: Counter,
     pub proposals_single_total: Counter,
     pub cache: CacheMetrics,
+    pub wal: WalMetrics,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -182,6 +191,7 @@ impl Metrics {
             proposals_batched_total: proposals_batched_total.clone(),
             proposals_single_total: proposals_single_total.clone(),
             cache: CacheMetrics::new(),
+            wal: WalMetrics::new(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -347,6 +357,7 @@ impl Metrics {
                 proposals_single_total,
             );
             m.cache.register(&mut reg);
+            m.wal.register(&mut reg);
         }
         m
     }
@@ -434,6 +445,9 @@ impl Metrics {
         catch_up(&self.watch_lag_cancels_total, crate::watch::lag_cancel_count());
         catch_up(&self.recovered_total, state.recovery.recoveries());
         self.cache.refresh(state.sm.mvcc().cache_stats());
+        if let Some(w) = &state.wal {
+            self.wal.refresh(w);
+        }
         if let Some(r) = &state.read_index {
             let s = r.stats();
             for (path, n) in [("sole_voter", &s.sole_voter), ("quorum", &s.quorum), ("raft", &s.raft)] {
@@ -592,6 +606,101 @@ impl CacheMetrics {
             let h = if from_ram { &hit } else { &miss };
             h.observe(took.as_secs_f64());
         })
+    }
+}
+
+/// The raft WAL and the data file's background checkpoints (#85).
+pub struct WalMetrics {
+    fsyncs: Counter,
+    fsync_seconds: Counter<f64, AtomicU64>,
+    bytes_appended: Counter,
+    segments: Gauge,
+    cached_bytes: Gauge,
+    checkpoints: Counter,
+    checkpoint_seconds: Counter<f64, AtomicU64>,
+    checkpoint_failures: Counter,
+    durable_applied: Gauge,
+}
+
+impl WalMetrics {
+    fn new() -> Self {
+        Self {
+            fsyncs: Counter::default(),
+            fsync_seconds: Counter::default(),
+            bytes_appended: Counter::default(),
+            segments: Gauge::default(),
+            cached_bytes: Gauge::default(),
+            checkpoints: Counter::default(),
+            checkpoint_seconds: Counter::default(),
+            checkpoint_failures: Counter::default(),
+            durable_applied: Gauge::default(),
+        }
+    }
+
+    fn register(&self, reg: &mut Registry) {
+        reg.register(
+            "fastetcd_wal_fsyncs",
+            "fdatasyncs of the raft WAL (each covers every write queued meanwhile)",
+            self.fsyncs.clone(),
+        );
+        reg.register(
+            "fastetcd_wal_fsync_seconds",
+            "Time spent in raft WAL fdatasyncs",
+            self.fsync_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_wal_bytes_appended",
+            "Bytes appended to the raft WAL",
+            self.bytes_appended.clone(),
+        );
+        reg.register("fastetcd_wal_segments", "Raft WAL segment files", self.segments.clone());
+        reg.register(
+            "fastetcd_wal_cached_bytes",
+            "Recent raft log entries held in RAM (--wal-cache-bytes)",
+            self.cached_bytes.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoints",
+            "Durable commits of the data file made in the background",
+            self.checkpoints.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_seconds",
+            "Time spent in background checkpoints of the data file",
+            self.checkpoint_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_failures",
+            "Background checkpoints of the data file that failed",
+            self.checkpoint_failures.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_durable_applied_index",
+            "Applied raft index (+1) the last checkpoint made durable in the data file",
+            self.durable_applied.clone(),
+        );
+    }
+
+    fn refresh(&self, s: &fastetcd_raft::wal_log_store::WalStats) {
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        catch_up(&self.fsyncs, load(&s.fsyncs));
+        catch_up_seconds(&self.fsync_seconds, load(&s.fsync_nanos));
+        catch_up(&self.bytes_appended, load(&s.bytes_appended));
+        self.segments.set(load(&s.segments) as i64);
+        self.cached_bytes.set(load(&s.cached_bytes) as i64);
+        catch_up(&self.checkpoints, load(&s.checkpoints));
+        catch_up_seconds(&self.checkpoint_seconds, load(&s.checkpoint_nanos));
+        catch_up(&self.checkpoint_failures, load(&s.checkpoint_failures));
+        self.durable_applied.set(load(&s.durable_applied) as i64);
+    }
+}
+
+/// [`catch_up`] for a seconds counter kept elsewhere in nanoseconds.
+fn catch_up_seconds(counter: &Counter<f64, AtomicU64>, total_nanos: u64) {
+    let total = total_nanos as f64 / 1e9;
+    let counted = counter.get();
+    if total > counted {
+        counter.inc_by(total - counted);
     }
 }
 

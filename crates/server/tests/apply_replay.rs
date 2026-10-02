@@ -1,8 +1,8 @@
 //! Applies are not fsync'd on their own; a crash replays them from the
-//! raft log (fastetcd#71).
+//! raft log (fastetcd#71), which since #85 is the WAL in `wal/`.
 //!
 //! The state machine commits each apply without an fsync: the next
-//! durable commit (the next log append) persists it. Kill the real
+//! background checkpoint of the data file persists it. Kill the real
 //! binary with SIGKILL straight after a run of acknowledged puts, check
 //! the data file really did lose the last applies (so the test
 //! exercises the replay), then restart it and read every key back.
@@ -74,8 +74,8 @@ async fn acknowledged_puts_survive_sigkill_through_log_replay() {
     child.kill().await.unwrap();
     child.wait().await.unwrap();
 
-    // What reached the disk: the last applies were not followed by a
-    // durable commit, so they are not in the file.
+    // What reached the data file: the last applies were not followed by
+    // a checkpoint, so they are not in it; they are in the WAL.
     let on_disk = {
         let engine = RedbEngine::open(dir.path().join("fastetcd.redb")).unwrap();
         MvccStore::open(std::sync::Arc::new(engine)).await.unwrap().current_revision().await
@@ -86,7 +86,7 @@ async fn acknowledged_puts_survive_sigkill_through_log_replay() {
         "every apply was on disk ({on_disk}); this test no longer exercises the replay"
     );
 
-    // Restart: the log replays the lost applies.
+    // Restart: the WAL replays the lost applies.
     let (_child, mut kv) = start(dir.path()).await;
     let all = kv
         .range(RangeRequest {

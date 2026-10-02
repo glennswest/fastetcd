@@ -81,6 +81,12 @@ pub const COW_OVERHEAD_PCT: u64 = 160;
 /// middle of what a Kubernetes workload produces.
 pub const AVG_LOG_ENTRY_BYTES: u64 = 2 * 1024;
 
+/// The raft log lives in preallocated WAL segments (fastetcd#85): the
+/// one being written is full size from the start, and the one before it
+/// is kept until a checkpoint covers it. Sized at the default
+/// `--wal-segment-bytes`.
+pub const WAL_SLACK_BYTES: u64 = 2 * fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES;
+
 /// The volume must have room for the store to sit below its high-water
 /// mark, or reclaim runs continuously and never gets ahead.
 pub const HIGH_WATER_PCT: u64 = 80;
@@ -123,7 +129,7 @@ pub struct Estimate {
     pub db_bytes: u64,
     /// Retained raft snapshots — full serialized copies.
     pub snapshot_bytes: u64,
-    /// The raft log between snapshots.
+    /// The raft log between snapshots, in its WAL segments.
     pub log_bytes: u64,
     /// One retained upgrade safety backup.
     pub backup_bytes: u64,
@@ -156,7 +162,10 @@ pub fn estimate(shape: ClusterShape) -> Estimate {
     // A snapshot is the serialized state, so it pays no engine overhead
     // — but there is one per retained snapshot.
     let snapshot_bytes = logical.saturating_mul(shape.max_snapshots.max(1));
-    let log_bytes = shape.snapshot_count.saturating_mul(AVG_LOG_ENTRY_BYTES);
+    let log_bytes = shape
+        .snapshot_count
+        .saturating_mul(AVG_LOG_ENTRY_BYTES)
+        .saturating_add(WAL_SLACK_BYTES);
     let backup_bytes = db_bytes;
 
     let base = db_bytes
@@ -251,10 +260,11 @@ pub fn report(shape: ClusterShape) -> String {
         human(e.snapshot_bytes)
     ));
     out.push_str(&format!(
-        "  raft log                 +{:>10}   ({} entries x {})\n",
+        "  raft log (WAL)           +{:>10}   ({} entries x {}, + {} of preallocated segments)\n",
         human(e.log_bytes),
         shape.snapshot_count,
-        human(AVG_LOG_ENTRY_BYTES)
+        human(AVG_LOG_ENTRY_BYTES),
+        human(WAL_SLACK_BYTES)
     ));
     out.push_str(&format!(
         "  upgrade backup           +{:>10}   (another full copy, after a version change)\n",

@@ -25,7 +25,7 @@ use fastetcd_proto::etcdserverpb::kv_client::KvClient;
 use fastetcd_proto::etcdserverpb::kv_server::KvServer;
 use fastetcd_proto::fastetcd_raft as rpb;
 use fastetcd_proto::fastetcd_raft::raft_peer_server::{RaftPeer, RaftPeerServer};
-use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
 use fastetcd_raft::network::{GrpcNetworkFactory, PeerEndpoints, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
@@ -86,8 +86,17 @@ async fn start_node(id: NodeId, older: bool) -> Node {
         .await
         .unwrap();
     mvcc.defer_apply_sync();
-    let log = KvLogStore::new(engine);
+    // The raft log in a WAL, as the server runs it (#85).
+    let log = WalLogStore::open(&wal_dir(dir.path()), engine, WalLogOptions::default())
+        .await
+        .unwrap();
     let progress = log.progress();
+    fastetcd_raft::wal_log_store::spawn_checkpointer(
+        log.clone(),
+        sm.applied_index(),
+        dir.path().join("data.redb"),
+        Default::default(),
+    );
     let config = Arc::new(
         Config {
             // Generous: the build box runs several jobs at once (#44).

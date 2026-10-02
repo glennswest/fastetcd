@@ -11,16 +11,18 @@
 //!   default). The newest backup in `--backup-dir` whose checksum
 //!   verifies is written into a new data file; only then is the corrupt
 //!   file moved aside as `fastetcd.redb.corrupt.<unix-ms>` (never
-//!   deleted), with the retained raft snapshots beside it, and the
+//!   deleted), with the retained raft snapshots and the raft WAL beside
+//!   it (both may be newer than the backup), and the
 //!   restored file put in its place. The recovery is recorded in the
 //!   store, so the CORRUPT alarm and the metrics report it until an
 //!   operator disarms it. Everything written after that backup is lost,
 //!   and the alarm says how much.
 //! - **A member of a multi-node cluster refuses to start.** Its raft
-//!   vote was in the corrupt file. Restarting without it (empty, or from
-//!   a backup holding an older vote) could let it vote twice in one term
-//!   and elect two leaders. The corrupt file is left in place and the
-//!   error explains how to replace the member.
+//!   log and vote (in `wal/` since #85) describe the state the corrupt
+//!   file held; restarting from an older backup, or without them, could
+//!   let it vote twice in one term and elect two leaders. The corrupt
+//!   file is left in place and the error explains how to replace the
+//!   member.
 //! - **`--on-corruption=refuse`**, no `--backup-dir`, or no usable backup:
 //!   refuse, leaving the file untouched.
 //!
@@ -200,7 +202,7 @@ pub async fn open_or_recover(
     // restored file is complete.
     std::fs::rename(data_file, &corrupt_file)?;
     backup::sync_dir(data_dir);
-    move_snapshots_aside(data_dir, now)?;
+    move_raft_state_aside(data_dir, &format!("corrupt.{now}"))?;
     std::fs::rename(&restored, data_file)?;
     backup::sync_dir(data_dir);
     let engine = RedbEngine::open_with_cache(data_file, opts.engine_cache_bytes)?;
@@ -223,14 +225,19 @@ fn restored_path(data_file: &Path) -> PathBuf {
     data_file.with_extension("redb.restored")
 }
 
-/// The retained raft snapshots may be newer than the backup. Left in
-/// place, openraft would take the restored store to be behind a snapshot
-/// it has; they belong with the corrupt file.
-fn move_snapshots_aside(data_dir: &Path, now: u64) -> std::io::Result<()> {
-    let snapshots = data_dir.join("snapshots");
-    if snapshots.exists() {
-        std::fs::rename(&snapshots, data_dir.join(format!("snapshots.corrupt.{now}")))?;
-        backup::sync_dir(data_dir);
+/// The retained raft snapshots and the raft WAL may be newer than the
+/// backup. Left in place, openraft would take the restored store to be
+/// behind a snapshot it has, or replay a log purged past the backup;
+/// they belong with the corrupt file. The next start builds a new WAL
+/// from the log state the backup carries (fastetcd#85).
+/// Each is renamed `<name>.<tag>`.
+pub fn move_raft_state_aside(data_dir: &Path, tag: &str) -> std::io::Result<()> {
+    for name in ["snapshots", "wal"] {
+        let dir = data_dir.join(name);
+        if dir.exists() {
+            std::fs::rename(&dir, data_dir.join(format!("{name}.{tag}")))?;
+            backup::sync_dir(data_dir);
+        }
     }
     Ok(())
 }
@@ -253,7 +260,7 @@ pub fn finish_interrupted_restore(data_file: &Path) -> anyhow::Result<()> {
         restored = %restored.display(),
         "finishing a restore from backup that was interrupted"
     );
-    move_snapshots_aside(data_dir, unix_ms())?;
+    move_raft_state_aside(data_dir, &format!("corrupt.{}", unix_ms()))?;
     std::fs::rename(&restored, data_file)?;
     backup::sync_dir(data_dir);
     Ok(())

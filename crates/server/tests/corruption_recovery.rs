@@ -124,6 +124,7 @@ async fn lone_member_then_corruption(d: &Dirs) -> u64 {
         put_keys(&mvcc, 50, 70).await;
     }
     std::fs::create_dir_all(d.data_dir.join("snapshots")).unwrap();
+    std::fs::create_dir_all(d.data_dir.join("wal")).unwrap();
     zero_the_roots(&d.data_file);
     cluster_id
 }
@@ -154,13 +155,17 @@ async fn a_lone_member_restores_its_newest_backup_and_raises_the_alarm() {
     assert_eq!(mvcc.current_revision().await, 50);
     assert_eq!(visible(&mvcc).await, 50, "everything up to the backup is back");
 
-    // The corrupt file is kept, never deleted; the snapshots went with it.
+    // The corrupt file is kept, never deleted; the snapshots and the
+    // raft WAL went with it (#85).
     assert!(Path::new(&record.corrupt_file).exists());
     assert!(!d.data_dir.join("snapshots").exists());
-    assert!(std::fs::read_dir(&d.data_dir)
-        .unwrap()
-        .flatten()
-        .any(|e| e.file_name().to_string_lossy().starts_with("snapshots.corrupt.")));
+    assert!(!d.data_dir.join("wal").exists());
+    for moved in ["snapshots.corrupt.", "wal.corrupt."] {
+        assert!(std::fs::read_dir(&d.data_dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(moved)));
+    }
 
     // The node-local cluster id came back with the store.
     assert_eq!(fastetcd_server::cluster_id::read(&engine).await.unwrap(), Some(cluster_id));

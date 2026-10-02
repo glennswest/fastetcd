@@ -20,7 +20,7 @@ use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
 use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer;
 use fastetcd_proto::etcdserverpb::watch_server::WatchServer;
 use fastetcd_proto::fastetcd_raft::raft_peer_server::RaftPeerServer;
-use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
 use fastetcd_raft::network::{GrpcNetworkFactory, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
@@ -48,7 +48,10 @@ async fn start_node(
     let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&path).unwrap());
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
     let sm = FastetcdStateMachine::open(mvcc, dir.path().join("snapshots")).await.unwrap();
-    let log = KvLogStore::new(engine);
+    // The raft log in a WAL, as the server runs it (#85).
+    let log = WalLogStore::open(&wal_dir(dir.path()), engine, WalLogOptions::default())
+        .await
+        .unwrap();
 
     let config = Arc::new(
         Config {

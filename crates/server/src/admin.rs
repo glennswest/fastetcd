@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use openraft::storage::{RaftLogReader, RaftLogStorage};
 use openraft::{BasicNode, EntryPayload, LogId, Membership, StoredMembership};
 
-use fastetcd_raft::kv_log_store::KvLogStore;
+use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
+use fastetcd_raft::TypeConfig;
 use fastetcd_raft::types::NodeId;
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_storage::mvcc::store::FORMAT_VERSION;
@@ -54,9 +55,9 @@ impl RecoveryReport {
 /// raft membership — preferring the retained log, falling back to the
 /// configured cluster — if it is empty (#11), and stamp the format
 /// version. Shared by server startup and `fsck --repair`.
-pub async fn recover_data_dir(
+pub async fn recover_data_dir<LS: RaftLogStorage<TypeConfig>>(
     sm: &FastetcdStateMachine,
-    log: &mut KvLogStore,
+    log: &mut LS,
     all_members: &BTreeMap<NodeId, BasicNode>,
     node_id: NodeId,
     force_new_cluster: bool,
@@ -366,6 +367,10 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
     } else {
         std::fs::create_dir_all(data_dir)?;
     }
+    // The raft WAL and snapshots belong to the data being replaced: a
+    // log purged past the backup could not be replayed onto it. The
+    // next start builds a new WAL from the backup's log state (#85).
+    crate::recovery::move_raft_state_aside(data_dir, &format!("replaced-{}", unix_secs()))?;
     if periodic {
         crate::backup::restore_to(backup, &dst).await?;
         println!(
@@ -412,7 +417,20 @@ pub async fn cmd_fsck(
 
     let mvcc = MvccStore::open(engine.clone()).await?;
     let sm = FastetcdStateMachine::open(mvcc.clone(), data_dir.join("snapshots")).await?;
-    let mut log = KvLogStore::new(engine);
+    // The raft log (fastetcd#85). Opening it builds it from the data
+    // file if this version has not run here yet, as a start would.
+    let mut log = match WalLogStore::open(&wal_dir(data_dir), engine, WalLogOptions::default()).await {
+        Ok(log) => {
+            println!("ok    raft WAL: {} opens", wal_dir(data_dir).display());
+            log
+        }
+        Err(e) => {
+            println!("FAIL  raft WAL: cannot open {}: {e}", wal_dir(data_dir).display());
+            println!("      a damaged segment that is not the last one is not repairable here;");
+            println!("      replace the member (member remove / add) or restore from a backup.");
+            return Ok(2);
+        }
+    };
 
     let mut problems = 0u32;
     let current_rev = mvcc.current_revision().await;
