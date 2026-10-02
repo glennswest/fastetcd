@@ -10,7 +10,11 @@
 //! - [`snapshot_store`] — retained on-disk snapshots with roll-off.
 //! - [`snapshot_data`] — `SnapshotFile`, the file-backed snapshot body.
 //! - [`log_store`] — `RaftLogStorage` impl over an in-memory map (tests).
-//! - [`kv_log_store`] — the persistent `RaftLogStorage` the server runs.
+//! - [`kv_log_store`] — `RaftLogStorage` over redb tables (the log
+//!   before #85; tests, and the upgrade source).
+//! - [`wal_log_store`] — the persistent `RaftLogStorage` the server
+//!   runs: a sequential WAL, plus the checkpointer that makes redb
+//!   durable in the background (#85).
 //! - [`read_index`] — the read barrier in front of linearizable reads.
 //! - [`proposer`] — batched proposals (group commit).
 
@@ -24,6 +28,7 @@ pub mod snapshot_data;
 pub mod snapshot_store;
 pub mod state_machine;
 pub mod types;
+pub mod wal_log_store;
 
 pub use network::{
     auth_status, dial_peer, empty_peers, AuthSyncError, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,

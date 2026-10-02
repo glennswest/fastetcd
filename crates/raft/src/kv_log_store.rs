@@ -36,12 +36,12 @@ use fastetcd_storage::{KvStore, WriteBatch, WriteOptions};
 
 use crate::types::{NodeId, TypeConfig};
 
-const TABLE_LOG: &str = "raft_log";
-const TABLE_META: &str = "raft_meta";
+pub(crate) const TABLE_LOG: &str = "raft_log";
+pub(crate) const TABLE_META: &str = "raft_meta";
 
-const META_VOTE: &[u8] = b"vote";
-const META_COMMITTED: &[u8] = b"committed";
-const META_LAST_PURGED: &[u8] = b"last_purged_log_id";
+pub(crate) const META_VOTE: &[u8] = b"vote";
+pub(crate) const META_COMMITTED: &[u8] = b"committed";
+pub(crate) const META_LAST_PURGED: &[u8] = b"last_purged_log_id";
 
 /// Persistent Raft log storage. Cheaply clonable; the inner state is
 /// an `Arc<dyn KvStore>`.
@@ -94,7 +94,7 @@ impl LogProgress {
         (t == term && i > 0).then_some(i)
     }
 
-    fn note_vote(&self, vote: &Vote<NodeId>) {
+    pub(crate) fn note_vote(&self, vote: &Vote<NodeId>) {
         self.vote_term.fetch_max(vote.leader_id.term, Ordering::AcqRel);
     }
 }
