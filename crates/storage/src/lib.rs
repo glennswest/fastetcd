@@ -18,6 +18,9 @@
 pub mod fs_space;
 pub mod kvstore;
 pub mod mvcc;
+/// The raft log's sequential write-ahead log (fastetcd#85).
+#[cfg(unix)]
+pub mod raft_wal;
 
 #[cfg(feature = "redb-engine")]
 pub mod redb_engine;
