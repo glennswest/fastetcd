@@ -10,7 +10,18 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.10.0`** — Multi-member reads off RaftCore, and group commit (#75).
+**`1.11.0`** — A GET of a hot key reads nothing from disk (#82). Every
+key's index is resident in RAM, as etcd's treeIndex (loaded from
+`mvcc_idx` at open, changed only after the engine commit under the
+write-state lock), and the latest record of recently used keys sits in
+a sharded LRU bounded by `--value-cache-bytes` (default min(128 MiB, 5%
+of memory)); an entry answers only at the exact revision the index
+names. `crates/storage/src/mvcc/cache.rs`. `--engine-cache-bytes` sets
+redb's page cache (256 MiB). Snapshot install goes through
+`MvccStore::install_tables`. The leader's lease precheck no longer holds
+the write lock. Docs: `docs/03-deploy.md` § Memory.
+
+Previous: **`1.10.0`** — Multi-member reads off RaftCore, and group commit (#75).
 A leader with other voters confirms leadership itself (peer RPC
 `ConfirmLeader`, answered from each member's last saved vote term; a
 quorum per joint config; shared rounds) instead of openraft's

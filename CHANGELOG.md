@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.11.0] — 2026-10-02
+
 ### 2026-10-02 — a GET of a hot key reads nothing from disk (#82, P1)
 - **perf:** Every key's index is resident in RAM, as etcd's `treeIndex`
   is: loaded from `mvcc_idx` at open (in chunks), changed only after the
@@ -28,6 +30,11 @@
   the revision counters (and now the index) under the store's write
   lock (`MvccStore::install_tables`); before, a read could run between
   the commit and the reload and see new data at the old revision.
+- **perf:** The leader's lease precheck (#19) no longer holds the
+  store's write lock while it evaluates a Txn's compares, and skips them
+  when neither branch names a lease. Holding it queued every CAS Txn with
+  the apply loop (found benchmarking this change: writes -15%, 4-6 s
+  stalls).
 - No change to the data file or the wire: any version opens the file.
 - **docs:** `docs/03-deploy.md` § Memory, `docs/01-configuration.md`
   § Memory, README.
