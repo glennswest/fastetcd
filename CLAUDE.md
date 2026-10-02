@@ -1242,7 +1242,7 @@ Tracked live in the Claude task system. Snapshot of the order:
 - **Compaction-correctness is non-negotiable.** Revision history truncation
   must coordinate with watchers and raft log compaction.
 
-38. **Write-through RAM cache: resident key index + byte-bounded value cache (#82, P1) — in progress.**
+38. **Write-through RAM cache: resident key index + byte-bounded value cache (#82, P1) — done, shipped in v1.11.0.**
     A single-object GET walked redb for the `KeyIndex` and then the
     record; on a spinning disk (X9, ublk) a cold page is a seek, so
     apiserver GETs took 0.2–0.55 s. etcd keeps every key's index in RAM
@@ -1274,12 +1274,26 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Metrics: value cache hits/misses/evictions/bytes/entries/budget,
       index keys/bytes, `fastetcd_mvcc_get_duration_seconds{cache}`.
     Work items:
-    - [ ] cache.rs (index + LRU) with unit tests.
-    - [ ] MvccStore wiring (open, range, txn, apply, compact, bulk load,
+    - [x] cache.rs (index + LRU) with unit tests.
+    - [x] MvccStore wiring (open, range, txn, apply, compact, bulk load,
       install_tables); state machine uses install_tables.
-    - [ ] redb cache size; server flags; metrics.
-    - [ ] Tests: consistency under concurrent writes/compaction with the
+    - [x] redb cache size; server flags; metrics.
+    - [x] Tests: consistency under concurrent writes/compaction with the
       cache on, eviction bound, install clears; GET latency via bench.
-    - [ ] Docs (01, 03 metrics, 04 sizing memory), changelog; release.
-    - Acceptance on an X9 blade (apiserver GET p99 < 20 ms) needs the
-      golden on that hardware: not reachable from a build job.
+    - [x] Docs (01, 03 § Memory, README), changelog; release.
+    - Found while benchmarking: the leader's lease precheck evaluates
+      every Txn's compares; holding the write lock for that queued every
+      CAS Txn with the apply loop (writes -15%, 4-6 s stalls). Fixed: the
+      lock covers only snapshot + index copy, and a Txn naming no lease
+      skips the evaluation.
+    - Verified: sc-build of 5b37fd2, whole workspace green (`--locked
+      --no-fail-fast`, 299 tests). `ram_cache_slow_disk` (4 ms per engine
+      read): hot GET 0 engine reads, p50 8 µs / p99 18 µs; cold or cache
+      off 1 read (was 2), p50 5.4 ms. With the cache's revision match
+      removed, the consistency test and the hot-GET test fail.
+      `read_latency.sh v1.10.0` on dev (SSD, page cache warm): 1 member
+      writes 368 → 496/s, max 1.7 s → 0.24 s; quiet runs linearizable
+      p99 59 → 0.3 ms and 23 → 4.3 ms; under a concurrent build, noise.
+    - Not verified here: the issue's acceptance on an X9 blade (apiserver
+      GET p99 < 20 ms on a spinning disk, RSS over a long run) needs the
+      golden on that hardware.
