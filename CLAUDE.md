@@ -1308,3 +1308,42 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Not verified here: the issue's acceptance on an X9 blade (apiserver
       GET p99 < 20 ms on a spinning disk, RSS over a long run) needs the
       golden on that hardware.
+
+39. **Streaming writes: the raft log is a sequential WAL; redb is checkpointed in the background (#85, P1) — in progress.**
+    Today the raft log lives in redb: every append is a durable redb
+    commit, and since #71 that commit also carries every apply made
+    since the last one (applies are non-durable redb commits). So the
+    fsync on the client's path writes scattered B-tree pages: seeks on a
+    spinning disk. Plan:
+    - **WAL** (`crates/storage/src/raft_wal.rs`, byte records, no
+      openraft types): `<data-dir>/wal/<seq>.wal` segments, preallocated
+      (`--wal-segment-bytes`, 16 MiB), records `len|crc32|kind|index|
+      payload`, append-only. Entry, Truncate, Purge, Vote, Committed
+      records; a new segment starts with the current vote/committed/
+      purge. Open: replay in order; a bad record in the last segment is
+      a torn tail (cut there, re-preallocate), elsewhere an error.
+    - **Log store** (`crates/raft/src/wal_log_store.rs`): one writer
+      thread groups whatever openraft appended meanwhile into one
+      fdatasync (group commit) and calls `LogFlushed` after it. Entries
+      read from a byte-bounded tail cache or by pread. Vote is synced
+      before `save_vote` returns; committed rides the next write.
+    - **Checkpointer**: every `--wal-checkpoint-interval-ms` (100) or
+      `--wal-checkpoint-entries` (10000) applied entries: fdatasync the
+      redb file outside redb's writer lock (so the commit has little left
+      to flush), then one durable redb commit. Only then does a purge
+      openraft asked for drop WAL segments: the WAL never loses an entry
+      redb has not made durable.
+    - Applies stay non-durable redb commits made before the client is
+      answered (responses carry revisions); RAM index/cache unchanged.
+      Back-pressure is the existing ack-after-apply + proposer cap.
+    - **Upgrade**: no `wal/` → build it from redb's `raft_log`/`raft_meta`
+      (temp dir, rename), then clear redb's `raft_log`. Vote and purge are
+      mirrored into redb's `raft_meta` (non-durable) so a backup restores
+      to a consistent log. Restore paths move `wal/` aside with the
+      snapshots. One-way: no downgrade below this version.
+    Work items:
+    - [ ] storage raft_wal + unit tests (append/replay/torn tail/purge).
+    - [ ] raft wal_log_store + checkpointer + migration; tests.
+    - [ ] server: flags, main wiring, restore/corruption paths, fsck,
+      metrics, sizing; harness coverage; apply_replay comment.
+    - [ ] Docs (01, 03, 04, 05, README), changelog; bench; release.
