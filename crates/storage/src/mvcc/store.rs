@@ -1078,10 +1078,16 @@ impl MvccStore {
     /// Evaluate a Txn's compares against the current state, without
     /// applying anything: which branch the txn would take now.
     pub async fn txn_would_succeed(&self, compares: &[Compare]) -> MvccResult<bool> {
-        // Held throughout, so the resident index and `snap` agree.
-        let _state = self.inner.write_state.lock().await;
+        // The write-state lock is held only while the engine snapshot and
+        // the compared keys' indexes are taken, so the two agree; the
+        // records are read after it is released. It is not held for the
+        // reads: every Txn the leader proposes passes through here, and
+        // the apply loop waits on the same lock.
+        let state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
-        self.evaluate_compares(&*snap, compares).await
+        let indexes = self.compare_indexes(compares);
+        drop(state);
+        self.evaluate_compares_with(&*snap, compares, &indexes).await
     }
 
     /// List all lease IDs.
@@ -1853,27 +1859,20 @@ impl MvccStore {
         snap: &dyn Snapshot,
         compares: &[Compare],
     ) -> MvccResult<bool> {
-        for cmp in compares {
-            if !self.evaluate_one_compare(snap, cmp).await? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        let indexes = self.compare_indexes(compares);
+        self.evaluate_compares_with(snap, compares, &indexes).await
     }
 
-    async fn evaluate_one_compare(
-        &self,
-        snap: &dyn Snapshot,
-        cmp: &Compare,
-    ) -> MvccResult<bool> {
-        // For a single-key compare, look up the latest live record (or
-        // implicit zero-record if absent) and compare against the target.
-        // For a range compare, every key in the range must satisfy.
-        let indexes: Vec<KeyIndex> = {
-            let index = self.inner.cache.index.read();
-            if cmp.range_end.is_empty() {
-                index.get(&cmp.key).into_iter().collect()
-            } else {
+    /// The indexes of the keys each compare covers, from the resident
+    /// index under one guard. A key absent from the index is absent.
+    fn compare_indexes(&self, compares: &[Compare]) -> Vec<Vec<KeyIndex>> {
+        let index = self.inner.cache.index.read();
+        compares
+            .iter()
+            .map(|cmp| {
+                if cmp.range_end.is_empty() {
+                    return index.get(&cmp.key).into_iter().collect();
+                }
                 match index_bounds(&cmp.key, &cmp.range_end) {
                     Some((start, end)) => index
                         .range(start, end)
@@ -1884,8 +1883,33 @@ impl MvccStore {
                         .collect(),
                     None => Vec::new(),
                 }
+            })
+            .collect()
+    }
+
+    async fn evaluate_compares_with(
+        &self,
+        snap: &dyn Snapshot,
+        compares: &[Compare],
+        indexes: &[Vec<KeyIndex>],
+    ) -> MvccResult<bool> {
+        for (cmp, idxs) in compares.iter().zip(indexes) {
+            if !self.evaluate_one_compare(snap, cmp, idxs).await? {
+                return Ok(false);
             }
-        };
+        }
+        Ok(true)
+    }
+
+    async fn evaluate_one_compare(
+        &self,
+        snap: &dyn Snapshot,
+        cmp: &Compare,
+        indexes: &[KeyIndex],
+    ) -> MvccResult<bool> {
+        // For a single-key compare, look up the latest live record (or
+        // implicit zero-record if absent) and compare against the target.
+        // For a range compare, every key in the range must satisfy.
 
         if cmp.range_end.is_empty() {
             // Single-key compare. If absent, use the implicit zero record.
@@ -1901,7 +1925,7 @@ impl MvccStore {
 
         // Range compare. All matching keys must satisfy. Empty range
         // matches vacuously (matches etcd).
-        for idx in &indexes {
+        for idx in indexes {
             let rec = self
                 .latest_record(snap, &idx.key, idx)
                 .await?

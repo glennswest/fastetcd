@@ -62,6 +62,14 @@ async fn leases_named(mvcc: &MvccStore, entry: &FastetcdLogEntry) -> Result<Vec<
     Ok(match entry {
         FastetcdLogEntry::Apply { mutations } => mutations.iter().filter_map(put_lease).collect(),
         FastetcdLogEntry::Txn { compares, success, failure } => {
+            // Most txns name no lease; they need no compare evaluation.
+            let names_a_lease = |ops: &[TxnOp]| {
+                ops.iter()
+                    .any(|op| matches!(op, TxnOp::Mutation(m) if put_lease(m).is_some()))
+            };
+            if !names_a_lease(success) && !names_a_lease(failure) {
+                return Ok(Vec::new());
+            }
             let ops = if mvcc.txn_would_succeed(compares).await.map_err(|e| e.to_string())? {
                 success
             } else {
