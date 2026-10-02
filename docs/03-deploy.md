@@ -363,12 +363,61 @@ one: scope untrusted clients with mTLS and a proxy.
 
 ## Storage engine
 
-The server always runs on `redb`: one ACID single-file B-tree,
-`<data-dir>/fastetcd.redb`, holding the MVCC data, the raft log and
-vote, leases, auth and node metadata. Raft snapshots are files in
-`<data-dir>/snapshots/`. There is no engine choice to make:
-`fastetcd-storage` also has `wal` and `iouring` engines, but the server
-cannot use them (#55).
+A data directory holds:
+
+| Path | What |
+|---|---|
+| `fastetcd.redb` | The data file: one redb ACID B-tree with the MVCC data, leases, auth and node metadata. |
+| `wal/` | The raft log and vote: a sequential write-ahead log in preallocated segments (`--wal-segment-bytes`, 16 MiB). |
+| `snapshots/` | Retained raft snapshots. |
+
+There is no engine choice to make: `fastetcd-storage` also has `wal`
+and `iouring` key-value engines, but the server cannot use them (#55);
+`wal/` is the raft log, not one of those.
+
+### Writes: one sequential fsync (#85)
+
+A client's write is acknowledged after its raft entry is durable in the
+WAL (on a quorum) and applied. The fsync on that path is an append at
+the end of the newest segment: a sequential write, which is what a
+spinning disk or a network block device does best. One writer thread
+syncs everything appended while the previous sync ran, so concurrent
+writes share one `fdatasync`.
+
+Applying an entry updates the data file without an fsync (#71) and the
+RAM index and value cache ([Memory](#memory)), so reads see it at once.
+A **checkpoint** then makes the data file durable in the background:
+at most `--wal-checkpoint-interval-ms` (100) after an apply, or after
+`--wal-checkpoint-entries` (10000) entries. It first flushes the data
+file's dirty pages without holding redb's writer lock, then makes one
+durable commit, so applies wait as little as possible on it.
+
+After a crash the data file is as of its last checkpoint, and the WAL
+replays the rest: a member re-applies up to the committed index it
+recorded, and the leader re-commits anything after it. Nothing
+acknowledged is lost. A torn write at the end of the WAL (a crash during
+a write that was never acknowledged) is cut off at startup; damage
+anywhere else in it stops the member, which then needs replacing
+(member remove / add) like a member with a corrupt data file.
+
+The raft log is purged after each snapshot (`--snapshot-count`), but a
+WAL segment is deleted only once a checkpoint has made the data file
+durable past every entry in it.
+
+Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
+`fastetcd_wal_bytes_appended_total`, `fastetcd_wal_segments`,
+`fastetcd_wal_cached_bytes`, `fastetcd_checkpoints_total`,
+`fastetcd_checkpoint_seconds_total`, `fastetcd_checkpoint_failures_total`,
+`fastetcd_checkpoint_durable_applied_index`. Average fsync time is
+`rate(fastetcd_wal_fsync_seconds_total) / rate(fastetcd_wal_fsyncs_total)`.
+
+**Upgrading to 1.12** moves the raft log out of the data file on the
+first start: `wal/` is built from it (in `wal.tmp/`, then renamed) and
+the data file's copy is cleared. It is one-way: **do not downgrade a
+member below 1.12** once it has started on 1.12, since an older binary
+would find no raft log in the data file. Upgrade members one at a time,
+as usual; a 1.12 member and an older one replicate normally (the peer
+protocol did not change).
 
 ## Memory
 
@@ -398,6 +447,7 @@ Memory to expect, beyond the process's own few tens of MiB:
 | Key index | ~(key length + 64 B) per key, plus 16 B per revision kept (history since the last compaction) and ~40 B per generation. Tens of MiB for a large Kubernetes cluster. |
 | Value cache | Up to `--value-cache-bytes` (default min(128 MiB, 5% of memory)). |
 | Engine cache | Up to `--engine-cache-bytes` (default 256 MiB), redb's page cache, filled as pages are read. |
+| Raft log cache | Up to `--wal-cache-bytes` (default 64 MiB): recent raft entries, for replication. |
 
 The kernel's page cache comes on top and is reclaimable. The startup log
 line `RAM cache:` gives the configured budgets and the index's size; the

@@ -224,12 +224,12 @@ It prints the arithmetic, not just a number. The ladder at the default
 
 | Nodes | Live data | DB file | Minimum volume | Provision |
 |---:|---:|---:|---:|---:|
-| 1 | 32 MiB | 67 MiB | 317 MiB | **512 MiB** |
-| 10 | 35 MiB | 73 MiB | 343 MiB | **512 MiB** |
-| 100 | 63 MiB | 130 MiB | 603 MiB | **1 GiB** |
-| 500 | 185 MiB | 386 MiB | 1.7 GiB | **2 GiB** |
-| 1000 | 339 MiB | 704 MiB | 3.1 GiB | **4 GiB** |
-| 5000 | 1.5 GiB | 3.2 GiB | 14.4 GiB | **16 GiB** |
+| 1 | 32 MiB | 67 MiB | 357 MiB | **512 MiB** |
+| 10 | 35 MiB | 73 MiB | 383 MiB | **512 MiB** |
+| 100 | 63 MiB | 130 MiB | 643 MiB | **1 GiB** |
+| 500 | 185 MiB | 386 MiB | 1.8 GiB | **2 GiB** |
+| 1000 | 339 MiB | 704 MiB | 3.2 GiB | **4 GiB** |
+| 5000 | 1.5 GiB | 3.2 GiB | 14.5 GiB | **16 GiB** |
 
 Two things in that table are worth understanding before trusting it.
 
@@ -242,7 +242,10 @@ The multipliers, in order of size: MVCC history between compactions
 the 63 MiB is how a volume fills.
 
 The raft-log term assumes 2 KiB per log entry (`--snapshot-count` x
-2 KiB, 10 MiB at the default). Since 1.10 a leader under concurrent
+2 KiB, 10 MiB at the default), plus two WAL segments (32 MiB): since
+1.12 the log is in preallocated segments in `wal/` (#85), the newest
+one full size from the start, and a purged segment stays until a
+checkpoint covers it. Since 1.10 a leader under concurrent
 writes batches up to 256 proposals (512 KiB) into one entry (#75), and
 snapshots still come every `--snapshot-count` *entries*, so a busy
 cluster can carry more log between snapshots than the estimate shows.

@@ -78,6 +78,18 @@ Every key's index is always in RAM. These size the rest
 | `--value-cache-bytes` | min(128 MiB, 5% of memory) | `FASTETCD_VALUE_CACHE_BYTES` | | Budget of the latest-value cache (LRU by bytes). Memory is the cgroup limit if there is one, else total RAM. `0` turns it off. |
 | `--value-cache-max-entry-bytes` | `262144` (256 KiB) | `FASTETCD_VALUE_CACHE_MAX_ENTRY_BYTES` | | Values larger than this are not cached. |
 | `--engine-cache-bytes` | `268435456` (256 MiB) | `FASTETCD_ENGINE_CACHE_BYTES` | | redb's own page cache (redb's default would be 1 GiB). |
+| `--wal-cache-bytes` | `67108864` (64 MiB) | `FASTETCD_WAL_CACHE_BYTES` | | Recent raft log entries kept in RAM, so replicating to a follower rarely reads the WAL back. |
+
+## Raft WAL and checkpoints
+
+The raft log is a sequential WAL in `<data-dir>/wal/`; the data file is
+made durable in the background ([03-deploy](03-deploy.md#storage-engine), #85).
+
+| Flag | Default | Env | etcd env | Meaning |
+|---|---|---|---|---|
+| `--wal-segment-bytes` | `16777216` (16 MiB) | `FASTETCD_WAL_SEGMENT_BYTES` | | Size each WAL segment is preallocated to. |
+| `--wal-checkpoint-interval-ms` | `100` | `FASTETCD_WAL_CHECKPOINT_INTERVAL_MS` | | Longest time between an apply and the durable commit of the data file that covers it. |
+| `--wal-checkpoint-entries` | `10000` | `FASTETCD_WAL_CHECKPOINT_ENTRIES` | | ...or checkpoint as soon as this many raft entries were applied since the last one. |
 
 ## Compaction and disk space
 

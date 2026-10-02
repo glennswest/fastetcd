@@ -75,9 +75,10 @@ fastetcd-ctl status
                              ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ openraft 0.9 — consensus, log replication, membership, snapshots     │
-│ KvLogStore over KvStore  ·  FastetcdStateMachine wraps MvccStore     │
+│ WalLogStore: raft log in wal/ (one sequential fsync per group, #85)  │
+│ FastetcdStateMachine wraps MvccStore                                  │
 └────────────────────────────┬─────────────────────────────────────────┘
-                             ▼   (apply)
+                             ▼   (apply; redb checkpointed in background)
 ┌──────────────────────────────────────────────────────────────────────┐
 │ MVCC: revisions · generations · leases · events · compact · Txn     │
 │ RAM: every key's index (like etcd's treeIndex) + latest-value LRU   │
@@ -121,10 +122,13 @@ goal is a drop-in replacement, not a fork of behavior.
 etcd stores all data in a single mmap'd BoltDB (bbolt) file: an
 ACID B+tree with copy-on-write pages.
 
-fastetcd stores everything (MVCC data, the raft log, auth, leases) in
-one `redb` file, `<data-dir>/fastetcd.redb`: a pure-Rust embedded ACID
-B-tree, behind a `KvStore` trait. Raft snapshots are files beside it
-(`<data-dir>/snapshots/`). The trait leaves room for other engines;
+fastetcd stores its data (MVCC, auth, leases) in one `redb` file,
+`<data-dir>/fastetcd.redb`: a pure-Rust embedded ACID B-tree, behind a
+`KvStore` trait. Like etcd, the raft log is a separate sequential WAL
+(`<data-dir>/wal/`): a write waits for one append-and-fsync there, and
+the B-tree is made durable in the background (#85,
+[docs](docs/03-deploy.md#storage-engine)). Raft snapshots are files
+beside them (`<data-dir>/snapshots/`). The trait leaves room for other engines;
 `fastetcd-storage` has a WAL engine and an experimental io_uring one,
 not used by the server (#55).
 

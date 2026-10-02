@@ -39,13 +39,19 @@ on the apply path, without requiring any client to change.
 ### Storage: trait-first; the server runs on redb
 
 The storage layer is abstracted behind a `KvStore` trait. The MVCC state
-machine, the raft log store (`KvLogStore`) and the raft state machine
-depend on the trait, not on a concrete engine.
+machine and the raft state machine depend on the trait, not on a
+concrete engine.
 
 **`redb`** is the engine the server runs on, always
 (`recovery::open_or_recover` opens `RedbEngine`): an ACID single-file
 B-tree, native Rust, cross-platform. One file, `<data-dir>/fastetcd.redb`,
-holds the MVCC tables, the raft log and vote, auth and leases.
+holds the MVCC tables, auth and leases.
+
+**The raft log is a WAL** (`<data-dir>/wal/`, #85): records appended to
+preallocated segments (`fastetcd_storage::raft_wal`), so the fsync on a
+client's path is a sequential write, not a B-tree commit. Before 1.12
+the log was a pair of redb tables, and every append was a durable redb
+commit that also wrote the pages of every apply since the last one.
 
 **Design, not implemented (#55):** a second, Linux-only engine for
 predictable tail latency. `fastetcd-storage` has a `wal` engine (an
@@ -65,19 +71,27 @@ Async-native, Rust-idiomatic, supports membership changes including joint
 consensus, snapshot install, log compaction. Mature enough to underpin a
 production system. We integrate by:
 
-- `KvLogStore`: `RaftLogStorage` over the `KvStore` trait, so the log
-  lives in the same redb file. Append, vote, truncate and purge are
-  durable (fsync'd commit) before ack. The committed index is written
-  without an fsync: openraft only needs it to be no higher than the
-  truth (#71).
+- `WalLogStore` (`crates/raft/src/wal_log_store.rs`): `RaftLogStorage`
+  over the WAL. `append` returns once the entries are readable; a
+  writer thread syncs whatever was appended while the previous sync ran
+  in one `fdatasync` (group commit) and then reports each append
+  flushed, as openraft's `LogFlushed` allows. The vote is synced before
+  `save_vote` returns; the committed index rides the next sync (openraft
+  only needs it to be no higher than the truth, #71). Truncate is
+  synced. A purge drops entries from memory at once but deletes WAL
+  segments only once a checkpoint covers them (below). The old
+  `KvLogStore` (the log in redb tables) remains for tests and as the
+  source of the in-place upgrade.
 - Implementing `RaftStateMachine` as the MVCC store applying committed
   entries. Each apply commits its writes and its `last_applied_log_id`
   in one batch **without an fsync** (redb `Durability::None`): it is
-  visible at once and reaches disk with the next durable commit,
-  normally the next log append. A crash loses at most the last few
-  applies, together with the applied position that records them, and
-  the state machine replays them from the durable log into the same
-  state (#71). Snapshot installs, migration bulk loads and startup
+  visible at once. The **checkpointer** makes the data file durable
+  every `--wal-checkpoint-interval-ms` (100) or `--wal-checkpoint-entries`
+  applied entries: an `fdatasync` of the file outside redb's writer
+  lock, then one durable commit. A crash loses at most the applies since
+  the last checkpoint, together with the applied position that records
+  them, and openraft replays them from the WAL into the same state
+  (#71, #85). Snapshot installs, migration bulk loads and startup
   recovery stay durable, since the log cannot replay them. Before this
   a write cost three fsyncs through redb's single writer (append,
   committed index, apply).

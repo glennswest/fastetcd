@@ -35,9 +35,12 @@ whether a node may restore itself depends on whether it was alone.
 Nothing is written while nothing changes.
 
 **What is in a backup.** Every table of the store, read from one
-point-in-time view: the MVCC data, the raft log and vote, leases, users
-and roles, and node-local metadata such as the cluster id. It is exactly
-the state a crash at that instant would have left. (The raft snapshot
+point-in-time view: the MVCC data, leases, users and roles, node-local
+metadata such as the cluster id, and a copy of the raft vote and purge
+point. Since 1.12 the raft log itself lives in `wal/`, not in the data
+file (#85), so a backup does not carry it; restoring one starts a new
+WAL from the vote and purge point it does carry. The state is what the
+store had applied at that instant. (The raft snapshot
 that `etcdctl snapshot save` streams holds the MVCC and auth tables but
 not leases or the cluster id, and no fastetcd tool can restore it yet:
 #61. Use these backups, or `fastetcd backup` offline.)
@@ -93,8 +96,9 @@ the error says why and what to do.
    that fails, nothing has moved.
 3. The corrupt file is renamed to `fastetcd.redb.corrupt.<unix-ms>` and
    kept for inspection; **it is never deleted**. The retained raft
-   snapshots move with it (`snapshots.corrupt.<unix-ms>`), since they
-   may be newer than the backup.
+   snapshots and the raft WAL move with it (`snapshots.corrupt.<unix-ms>`,
+   `wal.corrupt.<unix-ms>`), since they may be newer than the backup.
+   The start then builds a new WAL from the backup.
 4. The restored store takes its place.
 
 A crash between steps 3 and 4 leaves no `fastetcd.redb` but a complete
@@ -145,7 +149,14 @@ fastetcd ... --initial-cluster-state=existing
 well as a raw copy made by `fastetcd backup`. It refuses to overwrite a
 newer store without `--force`, and keeps the current file as
 `fastetcd.redb.replaced-<ts>`. A current file too corrupt to read is kept
-the same way. Restoring onto a node with a different identity needs
+the same way. The raft snapshots and WAL that went with the replaced
+file are moved to `snapshots.replaced-<ts>` and `wal.replaced-<ts>`.
+
+`fastetcd backup` copies the data file only. The data file is durable as
+of its last checkpoint (#85): a server stopped cleanly checkpoints on the
+way out, but one that was killed has its last ~100 ms of applies only in
+the WAL. Start and stop it once before an offline backup if it was not
+stopped cleanly. Restoring onto a node with a different identity needs
 `--force-new-cluster` on its first start, as with etcd.
 
 ## redb two-phase commit: deliberately off

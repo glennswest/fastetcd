@@ -3,6 +3,38 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-02 — streaming writes: the raft log is a sequential WAL (#85, P1)
+- **perf:** The raft log moved out of the data file into a write-ahead
+  log in `<data-dir>/wal/`: checksummed records appended to preallocated
+  segments (`--wal-segment-bytes`, 16 MiB). A client's write now waits
+  for one sequential append-and-`fdatasync` instead of a durable redb
+  commit, which also wrote every B-tree page the applies since the last
+  one had dirtied (seeks on a spinning disk). One writer thread syncs
+  everything appended while the previous sync ran (group commit), and
+  openraft is told each append is durable afterwards, so RaftCore does
+  not wait on the disk.
+- **perf:** The data file is made durable in the background: a
+  checkpoint every `--wal-checkpoint-interval-ms` (100) or
+  `--wal-checkpoint-entries` (10000) applied entries, which first
+  flushes the file's dirty pages outside redb's writer lock and then
+  makes one durable commit. A crash loses at most the applies since the
+  last checkpoint, and the WAL replays them. WAL segments are deleted
+  only once a checkpoint covers every entry in them.
+- **feat:** `--wal-cache-bytes` (64 MiB): recent raft entries kept in RAM
+  for replication. Metrics `fastetcd_wal_*` and `fastetcd_checkpoint*`.
+- **feat:** In-place upgrade: on the first start the log is copied from
+  redb's `raft_log`/`raft_meta` into a new WAL (built in `wal.tmp/`,
+  renamed), then `raft_log` is cleared. One-way: do not downgrade a
+  member below this version afterwards. The vote and purge point stay
+  mirrored in `raft_meta`, so a backup restores to a consistent log.
+- **fix:** Restoring a data file (corruption recovery, `fastetcd restore`)
+  moves `wal/` and `snapshots/` aside with the replaced file
+  (`*.corrupt.<ts>` / `*.replaced-<ts>`); `fastetcd restore` used to leave
+  newer raft snapshots in place.
+- **docs:** 00-design, 01-configuration (new flags), 03-deploy (storage
+  layout, write path, upgrade note), 04-disk-space (two WAL segments in
+  the sizing model; ladder unchanged), 05-backup-and-recovery, README.
+
 ## [v1.11.0] — 2026-10-02
 
 ### 2026-10-02 — a GET of a hot key reads nothing from disk (#82, P1)
