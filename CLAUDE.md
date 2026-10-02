@@ -1241,3 +1241,45 @@ Tracked live in the Claude task system. Snapshot of the order:
   through Raft too so they survive failover.
 - **Compaction-correctness is non-negotiable.** Revision history truncation
   must coordinate with watchers and raft log compaction.
+
+38. **Write-through RAM cache: resident key index + byte-bounded value cache (#82, P1) — in progress.**
+    A single-object GET walked redb for the `KeyIndex` and then the
+    record; on a spinning disk (X9, ublk) a cold page is a seek, so
+    apiserver GETs took 0.2–0.55 s. etcd keeps every key's index in RAM
+    (`treeIndex`) and lets the page cache hold values. Plan:
+    - **Resident key index** (`crates/storage/src/mvcc/cache.rs`):
+      key → generations, a `BTreeMap` behind a std `RwLock`, built at
+      open from `mvcc_idx` (chunked scan), updated only after the engine
+      commit and only under the write-state lock, so it never runs ahead
+      of the engine. Readers take the index guard while still holding
+      the write-state lock (with the engine snapshot), so index,
+      snapshot and revision agree; the walk is synchronous (etcd's
+      treeIndex holds its RLock the same way). `mvcc_idx` stays on disk
+      unchanged: no format change, any version can open the file.
+    - Used by Range, Txn compares, apply (index load, DeleteRange key
+      scan), and compaction (walks RAM, not the whole `mvcc_idx`).
+      Watch backfill keeps reading the disk index.
+    - **Latest-value cache**: sharded LRU by bytes,
+      `--value-cache-bytes` (default min(128 MiB, 5% of RAM/cgroup
+      limit); 0 = off), entries above `--value-cache-max-entry-bytes`
+      (256 KiB) not cached. Apply inserts each written key's record
+      after commit, deletes drop it; a read that misses at the latest
+      revision fills it (only if newer than what is there). An entry is
+      used only when its exact `Revision` is the one the index names
+      for the read, so a stale entry can only miss, never answer.
+    - Snapshot install goes through `MvccStore::install_tables` (commit
+      + counters + index rebuild + cache clear under the write lock).
+    - `--engine-cache-bytes` sets redb's cache (its default is 1 GiB);
+      default 256 MiB. Memory = value cache + engine cache + index.
+    - Metrics: value cache hits/misses/evictions/bytes/entries/budget,
+      index keys/bytes, `fastetcd_mvcc_get_duration_seconds{cache}`.
+    Work items:
+    - [ ] cache.rs (index + LRU) with unit tests.
+    - [ ] MvccStore wiring (open, range, txn, apply, compact, bulk load,
+      install_tables); state machine uses install_tables.
+    - [ ] redb cache size; server flags; metrics.
+    - [ ] Tests: consistency under concurrent writes/compaction with the
+      cache on, eviction bound, install clears; GET latency via bench.
+    - [ ] Docs (01, 03 metrics, 04 sizing memory), changelog; release.
+    - Acceptance on an X9 blade (apiserver GET p99 < 20 ms) needs the
+      golden on that hardware: not reachable from a build job.
