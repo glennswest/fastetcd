@@ -1342,8 +1342,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       to a consistent log. Restore paths move `wal/` aside with the
       snapshots. One-way: no downgrade below this version.
     Work items:
-    - [ ] storage raft_wal + unit tests (append/replay/torn tail/purge).
-    - [ ] raft wal_log_store + checkpointer + migration; tests.
-    - [ ] server: flags, main wiring, restore/corruption paths, fsck,
-      metrics, sizing; harness coverage; apply_replay comment.
-    - [ ] Docs (01, 03, 04, 05, README), changelog; bench; release.
+    - [x] storage raft_wal + unit tests (append/replay/torn tail/purge).
+    - [x] raft wal_log_store + checkpointer + migration; tests (openraft's
+      log-store Suite, restart, upgrade, a node that drops segments).
+    - [x] server: flags, main wiring, restore/corruption paths, fsck,
+      metrics, sizing; multinode/fastpath/snapshot-transfer harnesses on
+      the WAL; real-binary upgrade test (`wal_upgrade.rs`).
+    - [x] Docs (00, 01, 03, 04, 05, README), changelog.
+    - [ ] Full workspace green on dev; bench vs v1.11.0; release.
+    - Not done here, and why: applies still write redb (non-durable) before
+      the client is answered, rather than an in-RAM overlay with redb
+      written later — responses need the apply's revisions, and the
+      durable B-tree write (the seeky part) is what left the client path.

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use openraft::storage::{RaftLogReader, RaftLogStorage};
+use openraft::storage::RaftLogStorage;
 use openraft::{BasicNode, EntryPayload, LogId, Membership, StoredMembership};
 
 use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
