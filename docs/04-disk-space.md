@@ -16,7 +16,7 @@ Four things accumulate, and only the first is your data:
 | What | Grows because | Bounded by |
 |---|---|---|
 | MVCC history | every write keeps the previous revision of the key | compaction |
-| Raft log | every proposal is appended | a snapshot, then purge |
+| Raft log | every proposal is appended (concurrent ones as one batch entry, #75) | a snapshot, then purge |
 | Raft snapshot | it is a full serialized copy of the database | retention (`--max-snapshots`) |
 | Free pages inside the data file | a copy-on-write B-tree reuses freed pages but does not shrink the file | defragment |
 
@@ -136,7 +136,7 @@ itself once occupancy falls back below `--space-clear-percent` (70).
 | `--auto-defrag` | `true` | Let the reclaim path defragment. |
 | `--max-snapshots` | `1` | Snapshots retained on disk. |
 | `--auto-compaction-retention` | `0` | Steady-state compaction (off; Kubernetes drives its own). |
-| `--snapshot-count` | `5000` | Applied entries between raft snapshots. |
+| `--snapshot-count` | `5000` | Applied log entries between raft snapshots (an entry may be a batch of up to 256 writes, #80). |
 | `--max-in-snapshot-log-to-keep` | `1000` | Log entries kept after a purge. |
 
 Each has an `ETCD_*` environment fallback where etcd has the same flag,
@@ -240,6 +240,14 @@ The multipliers, in order of size: MVCC history between compactions
 (another *full copy* of the database), the raft log, and up to
 `--upgrade-backup-retain` safety backups (a full copy each). Sizing for
 the 63 MiB is how a volume fills.
+
+The raft-log term assumes 2 KiB per log entry (`--snapshot-count` x
+2 KiB, 10 MiB at the default). Since 1.10 a leader under concurrent
+writes batches up to 256 proposals (512 KiB) into one entry (#75), and
+snapshots still come every `--snapshot-count` *entries*, so a busy
+cluster can carry more log between snapshots than the estimate shows.
+The high-water reclaim snapshots and purges it before the volume fills;
+the estimate itself is #80.
 
 **Small clusters all land in the same bucket.** 1 node and 10 nodes both
 provision at 512 MiB, because below roughly 50 nodes the estimate is

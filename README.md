@@ -69,7 +69,9 @@ fastetcd-ctl status
 │ metrics port: Prometheus /metrics                                     │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │   AuthInterceptor (token + per-key authz)
-                             │   writes proposed to Raft
+                             │   writes → Proposer (group commit, #75)
+                             │   linearizable reads → read index
+                             │     (ConfirmLeader quorum, not RaftCore)
                              ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ openraft 0.9 — consensus, log replication, membership, snapshots     │

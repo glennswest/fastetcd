@@ -64,7 +64,7 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 
 | Flag | Default | Env | etcd env | Meaning |
 |---|---|---|---|---|
-| `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied entries. |
+| `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied log entries. Since 1.10 one entry can be a batch of up to 256 writes (#75), so under concurrent load that is more writes than etcd's count, which is per proposal (#80). |
 | `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted entries kept after a purge, for followers just behind. |
 | `--max-snapshots` | `1` | `FASTETCD_MAX_SNAPSHOTS` | `ETCD_MAX_SNAPSHOTS` | Snapshots kept on disk (each a full copy), rolled off before a new one is written. |
 

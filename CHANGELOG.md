@@ -3,6 +3,17 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-02 — documentation from the code, since 2026-09-25
+- **docs:** `--snapshot-count` counts raft log entries, and since 1.10
+  an entry can be a batch of up to 256 writes, so it is not etcd's
+  per-proposal count (`docs/01-configuration.md`, `docs/04-disk-space.md`).
+- **docs:** the sizing model's raft-log term assumes 2 KiB per entry;
+  batched entries can be up to 512 KiB, so a busy cluster can carry more
+  log between snapshots than `fastetcd sizing` shows (filed #80).
+- **docs:** README architecture shows the read index (`ConfirmLeader`)
+  and the proposer (group commit); CLAUDE.md architecture, layout and
+  plan status (#24, #26 shipped in v1.9.0; #21's decision is #68).
+
 ## [v1.10.0] — 2026-10-01
 
 ### 2026-10-01 — multi-member reads off RaftCore, batched proposals (#75, P1)

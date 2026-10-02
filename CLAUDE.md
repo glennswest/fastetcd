@@ -541,7 +541,11 @@ Version locations (keep in sync):
   `iouring` (tokio-uring, feature `iouring`) engines that the server
   cannot select (#55).
 - **Consensus**: `openraft` 0.9 — core, not optional. Single-node is a
-  cluster-of-one.
+  cluster-of-one. Linearizable reads and writes avoid RaftCore's queue
+  where they can: `read_index.rs` (sole voter, or a `ConfirmLeader`
+  quorum; else `ensure_linearizable`) and `proposer.rs` (up to 3
+  `client_write`s in flight, the rest batched). Applies commit without
+  fsync; the raft log replays them (#71, #75).
 - **gRPC**: `tonic` 0.12 + `prost`, generated from vendored etcd v3.6.11
   `.proto` files; pbjson serde for the v3 JSON gateway.
 - **Client port**: gRPC + `/health` `/livez` `/readyz` + `/v3/...`
@@ -563,7 +567,8 @@ crates/
   storage/    # KvStore trait + engines; MVCC store (revisions, leases,
               # auth tables, events)
   raft/       # openraft glue: log store, state machine, snapshot files,
-              # gRPC peer transport, forwarding, lease precheck
+              # gRPC peer transport, forwarding, lease precheck,
+              # read index (ConfirmLeader), proposer (group commit)
   server/     # binary `fastetcd`: services, auth, watch, gateway,
               # metrics, space monitor, backups, recovery, CLI
   migrate/    # binary `fastetcd-migrate`: etcd BoltDB snapshot → data dir
@@ -571,7 +576,7 @@ crates/
 docs/         # 00 design, 01 configuration, 02 testing, 03 deploy,
               # 04 disk space, 05 backup and recovery
 deploy/       # Helm chart, systemd unit, packaging scripts
-tests/        # etcdctl_smoke.sh
+tests/        # etcdctl_smoke.sh, read_latency.sh (bench via sc-build)
 ```
 
 ## Work plan
@@ -1058,7 +1063,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       the v3lock / v3election gateways (fastetcd has no Lock/Election
       services).
 
-32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — done (docs; unreleased).**
+32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — done, shipped in v1.9.0.**
     GHCR is deliberately unused on this platform, yet `docs/03-deploy.md`,
     the README and the Helm chart's default image pointed at
     `ghcr.io/glennswest/fastetcd`. The issue's premise (a release tarball
@@ -1082,7 +1087,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       builds all three binaries static-pie, leaves the tree clean;
       `helm lint` passes and the chart renders `image: "fastetcd:1.8.0"`.
 
-33. **Documentation refreshed from the code (#26) — done (docs; unreleased).** Every
+33. **Documentation refreshed from the code (#26) — done, shipped in v1.9.0.** Every
     flag and default taken from the binaries' own `--help` (captured on
     dev at a65c17f), checked against main.rs. Work items:
     - [x] `docs/01-configuration.md`: every flag, default, env var and
@@ -1098,7 +1103,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     start a pod: `--auto-defrag=true`), #54, #55, #56, #57, #58, #59, #60 (migrate drops leases/auth), #61 (P1, a live
     snapshot cannot be restored by anything).
 
-34. **`--auto-compaction-retention` units (#21) — waiting on the owner.**
+34. **`--auto-compaction-retention` units (#21) — waiting on the owner (decision: #68).**
     Documented (revisions, not hours) in the #26 pass. The fix needs a
     decision (asked on #21, 2026-09-29): etcd's `--auto-compaction-mode`
     defaults to `periodic` (a bare number = hours); fastetcd's bare number
@@ -1214,6 +1219,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       replay skips exactly the persisted prefix. read_latency.sh v1.9.0 →
       d0481ef: 1 member writes 170 → 540/s; 3 members writes 141 →
       ~300/s, linearizable p50 31.8 → 0.69 ms, p99 298 → 66 ms.
+
+37. **Documentation refreshed from the code, since 2026-09-25 — done (docs; unreleased).**
+    Re-checked README, docs/ and this file against the code after #71/#75
+    (the #26 pass covered up to v1.8.0). No flag, port or API changed
+    since; the #71/#75 docs were current. Fixed: `--snapshot-count`
+    counts log entries, and an entry can now be a batch (01, 04); the
+    sizing model's raft-log term assumes 2 KiB entries (04, filed #80,
+    P2); README architecture shows the read index and proposer; #24/#26
+    shipped in v1.9.0; #21's decision is #68; layout.
 
 ## Constraints & rules
 
