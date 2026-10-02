@@ -52,7 +52,9 @@
 //!     `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`
 //!     (gauges); background checkpoints of the data file:
 //!     `fastetcd_checkpoints_total`, `fastetcd_checkpoint_seconds_total`,
-//!     `fastetcd_checkpoint_failures_total` (counters),
+//!     `fastetcd_checkpoint_failures_total`,
+//!     `fastetcd_checkpoint_commit_seconds_total` (counters),
+//!     `fastetcd_checkpoint_commit_max_seconds` (gauge),
 //!     `fastetcd_checkpoint_durable_applied_index` (gauge)
 //!
 //! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
@@ -616,6 +618,8 @@ pub struct WalMetrics {
     fsync_seconds: Counter<f64, AtomicU64>,
     fsync_max_seconds: Gauge<f64, AtomicU64>,
     checkpoint_max_seconds: Gauge<f64, AtomicU64>,
+    checkpoint_commit_seconds: Counter<f64, AtomicU64>,
+    checkpoint_commit_max_seconds: Gauge<f64, AtomicU64>,
     bytes_appended: Counter,
     segments: Gauge,
     cached_bytes: Gauge,
@@ -632,6 +636,8 @@ impl WalMetrics {
             fsync_seconds: Counter::default(),
             fsync_max_seconds: Gauge::default(),
             checkpoint_max_seconds: Gauge::default(),
+            checkpoint_commit_seconds: Counter::default(),
+            checkpoint_commit_max_seconds: Gauge::default(),
             bytes_appended: Counter::default(),
             segments: Gauge::default(),
             cached_bytes: Gauge::default(),
@@ -662,6 +668,16 @@ impl WalMetrics {
             "fastetcd_checkpoint_max_seconds",
             "Longest background checkpoint of the data file since the process started",
             self.checkpoint_max_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_commit_seconds",
+            "Time checkpoints held the data file's writer (applies wait behind it)",
+            self.checkpoint_commit_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_commit_max_seconds",
+            "Longest time one checkpoint held the data file's writer",
+            self.checkpoint_commit_max_seconds.clone(),
         );
         reg.register(
             "fastetcd_wal_bytes_appended",
@@ -702,6 +718,9 @@ impl WalMetrics {
         catch_up_seconds(&self.fsync_seconds, load(&s.fsync_nanos));
         self.fsync_max_seconds.set(load(&s.fsync_max_nanos) as f64 / 1e9);
         self.checkpoint_max_seconds.set(load(&s.checkpoint_max_nanos) as f64 / 1e9);
+        catch_up_seconds(&self.checkpoint_commit_seconds, load(&s.checkpoint_commit_nanos));
+        self.checkpoint_commit_max_seconds
+            .set(load(&s.checkpoint_commit_max_nanos) as f64 / 1e9);
         catch_up(&self.bytes_appended, load(&s.bytes_appended));
         self.segments.set(load(&s.segments) as i64);
         self.cached_bytes.set(load(&s.cached_bytes) as i64);

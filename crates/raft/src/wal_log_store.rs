@@ -103,6 +103,10 @@ pub struct WalStats {
     pub checkpoint_nanos: AtomicU64,
     /// Longest single checkpoint since the process started.
     pub checkpoint_max_nanos: AtomicU64,
+    /// The part of each checkpoint that holds redb's writer (the
+    /// durable commit), which applies wait behind.
+    pub checkpoint_commit_nanos: AtomicU64,
+    pub checkpoint_commit_max_nanos: AtomicU64,
     pub checkpoint_failures: AtomicU64,
     /// `index + 1` of the last applied entry a checkpoint made durable
     /// in the data file (0 = none yet in this process).
@@ -841,6 +845,7 @@ pub fn spawn_checkpointer(
                 std::fs::File::open(file).and_then(|f| f.sync_data())
             })
             .await;
+            let locked = Instant::now();
             if let Err(e) = store.engine.sync().await {
                 store.stats.checkpoint_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(error = %e, "checkpoint of the data file failed; retrying");
@@ -851,6 +856,9 @@ pub fn spawn_checkpointer(
             store.stats.checkpoints.fetch_add(1, Ordering::Relaxed);
             store.stats.checkpoint_nanos.fetch_add(took, Ordering::Relaxed);
             store.stats.checkpoint_max_nanos.fetch_max(took, Ordering::Relaxed);
+            let commit = locked.elapsed().as_nanos() as u64;
+            store.stats.checkpoint_commit_nanos.fetch_add(commit, Ordering::Relaxed);
+            store.stats.checkpoint_commit_max_nanos.fetch_max(commit, Ordering::Relaxed);
             store.stats.durable_applied.store(target, Ordering::Relaxed);
             // openraft purges only applied entries, so a purge seen
             // before this checkpoint's applied index is covered by it.
