@@ -80,6 +80,7 @@ fastetcd-ctl status
                              ▼   (apply)
 ┌──────────────────────────────────────────────────────────────────────┐
 │ MVCC: revisions · generations · leases · events · compact · Txn     │
+│ RAM: every key's index (like etcd's treeIndex) + latest-value LRU   │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │   KvStore trait
                              ▼
@@ -126,6 +127,12 @@ B-tree, behind a `KvStore` trait. Raft snapshots are files beside it
 (`<data-dir>/snapshots/`). The trait leaves room for other engines;
 `fastetcd-storage` has a WAL engine and an experimental io_uring one,
 not used by the server (#55).
+
+etcd keeps every key's index in memory and leaves values to the kernel's
+page cache over its mmap. fastetcd keeps every key's index in memory
+too, plus the latest value of recently used keys in a cache bounded in
+bytes (`--value-cache-bytes`), so a hot GET reads nothing from disk
+([docs](docs/03-deploy.md#memory)).
 
 ### Latency and resource profile
 

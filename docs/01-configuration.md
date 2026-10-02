@@ -68,6 +68,17 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 | `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted entries kept after a purge, for followers just behind. |
 | `--max-snapshots` | `1` | `FASTETCD_MAX_SNAPSHOTS` | `ETCD_MAX_SNAPSHOTS` | Snapshots kept on disk (each a full copy), rolled off before a new one is written. |
 
+## Memory (RAM cache)
+
+Every key's index is always in RAM. These size the rest
+([03-deploy](03-deploy.md#memory)).
+
+| Flag | Default | Env | etcd env | Meaning |
+|---|---|---|---|---|
+| `--value-cache-bytes` | min(128 MiB, 5% of memory) | `FASTETCD_VALUE_CACHE_BYTES` | | Budget of the latest-value cache (LRU by bytes). Memory is the cgroup limit if there is one, else total RAM. `0` turns it off. |
+| `--value-cache-max-entry-bytes` | `262144` (256 KiB) | `FASTETCD_VALUE_CACHE_MAX_ENTRY_BYTES` | | Values larger than this are not cached. |
+| `--engine-cache-bytes` | `268435456` (256 MiB) | `FASTETCD_ENGINE_CACHE_BYTES` | | redb's own page cache (redb's default would be 1 GiB). |
+
 ## Compaction and disk space
 
 | Flag | Default | Env | etcd env | Meaning |

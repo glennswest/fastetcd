@@ -370,6 +370,47 @@ vote, leases, auth and node metadata. Raft snapshots are files in
 `fastetcd-storage` also has `wal` and `iouring` engines, but the server
 cannot use them (#55).
 
+## Memory
+
+A read should not wait on the disk (#82). Like etcd, fastetcd keeps
+**every key's index in RAM** (etcd's `treeIndex`): key → the revisions
+of each of its generations. It is loaded from the data file at startup
+and changed only after the write it describes is in the engine, so it
+is never ahead of the disk. A read finds the revision it needs there;
+compaction walks it too, instead of reading the whole index table.
+
+On top of it, a **latest-value cache** holds the newest record of
+recently used keys, least recently used evicted first, within
+`--value-cache-bytes`. Every write puts what it wrote in it, a delete
+removes the key, and a read of the latest revision that missed fills
+it. An entry answers a read only when it is the exact revision the
+index names for that read, so the cache can make a read faster but
+never different: a hot single-object GET reads nothing from the disk,
+history and cold keys read the engine as before. Linearizable reads
+still wait for the read index first; the cache changes where a read's
+bytes come from, not when it may read. Values over
+`--value-cache-max-entry-bytes` are never cached.
+
+Memory to expect, beyond the process's own few tens of MiB:
+
+| Part | Size |
+|---|---|
+| Key index | ~(key length + 64 B) per key, plus 16 B per revision kept (history since the last compaction) and ~40 B per generation. Tens of MiB for a large Kubernetes cluster. |
+| Value cache | Up to `--value-cache-bytes` (default min(128 MiB, 5% of memory)). |
+| Engine cache | Up to `--engine-cache-bytes` (default 256 MiB), redb's page cache, filled as pages are read. |
+
+The kernel's page cache comes on top and is reclaimable. The startup log
+line `RAM cache:` gives the configured budgets and the index's size; the
+metrics below give them live.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `fastetcd_value_cache_hits_total` / `…_misses_total` | counter | Record lookups the value cache answered, and those that read the engine. |
+| `fastetcd_value_cache_evictions_total` | counter | Entries evicted to stay in budget. Climbing fast with a low hit ratio: the budget is smaller than the hot set. |
+| `fastetcd_value_cache_bytes` / `…_entries` / `…_budget_bytes` | gauge | What the cache holds (entry overhead included), and its budget. |
+| `fastetcd_key_index_keys` / `fastetcd_key_index_bytes` | gauge | Keys in the resident index, and its approximate size. |
+| `fastetcd_mvcc_get_duration_seconds{cache}` | histogram | The store's time for each single-key Range (after the read barrier): `cache="hit"` read nothing from the engine, `miss` did. |
+
 ## Multi-node
 
 ```
@@ -569,7 +610,8 @@ from deltas between scrapes.
 `etcd_mvcc_db_total_size_in_bytes`,
 `etcd_mvcc_db_total_size_in_use_in_bytes`,
 `etcd_server_quota_backend_bytes`, `fastetcd_engine_info{engine}`
-(`redb`, `wal` or `iouring`), and the disk and recovery metrics in
+(`redb`, `wal` or `iouring`), the RAM cache metrics in
+[Memory](#memory), and the disk and recovery metrics in
 [04-disk-space](04-disk-space.md) and
 [05-backup-and-recovery](05-backup-and-recovery.md).
 

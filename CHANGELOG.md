@@ -3,6 +3,35 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-02 — a GET of a hot key reads nothing from disk (#82, P1)
+- **perf:** Every key's index is resident in RAM, as etcd's `treeIndex`
+  is: loaded from `mvcc_idx` at open (in chunks), changed only after the
+  engine commit it describes and under the store's write lock, so it is
+  never ahead of the disk. Range, Txn compares, apply and compaction use
+  it; compaction no longer reads the whole index table. A Range with a
+  limit now reads only the records it returns.
+- **feat:** A latest-value cache: the newest record of recently used
+  keys, a sharded LRU bounded by `--value-cache-bytes` (default the
+  smaller of 128 MiB and 5% of the cgroup limit or RAM; `0` = off).
+  Writes put what they wrote in it, deletes remove it, a latest-revision
+  read that missed fills it. An entry is used only at the exact revision
+  the index names, so a read can come out faster but never different.
+  Values over `--value-cache-max-entry-bytes` (256 KiB) are not cached.
+- **feat:** `--engine-cache-bytes` sets redb's page cache, 256 MiB by
+  default (redb's own default is 1 GiB), so memory is about the two
+  budgets plus the index.
+- **feat:** Metrics `fastetcd_value_cache_{hits,misses,evictions}_total`,
+  `fastetcd_value_cache_{bytes,entries,budget_bytes}`,
+  `fastetcd_key_index_{keys,bytes}`, and the histogram
+  `fastetcd_mvcc_get_duration_seconds{cache=hit|miss}`.
+- **fix:** A raft snapshot install commits the new tables and reloads
+  the revision counters (and now the index) under the store's write
+  lock (`MvccStore::install_tables`); before, a read could run between
+  the commit and the reload and see new data at the old revision.
+- No change to the data file or the wire: any version opens the file.
+- **docs:** `docs/03-deploy.md` § Memory, `docs/01-configuration.md`
+  § Memory, README.
+
 ### 2026-10-02 — documentation from the code, since 2026-09-25
 - **docs:** `--snapshot-count` counts raft log entries, and since 1.10
   an entry can be a batch of up to 256 writes, so it is not etcd's
