@@ -75,6 +75,17 @@ against this tree and, if given, a baseline ref; `MEMBERS=3` runs a
 local three-member cluster and measures through two members' client
 ports (#75).
 
+Against upstream etcd (#90): `tests/bench/compare.sh <etcd-version>`
+downloads the etcd release (sha256-checked), builds etcd's own
+`benchmark` tool from the same tag with a downloaded Go, builds
+fastetcd at each tag in `FASTETCD_TAGS`, and runs etcd's put / range /
+txn-put / watch / lease-keepalive workloads, a SIGKILL durability test
+(`fastetcd-bench --mode durability-write|durability-check`), resource
+sampling and, with `PARTS=k8s`, rustkube's apiserver rig on each. It
+writes CSVs; `tests/bench/extract.py` pulls them out of an sc-build log
+and `tests/bench/report.py` turns them into the tables of
+`docs/benchmarks/etcd-vs-fastetcd.md`.
+
 ## Ring 2 — Third-party Rust client compatibility
 
 Run with: `cargo test -p fastetcd-server --test etcd_client_compat`
