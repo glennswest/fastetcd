@@ -47,9 +47,12 @@
 //!     it read nothing from the engine
 //!
 //!   - raft WAL (#85): `fastetcd_wal_fsyncs_total`,
-//!     `fastetcd_wal_fsync_seconds_total`, `fastetcd_wal_bytes_appended_total`
-//!     (counters), `fastetcd_wal_segments`, `fastetcd_wal_cached_bytes`,
-//!     `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`
+//!     `fastetcd_wal_fsync_seconds_total`, `fastetcd_wal_bytes_appended_total`,
+//!     `fastetcd_wal_entries_synced_total`, `fastetcd_wal_proposals_synced_total`
+//!     (counters; per fsync = their rate / the fsync rate, #95),
+//!     `fastetcd_wal_segments`, `fastetcd_wal_cached_bytes`,
+//!     `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`,
+//!     `fastetcd_checkpoint_pace_seconds`
 //!     (gauges); background checkpoints of the data file:
 //!     `fastetcd_checkpoints_total`, `fastetcd_checkpoint_seconds_total`,
 //!     `fastetcd_checkpoint_failures_total`,
@@ -623,6 +626,9 @@ impl CacheMetrics {
 pub struct WalMetrics {
     fsyncs: Counter,
     fsync_seconds: Counter<f64, AtomicU64>,
+    entries_synced: Counter,
+    proposals_synced: Counter,
+    checkpoint_pace_seconds: Gauge<f64, AtomicU64>,
     fsync_max_seconds: Gauge<f64, AtomicU64>,
     checkpoint_max_seconds: Gauge<f64, AtomicU64>,
     checkpoint_commit_seconds: Counter<f64, AtomicU64>,
@@ -646,6 +652,9 @@ impl WalMetrics {
         Self {
             fsyncs: Counter::default(),
             fsync_seconds: Counter::default(),
+            entries_synced: Counter::default(),
+            proposals_synced: Counter::default(),
+            checkpoint_pace_seconds: Gauge::default(),
             fsync_max_seconds: Gauge::default(),
             checkpoint_max_seconds: Gauge::default(),
             checkpoint_commit_seconds: Counter::default(),
@@ -675,6 +684,21 @@ impl WalMetrics {
             "fastetcd_wal_fsync_seconds",
             "Time spent in raft WAL fdatasyncs",
             self.fsync_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_wal_entries_synced",
+            "Raft log entries made durable by WAL fdatasyncs (per fsync: divide by fastetcd_wal_fsyncs_total)",
+            self.entries_synced.clone(),
+        );
+        reg.register(
+            "fastetcd_wal_proposals_synced",
+            "Client proposals in the raft log entries made durable (a batch entry holds several)",
+            self.proposals_synced.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_pace_seconds",
+            "Least time after the last checkpoint before the next may start (4x its duration)",
+            self.checkpoint_pace_seconds.clone(),
         );
         reg.register(
             "fastetcd_wal_fsync_max_seconds",
@@ -758,6 +782,9 @@ impl WalMetrics {
         let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         catch_up(&self.fsyncs, load(&s.fsyncs));
         catch_up_seconds(&self.fsync_seconds, load(&s.fsync_nanos));
+        catch_up(&self.entries_synced, load(&s.entries_synced));
+        catch_up(&self.proposals_synced, load(&s.proposals_synced));
+        self.checkpoint_pace_seconds.set(load(&s.checkpoint_pace_nanos) as f64 / 1e9);
         self.fsync_max_seconds.set(load(&s.fsync_max_nanos) as f64 / 1e9);
         self.checkpoint_max_seconds.set(load(&s.checkpoint_max_nanos) as f64 / 1e9);
         catch_up_seconds(&self.checkpoint_commit_seconds, load(&s.checkpoint_commit_nanos));

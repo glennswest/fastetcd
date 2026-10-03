@@ -25,7 +25,7 @@ use fastetcd_storage::KvStore;
 fn small() -> WalLogOptions {
     // Tiny segments and cache: rolls, segment drops and disk reads all
     // happen within a few entries.
-    WalLogOptions { segment_bytes: 4096, cache_bytes: 512 }
+    WalLogOptions { segment_bytes: 4096, cache_bytes: 512, ..Default::default() }
 }
 
 async fn open_dir(dir: &std::path::Path) -> (Arc<dyn KvStore>, WalLogStore, FastetcdStateMachine) {
@@ -301,4 +301,152 @@ async fn a_node_purges_wal_segments_and_restarts_with_everything() {
     let out = sm.mvcc().range(b"k", b"l", 0, 0, false, false).await.unwrap();
     assert_eq!(out.kvs.len(), N + 1, "every write is there after the restart");
     raft.shutdown().await.unwrap();
+}
+
+// ---- a slow disk (fastetcd#95) -------------------------------------------
+
+/// The data file's engine with a slow durable commit, as a checkpoint
+/// is on a spinning disk.
+struct SlowCheckpoint(Arc<dyn KvStore>, Duration);
+
+#[async_trait::async_trait]
+impl KvStore for SlowCheckpoint {
+    async fn snapshot(&self) -> fastetcd_storage::StorageResult<Arc<dyn fastetcd_storage::Snapshot>> {
+        self.0.snapshot().await
+    }
+    async fn commit(
+        &self,
+        batch: fastetcd_storage::WriteBatch,
+        opts: fastetcd_storage::WriteOptions,
+    ) -> fastetcd_storage::StorageResult<()> {
+        if opts.sync {
+            tokio::time::sleep(self.1).await;
+        }
+        self.0.commit(batch, opts).await
+    }
+    async fn sync(&self) -> fastetcd_storage::StorageResult<()> {
+        tokio::time::sleep(self.1).await;
+        self.0.sync().await
+    }
+    async fn size_on_disk(&self) -> fastetcd_storage::StorageResult<u64> {
+        self.0.size_on_disk().await
+    }
+    fn engine_name(&self) -> &'static str {
+        "slow-checkpoint"
+    }
+}
+
+/// A single-member node on a WAL whose fsync takes `fsync` and a data
+/// file whose durable commit takes `checkpoint`.
+async fn slow_node(
+    dir: &std::path::Path,
+    fsync: Duration,
+    checkpoint: Duration,
+) -> (Raft<TypeConfig>, WalLogStore, FastetcdStateMachine) {
+    let base: Arc<dyn KvStore> = Arc::new(RedbEngine::open(dir.join("fastetcd.redb")).unwrap());
+    let wb: Arc<dyn KvStore> = Arc::new(WriteBehind::new(base, 64 * 1024 * 1024));
+    let engine: Arc<dyn KvStore> = Arc::new(SlowCheckpoint(wb, checkpoint));
+    let mvcc = MvccStore::open(engine.clone()).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc, dir.join("snapshots")).await.unwrap();
+    sm.mvcc().defer_apply_sync();
+    let log = WalLogStore::open(
+        &wal_dir(dir),
+        engine,
+        WalLogOptions { sync_delay: fsync, ..Default::default() },
+    )
+    .await
+    .unwrap();
+    let raft = Raft::<TypeConfig>::new(1, config(), NopNetwork, log.clone(), sm.clone())
+        .await
+        .unwrap();
+    raft.initialize(BTreeSet::from([1])).await.unwrap();
+    wait_leader(&raft).await;
+    (raft, log, sm)
+}
+
+/// Proposals per WAL fsync for `clients` writers that each wait for
+/// their write before the next, as the kubelet's status updates do.
+async fn proposals_per_fsync(in_flight: usize) -> f64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    const CLIENTS: usize = 20;
+    const EACH: usize = 10;
+    let dir = tempfile::tempdir().unwrap();
+    let (raft, log, _sm) = slow_node(dir.path(), Duration::from_millis(20), Duration::ZERO).await;
+    let proposer = fastetcd_raft::Proposer::spawn(
+        raft.clone(),
+        log.progress(),
+        fastetcd_raft::WriteForwarder::new(fastetcd_raft::empty_peers()),
+        in_flight,
+    );
+    let stats = log.stats();
+    let (f0, p0) = (stats.fsyncs.load(Relaxed), stats.proposals_synced.load(Relaxed));
+    let tasks: Vec<_> = (0..CLIENTS)
+        .map(|c| {
+            let p = proposer.clone();
+            tokio::spawn(async move {
+                for i in 0..EACH {
+                    p.propose(put(c * EACH + i)).await.expect("proposal applied");
+                }
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let (f1, p1) = (stats.fsyncs.load(Relaxed), stats.proposals_synced.load(Relaxed));
+    assert_eq!(p1 - p0, (CLIENTS * EACH) as u64, "every proposal counted once");
+    let per = (p1 - p0) as f64 / (f1 - f0) as f64;
+    eprintln!("in flight {in_flight}: {} proposals in {} fsyncs, {per:.1} per fsync", p1 - p0, f1 - f0);
+    raft.shutdown().await.unwrap();
+    per
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_share_a_wal_fsync() {
+    // The server's cap: every waiting writer's proposal is appended at
+    // once, so one fsync carries about all of them.
+    let wide = proposals_per_fsync(fastetcd_raft::proposer::IN_FLIGHT).await;
+    // #75's cap of 3: a proposal waits for an earlier one's apply.
+    let narrow = proposals_per_fsync(fastetcd_raft::proposer::IN_FLIGHT_BLOCKING_LOG).await;
+    assert!(wide >= 8.0, "20 writers, {wide:.1} proposals per fsync");
+    assert!(wide > narrow * 1.5, "in flight 64: {wide:.1} per fsync, 3: {narrow:.1}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_checkpoints_leave_the_disk_to_the_wal() {
+    use std::sync::atomic::Ordering::Relaxed;
+    const CHECKPOINT: Duration = Duration::from_millis(40);
+    let dir = tempfile::tempdir().unwrap();
+    let (raft, log, sm) = slow_node(dir.path(), Duration::ZERO, CHECKPOINT).await;
+    let stats = log.stats();
+    // Asked for every 5 ms: unpaced, checkpoints would run back to back.
+    let checkpointer = spawn_checkpointer(
+        log.clone(),
+        sm.applied_index(),
+        CheckpointConfig { interval: Duration::from_millis(5), entries: 10_000 },
+    );
+    let started = tokio::time::Instant::now();
+    let mut i = 0;
+    while started.elapsed() < Duration::from_secs(2) {
+        raft.client_write(put(i)).await.unwrap();
+        i += 1;
+    }
+    let ran = started.elapsed();
+    let n = stats.checkpoints.load(Relaxed);
+    let pace = Duration::from_nanos(stats.checkpoint_pace_nanos.load(Relaxed));
+    eprintln!("{i} writes, {n} checkpoints in {ran:?}, pace {pace:?}");
+    // Each cycle is at least 40 ms + 4 x 40 ms: about 10 in 2 s, not 50.
+    let most = (ran.as_millis() / (5 * CHECKPOINT.as_millis())) as u64 + 2;
+    assert!(n >= 2, "{n} checkpoints");
+    assert!(n <= most, "{n} checkpoints in {ran:?}, at most {most} when paced");
+    assert!(pace >= CHECKPOINT * fastetcd_raft::wal_log_store::CHECKPOINT_PACE);
+    // Paced, not skipped: the last write still becomes durable.
+    let applied = *sm.applied_index().borrow();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while stats.durable_applied.load(Relaxed) < applied {
+        assert!(tokio::time::Instant::now() < deadline, "no checkpoint covered the last write");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    raft.shutdown().await.unwrap();
+    checkpointer.abort();
 }

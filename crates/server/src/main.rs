@@ -374,7 +374,9 @@ struct Args {
     /// The data file is made durable (one redb commit) at most this many
     /// milliseconds after an entry is applied. A crash loses at most
     /// this much applied state from the data file, and the WAL replays
-    /// it on restart (fastetcd#85).
+    /// it on restart (fastetcd#85). Where a checkpoint is slow (a
+    /// spinning disk), the next waits at least four times as long as
+    /// the last one took, leaving the disk to the WAL (fastetcd#95).
     #[arg(long, env = "FASTETCD_WAL_CHECKPOINT_INTERVAL_MS", default_value_t = 100)]
     wal_checkpoint_interval_ms: u64,
 
@@ -912,6 +914,7 @@ async fn main() -> anyhow::Result<()> {
         fastetcd_raft::wal_log_store::WalLogOptions {
             segment_bytes: args.wal_segment_bytes,
             cache_bytes: args.wal_cache_bytes as usize,
+            ..Default::default()
         },
     )
     .await?;
@@ -1184,7 +1187,10 @@ async fn main() -> anyhow::Result<()> {
         .with_write_behind_stats(write_behind_stats)
         // Linearizable reads and batched writes without queueing in
         // openraft's RaftCore, on one member (#71) or several (#75).
-        .with_peer_read_index_and_batching(log_progress.clone()),
+        .with_peer_read_index_and_batching(
+            log_progress.clone(),
+            fastetcd_raft::proposer::IN_FLIGHT,
+        ),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).

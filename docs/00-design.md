@@ -89,7 +89,9 @@ production system. We integrate by:
   in-RAM layer, visible at once, since a snapshot is the layer list plus
   a redb snapshot taken together and reads merge them (newest wins).
   The **checkpointer**, every `--wal-checkpoint-interval-ms` (100) or
-  `--wal-checkpoint-entries` applied entries, writes the layers into
+  `--wal-checkpoint-entries` applied entries, but no sooner than four
+  times the last checkpoint's duration after it (so on a slow disk it
+  leaves the WAL's fsyncs most of the disk, #95), writes the layers into
   redb as one non-durable commit (dropping them from the list in the
   same step for readers) and then commits durably. Every redb write is
   serialized behind one flush lock, so an apply never waits on redb's
@@ -201,11 +203,15 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 1. Client `Put` arrives at any node.
 2. Non-leader forwards to leader (etcd does the same internally).
 3. Leader proposes through openraft; awaits commit. Proposals queue in
-   a `Proposer` (`crates/raft/src/proposer.rs`): up to three
-   `client_write`s are in flight, and whatever queued meanwhile goes as
-   one `FastetcdLogEntry::Batch` — one RaftCore message, one log append,
-   one fsync for all of them (up to 256 proposals, 512 KiB), each
-   applied at its own revision with its own answer (#75). Batches are
+   a `Proposer` (`crates/raft/src/proposer.rs`): up to 64
+   `client_write`s are in flight, and whatever queued past that goes as
+   one `FastetcdLogEntry::Batch` — one RaftCore message, one log append
+   (up to 256 proposals, 512 KiB), each applied at its own revision with
+   its own answer (#75). Since an append does not wait for its fsync
+   (#85), every write in flight reaches the WAL at once, and one fsync
+   carries everything appended while the previous one ran (#95; with
+   three in flight, as #75 had it, a write waited for an earlier one's
+   apply before it was appended). Batches are
    proposed only once every member has answered `ConfirmLeader` (an
    older member cannot decode one), re-checked on membership changes.
    Applying a batch records `(index, done)` with each proposal's commit,

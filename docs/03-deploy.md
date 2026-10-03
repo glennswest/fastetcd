@@ -382,7 +382,9 @@ WAL (on a quorum) and applied. The fsync on that path is an append at
 the end of the newest segment: a sequential write, which is what a
 spinning disk or a network block device does best. One writer thread
 syncs everything appended while the previous sync ran, so concurrent
-writes share one `fdatasync`.
+writes share one `fdatasync`: up to 64 writes are proposed at once and
+more go as batches, so a burst of writes pays about one fsync, not one
+each (#95).
 
 Applying an entry does not touch the data file: its writes are held in
 RAM (the write-behind layer, up to `--write-behind-bytes`, 64 MiB) and
@@ -390,9 +392,13 @@ in the RAM index and value cache ([Memory](#memory)), and reads see
 them at once. A **checkpoint** then writes them into the data file and
 makes it durable, in the background: at most
 `--wal-checkpoint-interval-ms` (100) after an apply, or after
-`--wal-checkpoint-entries` (10000) entries. An apply never waits on the
-data file's fsync; only if more than `--write-behind-bytes` is held
-does it write them out first.
+`--wal-checkpoint-entries` (10000) entries. On a slow disk, where a
+checkpoint (the data file's page writes and fsync) takes about as long
+as that interval, the next one waits at least four times as long as the
+last took, so checkpoints use at most a fifth of the disk's time and
+the WAL's fsyncs, which clients wait on, are not queued behind them
+(#95). An apply never waits on the data file's fsync; only if more than
+`--write-behind-bytes` is held does it write them out first.
 
 After a crash the data file is as of its last checkpoint, and the WAL
 replays the rest: a member re-applies up to the committed index it
@@ -412,12 +418,20 @@ Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_checkpoint_seconds_total`, `fastetcd_checkpoint_failures_total`,
 `fastetcd_checkpoint_commit_seconds_total`, `fastetcd_checkpoint_durable_applied_index`,
 `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`,
-`fastetcd_checkpoint_commit_max_seconds`; the write-behind layer:
+`fastetcd_checkpoint_commit_max_seconds`,
+`fastetcd_checkpoint_pace_seconds` (the least time before the next
+checkpoint, 4x the last one's duration); group commit (#95):
+`fastetcd_wal_entries_synced_total` and
+`fastetcd_wal_proposals_synced_total`, the raft entries and the client
+proposals in them made durable by the fsyncs; the write-behind layer:
 `fastetcd_write_behind_bytes`, `fastetcd_write_behind_batches`,
 `fastetcd_write_behind_flushes_total`,
 `fastetcd_write_behind_flush_seconds_total`,
 `fastetcd_write_behind_backpressure_total`. Average fsync time is
-`rate(fastetcd_wal_fsync_seconds_total) / rate(fastetcd_wal_fsyncs_total)`.
+`rate(fastetcd_wal_fsync_seconds_total) / rate(fastetcd_wal_fsyncs_total)`;
+fsyncs per second is `rate(fastetcd_wal_fsyncs_total)`, and writes per
+fsync is
+`rate(fastetcd_wal_proposals_synced_total) / rate(fastetcd_wal_fsyncs_total)`.
 
 **Upgrading to 1.12** moves the raft log out of the data file on the
 first start: `wal/` is built from it (in `wal.tmp/`, then renamed) and

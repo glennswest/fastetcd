@@ -120,7 +120,12 @@ async fn start_node(id: NodeId, older: bool) -> Node {
     let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
     let state = Arc::new(
         ServerState::new(raft.clone(), sm, 7, id, forwarder)
-            .with_peer_read_index_and_batching(progress.clone()),
+            // A small in-flight cap, so the 24 writers below queue and are
+            // batched (the server's IN_FLIGHT would take them all at once).
+            .with_peer_read_index_and_batching(
+                progress.clone(),
+                fastetcd_raft::proposer::IN_FLIGHT_BLOCKING_LOG,
+            ),
     );
 
     let peer_service = RaftPeerService::new(raft.clone(), mvcc)

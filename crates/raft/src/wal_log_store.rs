@@ -80,6 +80,9 @@ pub struct WalLogOptions {
     /// Bytes of recent entries kept in RAM (followers read them to
     /// replicate); older ones are read back from the segments.
     pub cache_bytes: usize,
+    /// Added to every fdatasync: tests stand in for a slow disk with
+    /// it. Zero in the server.
+    pub sync_delay: Duration,
 }
 
 impl Default for WalLogOptions {
@@ -87,6 +90,7 @@ impl Default for WalLogOptions {
         Self {
             segment_bytes: fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES,
             cache_bytes: 64 * 1024 * 1024,
+            sync_delay: Duration::ZERO,
         }
     }
 }
@@ -96,6 +100,11 @@ impl Default for WalLogOptions {
 pub struct WalStats {
     pub fsyncs: AtomicU64,
     pub fsync_nanos: AtomicU64,
+    /// Raft entries made durable, and the client proposals in them (a
+    /// batch entry holds several): per fsync, divide by `fsyncs`
+    /// (fastetcd#95).
+    pub entries_synced: AtomicU64,
+    pub proposals_synced: AtomicU64,
     /// Longest single fdatasync since the process started.
     pub fsync_max_nanos: AtomicU64,
     pub bytes_appended: AtomicU64,
@@ -110,6 +119,9 @@ pub struct WalStats {
     pub checkpoint_commit_nanos: AtomicU64,
     pub checkpoint_commit_max_nanos: AtomicU64,
     pub checkpoint_failures: AtomicU64,
+    /// The least time after the last checkpoint before the next may
+    /// start: [`CHECKPOINT_PACE`] times its duration (fastetcd#95).
+    pub checkpoint_pace_nanos: AtomicU64,
     /// `index + 1` of the last applied entry a checkpoint made durable
     /// in the data file (0 = none yet in this process).
     pub durable_applied: AtomicU64,
@@ -119,6 +131,9 @@ type Done = Box<dyn FnOnce(io::Result<()>) + Send>;
 
 struct Cmd {
     records: Vec<(u8, u64, Arc<Vec<u8>>)>,
+    /// Raft entries and client proposals in `records` (for the stats).
+    entries: u64,
+    proposals: u64,
     sync: bool,
     /// After the sync, delete segments whose entries are all `<=` this.
     drop_upto: Option<u64>,
@@ -206,6 +221,7 @@ fn writer(
     rx: mpsc::Receiver<Cmd>,
     state: Arc<Mutex<State>>,
     stats: Arc<WalStats>,
+    sync_delay: Duration,
 ) {
     // Once a write fails, every later one fails too: a gap in the log
     // must never be followed by an entry.
@@ -220,6 +236,7 @@ fn writer(
         }
         let mut placed = Vec::new();
         let mut sync = false;
+        let (mut entries, mut proposals) = (0u64, 0u64);
         let mut drop_upto: Option<u64> = None;
         if failed.is_none() {
             for cmd in &cmds {
@@ -246,6 +263,8 @@ fn writer(
                     }
                 }
                 sync |= cmd.sync;
+                entries += cmd.entries;
+                proposals += cmd.proposals;
                 if let Some(d) = cmd.drop_upto {
                     drop_upto = Some(drop_upto.map_or(d, |x| x.max(d)));
                 }
@@ -253,6 +272,9 @@ fn writer(
         }
         if failed.is_none() && sync {
             let t = Instant::now();
+            if !sync_delay.is_zero() {
+                std::thread::sleep(sync_delay);
+            }
             if let Err(e) = wal.sync() {
                 tracing::error!(error = %e, "raft WAL fdatasync failed");
                 failed = Some((e.kind(), format!("raft WAL fdatasync: {e}")));
@@ -261,6 +283,10 @@ fn writer(
             stats.fsyncs.fetch_add(1, Ordering::Relaxed);
             stats.fsync_nanos.fetch_add(took, Ordering::Relaxed);
             stats.fsync_max_nanos.fetch_max(took, Ordering::Relaxed);
+            if failed.is_none() {
+                stats.entries_synced.fetch_add(entries, Ordering::Relaxed);
+                stats.proposals_synced.fetch_add(proposals, Ordering::Relaxed);
+            }
         }
         if failed.is_none() {
             if let Some(d) = drop_upto {
@@ -474,7 +500,7 @@ impl WalLogStore {
             let stats = stats.clone();
             std::thread::Builder::new()
                 .name("raft-wal".into())
-                .spawn(move || writer(wal, rx, state, stats))?;
+                .spawn(move || writer(wal, rx, state, stats, opts.sync_delay))?;
         }
         Ok(Self { state, tx, reader, engine, stats, committed_index, progress })
     }
@@ -508,6 +534,8 @@ impl WalLogStore {
         let (tx, rx) = oneshot::channel();
         self.send(Cmd {
             records,
+            entries: 0,
+            proposals: 0,
             sync: true,
             drop_upto,
             done: Some(Box::new(move |r| {
@@ -670,6 +698,8 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
         // after a crash is one openraft accepts.
         self.send(Cmd {
             records: vec![(KIND_COMMITTED, 0, Arc::new(bytes))],
+            entries: 0,
+            proposals: 0,
             sync: false,
             drop_upto: None,
             done: None,
@@ -693,6 +723,7 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
     {
         let mut records = Vec::new();
         let mut last = None;
+        let mut proposals = 0u64;
         {
             let mut st = self.state.lock().unwrap();
             for entry in entries {
@@ -707,6 +738,13 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
                         *ts = (entry.log_id.leader_id.term, entry.log_id.index + 1);
                     }
                 }
+                proposals += match &entry.payload {
+                    openraft::EntryPayload::Normal(crate::types::FastetcdLogEntry::Batch(v)) => {
+                        v.len() as u64
+                    }
+                    openraft::EntryPayload::Normal(_) => 1,
+                    _ => 0,
+                };
                 let index = entry.log_id.index;
                 let bytes =
                     Arc::new(bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?);
@@ -720,8 +758,11 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
             self.stats.cached_bytes.store(st.cached_bytes as u64, Ordering::Relaxed);
         }
         let progress = self.progress.clone();
+        let entries = records.len() as u64;
         self.send(Cmd {
             records,
+            entries,
+            proposals,
             sync: true,
             drop_upto: None,
             done: Some(Box::new(move |r: io::Result<()>| {
@@ -790,10 +831,21 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
     }
 }
 
+/// A checkpoint that took `d` lets the next start no sooner than
+/// `CHECKPOINT_PACE * d` after it ended, so checkpoints take at most
+/// 1 / (1 + CHECKPOINT_PACE) of the disk's time (fastetcd#95). On a slow
+/// disk a checkpoint (the data file's page writes and fsync) took about
+/// as long as the 100 ms interval, so they ran back to back and every
+/// WAL fsync, which a client's write waits on, queued behind them: 20
+/// writers got 34 writes/s, ~4x slower fsyncs. On a fast disk `d` is a
+/// few ms and the interval decides, as before.
+pub const CHECKPOINT_PACE: u32 = 4;
+
 /// When the checkpointer makes the data file durable.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckpointConfig {
-    /// At most this long between checkpoints while entries are applied.
+    /// At most this long between checkpoints while entries are applied
+    /// (longer on a disk where a checkpoint is slow: [`CHECKPOINT_PACE`]).
     pub interval: Duration,
     /// Or as soon as this many entries were applied since the last one.
     pub entries: u64,
@@ -820,6 +872,7 @@ pub fn spawn_checkpointer(
         let mut ticker = tokio::time::interval(cfg.interval.max(Duration::from_millis(1)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut durable: Option<u64> = None;
+        let mut not_before = Instant::now();
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -834,6 +887,11 @@ pub fn spawn_checkpointer(
                     }
                 }
             }
+            if durable == Some(*applied.borrow()) && store.pending_purge().is_none() {
+                continue;
+            }
+            // Leave the disk to the WAL for a while after a slow one.
+            tokio::time::sleep_until(not_before.into()).await;
             let target = *applied.borrow_and_update();
             let purge = store.pending_purge();
             if durable == Some(target) && purge.is_none() {
@@ -847,6 +905,9 @@ pub fn spawn_checkpointer(
                 continue;
             }
             durable = Some(target);
+            let pace = t.elapsed() * CHECKPOINT_PACE;
+            not_before = Instant::now() + pace;
+            store.stats.checkpoint_pace_nanos.store(pace.as_nanos() as u64, Ordering::Relaxed);
             let took = t.elapsed().as_nanos() as u64;
             store.stats.checkpoints.fetch_add(1, Ordering::Relaxed);
             store.stats.checkpoint_nanos.fetch_add(took, Ordering::Relaxed);

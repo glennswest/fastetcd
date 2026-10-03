@@ -3,6 +3,23 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-03 — group commit on a slow disk (#95, #94)
+- **perf:** Concurrent writes share a WAL fsync. The proposer lets up to
+  64 `client_write`s run at once (was 3); since #85 an append does not
+  wait for its fsync, so each write reaches the WAL at once and one fsync
+  carries every write appended while the previous one ran. With 3, a
+  write waited for an earlier write's apply before it was appended: on a
+  slow disk 20 writers got ~4 writes per fsync. Past 64, proposals still
+  go as batches.
+- **perf:** Checkpoints are paced: after one that took `d`, the next waits
+  at least `4·d`. On a slow disk a checkpoint took about the 100 ms
+  interval, so they ran back to back and every WAL fsync queued behind
+  the data file's writes (fsync 35 → 119 ms on benchslow). Unchanged on
+  a fast disk.
+- **feat:** Metrics `fastetcd_wal_entries_synced_total`,
+  `fastetcd_wal_proposals_synced_total` (writes per fsync = their rate /
+  the fsync rate) and `fastetcd_checkpoint_pace_seconds`.
+
 ### 2026-10-03 — upstream etcd vs fastetcd, side by side (#90)
 - **docs:** `docs/benchmarks/etcd-vs-fastetcd.md`: etcd v3.7.2 vs fastetcd
   v1.11.0 and v1.12.0 on three disks (build box SSD, a pve VM on SSD, a

@@ -3,11 +3,22 @@
 //! openraft 0.9's RaftCore takes client writes one message at a time
 //! and awaits each one's log append and fsync before the next, so a
 //! member's write rate was bounded by one fsync per write. The
-//! proposer queues proposals instead. Up to [`IN_FLIGHT`] `client_write`
+//! proposer queues proposals instead. Up to `in_flight` `client_write`
 //! calls run at once; whatever queued while they ran is proposed as one
-//! [`FastetcdLogEntry::Batch`] — one RaftCore message, one append, one
-//! fsync — and each caller gets its own response back. A proposal that
-//! finds the queue empty goes as a plain entry, exactly as before.
+//! [`FastetcdLogEntry::Batch`] — one RaftCore message, one append — and
+//! each caller gets its own response back. A proposal that finds a free
+//! slot goes as a plain entry, exactly as before.
+//!
+//! How many may be in flight depends on the log store (fastetcd#95).
+//! The WAL's `append` returns before its fsync and its writer syncs
+//! everything appended during the previous fsync in one go, so the
+//! server lets [`IN_FLIGHT`] writes run: each reaches the log at once
+//! and one fsync carries every write that arrived while the last one
+//! ran. With 3, as #75 had it, a write proposed during an fsync waited
+//! for an earlier write's apply before it was even appended, and one
+//! fsync carried ~4 writes from 20 clients on a slow disk. A log store
+//! whose `append` waits for its fsync (the redb log, used by tests)
+//! wants [`IN_FLIGHT_BLOCKING_LOG`]: more only splits the queue.
 //!
 //! A `Batch` entry cannot be decoded by a member older than this, so
 //! nothing is batched until every member (voters and learners) has
@@ -28,10 +39,13 @@ use crate::kv_log_store::LogProgress;
 use crate::network::{ConfirmError, WriteForwarder};
 use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
-/// `client_write` calls in flight at once. RaftCore appends one at a
-/// time, so more only splits the queue into smaller batches; fewer
-/// than two would idle it while a batch commits and applies.
-pub const IN_FLIGHT: usize = 3;
+/// `client_write` calls in flight at once over the WAL log store (see
+/// the module docs). Past it, proposals queue and go as batches.
+pub const IN_FLIGHT: usize = 64;
+/// ... over a log store whose `append` waits for its fsync: RaftCore
+/// appends one at a time, so more only splits the queue into smaller
+/// batches; fewer than two would idle it while a batch commits.
+pub const IN_FLIGHT_BLOCKING_LOG: usize = 3;
 /// Most proposals in one batch.
 pub const MAX_BATCH: usize = 256;
 /// Most encoded bytes in one batch. Peer gRPC decodes up to 4 MiB per
@@ -180,9 +194,15 @@ pub struct Proposer {
 }
 
 impl Proposer {
-    /// Start the proposer's task. `progress` is the node's
-    /// `KvLogStore::progress`; `forwarder` reaches the other members.
-    pub fn spawn(raft: Raft<TypeConfig>, progress: LogProgress, forwarder: WriteForwarder) -> Self {
+    /// Start the proposer's task. `progress` is the node's log store
+    /// progress; `forwarder` reaches the other members; `in_flight` is
+    /// [`IN_FLIGHT`] or [`IN_FLIGHT_BLOCKING_LOG`].
+    pub fn spawn(
+        raft: Raft<TypeConfig>,
+        progress: LogProgress,
+        forwarder: WriteForwarder,
+        in_flight: usize,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let gate = Arc::new(BatchGate {
             raft: raft.clone(),
@@ -194,7 +214,7 @@ impl Proposer {
             last_probe: std::sync::Mutex::new(None),
         });
         let stats = Arc::new(ProposerStats::default());
-        tokio::spawn(run(raft, rx, gate, stats.clone()));
+        tokio::spawn(run(raft, rx, gate, stats.clone(), in_flight.max(1)));
         Self { tx, stats }
     }
 
@@ -220,8 +240,9 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     gate: Arc<BatchGate>,
     stats: Arc<ProposerStats>,
+    in_flight: usize,
 ) {
-    let permits = Arc::new(Semaphore::new(IN_FLIGHT));
+    let permits = Arc::new(Semaphore::new(in_flight));
     let mut carry: Option<Pending> = None;
     loop {
         let first = match carry.take() {
