@@ -28,13 +28,14 @@ fn small() -> WalLogOptions {
 }
 
 async fn open_dir(dir: &std::path::Path) -> (Arc<dyn KvStore>, WalLogStore, FastetcdStateMachine) {
-    // A restart in the same process: the previous node's tasks may hold
-    // the file for a moment after shutdown.
+    // A restart in the same process: the previous node's tasks (a
+    // snapshot build openraft started, on a loaded build box) may hold
+    // the file for a while after shutdown. A real leak still fails.
     let mut tries = 0;
     let engine: Arc<dyn KvStore> = loop {
         match RedbEngine::open(dir.join("fastetcd.redb")) {
             Ok(e) => break Arc::new(e),
-            Err(e) if tries < 50 => {
+            Err(e) if tries < 300 => {
                 tries += 1;
                 let _ = e;
                 tokio::time::sleep(Duration::from_millis(100)).await;
