@@ -12,9 +12,11 @@
 //! - **The log** is [`fastetcd_storage::raft_wal`]: records appended to
 //!   preallocated segment files. One writer thread takes whatever
 //!   openraft appended while the previous fsync ran and makes it durable
-//!   with one `fdatasync` (group commit), then calls each `LogFlushed`.
-//!   `append` returns as soon as the entries are readable, so RaftCore
-//!   does not wait for the disk.
+//!   with one `fdatasync`, then calls each `LogFlushed`. `append`
+//!   returns as soon as the entries are readable, but openraft 0.9's
+//!   RaftCore awaits that `LogFlushed` before it goes on, so it has one
+//!   append at a time in the WAL: concurrent writes share an fsync by
+//!   being proposed as one batch entry ([`crate::proposer`], #95).
 //! - **The vote** is a record synced before `save_vote` returns. The
 //!   committed id is a record that rides the next sync (openraft accepts
 //!   an older committed id after a crash).
@@ -476,6 +478,7 @@ impl WalLogStore {
             .or(last_purged.map(|p| p.index));
         if let Some(l) = last_index {
             progress.last_durable.fetch_max(l + 1, Ordering::Release);
+            progress.last_appended.fetch_max(l + 1, Ordering::Release);
         }
         let committed_index = Arc::new(AtomicU64::new(0));
         if let Some(c) = &committed {
@@ -746,6 +749,7 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
                     _ => 0,
                 };
                 let index = entry.log_id.index;
+                self.progress.note_appended(index);
                 let bytes =
                     Arc::new(bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?);
                 // An entry replaces whatever was at its index and after.
@@ -768,7 +772,7 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
             done: Some(Box::new(move |r: io::Result<()>| {
                 if r.is_ok() {
                     if let Some(last) = last {
-                        progress.last_durable.fetch_max(last + 1, Ordering::Release);
+                        progress.note_durable(last);
                     }
                 }
                 callback.log_io_completed(r);
@@ -787,6 +791,9 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
         // leader, but keep the value true.
         self.progress
             .last_durable
+            .fetch_min(log_id.index, Ordering::Release);
+        self.progress
+            .last_appended
             .fetch_min(log_id.index, Ordering::Release);
         {
             let mut ts = self.progress.term_start.lock().unwrap();

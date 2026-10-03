@@ -366,7 +366,7 @@ async fn slow_node(
 
 /// Proposals per WAL fsync for `clients` writers that each wait for
 /// their write before the next, as the kubelet's status updates do.
-async fn proposals_per_fsync(in_flight: usize) -> f64 {
+async fn proposals_per_fsync() -> f64 {
     use std::sync::atomic::Ordering::Relaxed;
     const CLIENTS: usize = 20;
     const EACH: usize = 10;
@@ -376,10 +376,13 @@ async fn proposals_per_fsync(in_flight: usize) -> f64 {
         raft.clone(),
         log.progress(),
         fastetcd_raft::WriteForwarder::new(fastetcd_raft::empty_peers()),
-        in_flight,
     );
     let stats = log.stats();
-    let (f0, p0) = (stats.fsyncs.load(Relaxed), stats.proposals_synced.load(Relaxed));
+    let (f0, p0, e0) = (
+        stats.fsyncs.load(Relaxed),
+        stats.proposals_synced.load(Relaxed),
+        stats.entries_synced.load(Relaxed),
+    );
     let tasks: Vec<_> = (0..CLIENTS)
         .map(|c| {
             let p = proposer.clone();
@@ -393,23 +396,31 @@ async fn proposals_per_fsync(in_flight: usize) -> f64 {
     for t in tasks {
         t.await.unwrap();
     }
-    let (f1, p1) = (stats.fsyncs.load(Relaxed), stats.proposals_synced.load(Relaxed));
+    let (f1, p1, e1) = (
+        stats.fsyncs.load(Relaxed),
+        stats.proposals_synced.load(Relaxed),
+        stats.entries_synced.load(Relaxed),
+    );
     assert_eq!(p1 - p0, (CLIENTS * EACH) as u64, "every proposal counted once");
     let per = (p1 - p0) as f64 / (f1 - f0) as f64;
-    eprintln!("in flight {in_flight}: {} proposals in {} fsyncs, {per:.1} per fsync", p1 - p0, f1 - f0);
+    eprintln!(
+        "{} proposals in {} log entries, {} fsyncs: {per:.1} per fsync",
+        p1 - p0,
+        e1 - e0,
+        f1 - f0
+    );
     raft.shutdown().await.unwrap();
     per
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writers_share_a_wal_fsync() {
-    // The server's cap: every waiting writer's proposal is appended at
-    // once, so one fsync carries about all of them.
-    let wide = proposals_per_fsync(fastetcd_raft::proposer::IN_FLIGHT).await;
-    // #75's cap of 3: a proposal waits for an earlier one's apply.
-    let narrow = proposals_per_fsync(fastetcd_raft::proposer::IN_FLIGHT_BLOCKING_LOG).await;
-    assert!(wide >= 8.0, "20 writers, {wide:.1} proposals per fsync");
-    assert!(wide > narrow * 1.5, "in flight 64: {wide:.1} per fsync, 3: {narrow:.1}");
+    // Each batch is formed when the previous fsync returns, from what
+    // arrived during it: a writer waits about two fsyncs, so 20 writers
+    // put about 10 proposals in each. Before #95 (a slot freed at apply,
+    // three in flight) a writer waited about four: 4.9 per fsync here.
+    let per = proposals_per_fsync().await;
+    assert!(per >= 7.0, "20 writers, {per:.1} proposals per fsync");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

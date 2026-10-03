@@ -1429,10 +1429,15 @@ Tracked live in the Claude task system. Snapshot of the order:
     to ~40 ms: checkpoints running back to back slow every WAL fsync,
     and the proposer's 3 in-flight writes cap what one fsync carries.
     Plan:
-    - **Proposer**: up to 64 `client_write`s in flight (was 3). Since
-      #85 `append` does not wait for its fsync, so RaftCore takes them
-      at once and the WAL writer syncs whatever was appended during the
-      previous fsync in one go. Batches still form past 64.
+    - **Proposer**: first tried 64 `client_write`s in flight, assuming
+      (as #85's docs said) that RaftCore does not wait for an append's
+      fsync. Wrong: openraft 0.9.24 `RaftCore::append_to_log` awaits
+      the `LogFlushed` callback, so every fsync carries exactly one
+      entry (measured: `entries_synced == fsyncs`) and 64 in flight was
+      worse (1.6 per fsync in the test, 21/s on benchslow). Group commit
+      must happen in the proposer: one batch waiting for its fsync (slot
+      freed when an entry past what was appended at submit is durable,
+      `LogProgress::durable_past`), the next formed when it returns.
     - **Checkpoint pacing**: after a checkpoint that took `d`, the next
       waits at least max(interval, 4·d) from its end, so checkpoints use
       at most ~20% of a slow disk's time; on a fast disk (d ≪ 25 ms)

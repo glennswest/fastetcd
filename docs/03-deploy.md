@@ -380,11 +380,13 @@ and `iouring` key-value engines, but the server cannot use them (#55);
 A client's write is acknowledged after its raft entry is durable in the
 WAL (on a quorum) and applied. The fsync on that path is an append at
 the end of the newest segment: a sequential write, which is what a
-spinning disk or a network block device does best. One writer thread
-syncs everything appended while the previous sync ran, so concurrent
-writes share one `fdatasync`: up to 64 writes are proposed at once and
-more go as batches, so a burst of writes pays about one fsync, not one
-each (#95).
+spinning disk or a network block device does best. Concurrent writes
+share one `fdatasync` (group commit, #95): while one fsync runs, the
+writes that arrive queue on the leader, and the moment it returns they
+are proposed together as one raft entry, written and synced once. A
+burst of writes pays about one fsync, not one each; a lone write pays
+one. (openraft 0.9 appends one entry at a time and waits for its fsync,
+so the batch is where writes are grouped.)
 
 Applying an entry does not touch the data file: its writes are held in
 RAM (the write-behind layer, up to `--write-behind-bytes`, 64 MiB) and

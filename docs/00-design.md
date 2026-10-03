@@ -74,8 +74,11 @@ production system. We integrate by:
 - `WalLogStore` (`crates/raft/src/wal_log_store.rs`): `RaftLogStorage`
   over the WAL. `append` returns once the entries are readable; a
   writer thread syncs whatever was appended while the previous sync ran
-  in one `fdatasync` (group commit) and then reports each append
-  flushed, as openraft's `LogFlushed` allows. The vote is synced before
+  in one `fdatasync` and then reports each append flushed, as
+  openraft's `LogFlushed` allows. openraft 0.9's RaftCore awaits that
+  report before its next append, though, so in practice each fsync
+  carries one entry; writes are grouped into entries by the proposer
+  (write path, below). The vote is synced before
   `save_vote` returns; the committed index rides the next sync (openraft
   only needs it to be no higher than the truth, #71). Truncate is
   synced. A purge drops entries from memory at once but deletes WAL
@@ -203,15 +206,17 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 1. Client `Put` arrives at any node.
 2. Non-leader forwards to leader (etcd does the same internally).
 3. Leader proposes through openraft; awaits commit. Proposals queue in
-   a `Proposer` (`crates/raft/src/proposer.rs`): up to 64
-   `client_write`s are in flight, and whatever queued past that goes as
-   one `FastetcdLogEntry::Batch` — one RaftCore message, one log append
-   (up to 256 proposals, 512 KiB), each applied at its own revision with
-   its own answer (#75). Since an append does not wait for its fsync
-   (#85), every write in flight reaches the WAL at once, and one fsync
-   carries everything appended while the previous one ran (#95; with
-   three in flight, as #75 had it, a write waited for an earlier one's
-   apply before it was appended). Batches are
+   a `Proposer` (`crates/raft/src/proposer.rs`) and go as one
+   `FastetcdLogEntry::Batch` — one RaftCore message, one log append, one
+   fsync (up to 256 proposals, 512 KiB), each applied at its own
+   revision with its own answer (#75). RaftCore appends one entry at a
+   time and waits for its fsync, so group commit happens here (#95):
+   only one proposal is ever waiting for its fsync, and the next batch
+   is formed the moment that fsync returns, from everything that
+   arrived during it (a write waits about two fsyncs under load, one
+   when alone). #75 freed a slot only once its batch was applied, with
+   three in flight; the batches queued in RaftCore and a write waited
+   about four fsyncs. Batches are
    proposed only once every member has answered `ConfirmLeader` (an
    older member cannot decode one), re-checked on membership changes.
    Applying a batch records `(index, done)` with each proposal's commit,

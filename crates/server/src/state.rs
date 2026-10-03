@@ -130,11 +130,9 @@ impl ServerState {
     /// confirmed over the peer channel, and proposals go through a
     /// [`Proposer`]. The peer service shares both (`read_index`,
     /// `proposer`).
-    /// `in_flight`: [`fastetcd_raft::proposer::IN_FLIGHT`] over the WAL.
     pub fn with_peer_read_index_and_batching(
         mut self,
         progress: fastetcd_raft::kv_log_store::LogProgress,
-        in_flight: usize,
     ) -> Self {
         self.read_index = Some(
             fastetcd_raft::LocalReadIndex::new(progress.clone(), self.sm.applied_index())
@@ -144,7 +142,6 @@ impl ServerState {
             self.raft.clone(),
             progress,
             self.forwarder.clone(),
-            in_flight,
         ));
         self
     }

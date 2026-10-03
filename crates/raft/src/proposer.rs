@@ -1,24 +1,23 @@
 //! Batched proposals: group commit (fastetcd#75).
 //!
-//! openraft 0.9's RaftCore takes client writes one message at a time
-//! and awaits each one's log append and fsync before the next, so a
-//! member's write rate was bounded by one fsync per write. The
-//! proposer queues proposals instead. Up to `in_flight` `client_write`
-//! calls run at once; whatever queued while they ran is proposed as one
-//! [`FastetcdLogEntry::Batch`] — one RaftCore message, one append — and
-//! each caller gets its own response back. A proposal that finds a free
-//! slot goes as a plain entry, exactly as before.
+//! openraft 0.9's RaftCore takes client writes one message at a time,
+//! and appending each one's log entry waits for that entry's fsync
+//! (`RaftCore::append_to_log` awaits the `LogFlushed` callback, even
+//! with a log store whose `append` returns at once, as the WAL's does).
+//! So one fsync carries exactly one log entry, and a member's write rate
+//! was bounded by one fsync per write. The proposer queues proposals
+//! instead and proposes what queued as one [`FastetcdLogEntry::Batch`]
+//! — one RaftCore message, one append, one fsync — and each caller gets
+//! its own response back. A proposal that finds nothing in flight goes
+//! as a plain entry at once, exactly as without the proposer.
 //!
-//! How many may be in flight depends on the log store (fastetcd#95).
-//! The WAL's `append` returns before its fsync and its writer syncs
-//! everything appended during the previous fsync in one go, so the
-//! server lets [`IN_FLIGHT`] writes run: each reaches the log at once
-//! and one fsync carries every write that arrived while the last one
-//! ran. With 3, as #75 had it, a write proposed during an fsync waited
-//! for an earlier write's apply before it was even appended, and one
-//! fsync carried ~4 writes from 20 clients on a slow disk. A log store
-//! whose `append` waits for its fsync (the redb log, used by tests)
-//! wants [`IN_FLIGHT_BLOCKING_LOG`]: more only splits the queue.
+//! **Group commit** (fastetcd#95): only [`IN_FLIGHT`] batch is ever
+//! waiting for its fsync. The next one is formed the moment that fsync
+//! returns, from everything that arrived while it ran, and goes to
+//! RaftCore at once. Before #95 a batch's slot was freed only when the
+//! batch had been applied, with three in flight: the batches queued in
+//! RaftCore behind each other, a write waited about three fsyncs, and
+//! 20 closed-loop writers put ~4 writes in each fsync of a slow disk.
 //!
 //! A `Batch` entry cannot be decoded by a member older than this, so
 //! nothing is batched until every member (voters and learners) has
@@ -39,13 +38,10 @@ use crate::kv_log_store::LogProgress;
 use crate::network::{ConfirmError, WriteForwarder};
 use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
-/// `client_write` calls in flight at once over the WAL log store (see
-/// the module docs). Past it, proposals queue and go as batches.
-pub const IN_FLIGHT: usize = 64;
-/// ... over a log store whose `append` waits for its fsync: RaftCore
-/// appends one at a time, so more only splits the queue into smaller
-/// batches; fewer than two would idle it while a batch commits.
-pub const IN_FLIGHT_BLOCKING_LOG: usize = 3;
+/// Proposals not yet durable in the log at once (see the module docs).
+/// One: a second would be formed while the first's fsync runs, wait in
+/// RaftCore behind it, and carry only what arrived before it was formed.
+pub const IN_FLIGHT: usize = 1;
 /// Most proposals in one batch.
 pub const MAX_BATCH: usize = 256;
 /// Most encoded bytes in one batch. Peer gRPC decodes up to 4 MiB per
@@ -195,18 +191,12 @@ pub struct Proposer {
 
 impl Proposer {
     /// Start the proposer's task. `progress` is the node's log store
-    /// progress; `forwarder` reaches the other members; `in_flight` is
-    /// [`IN_FLIGHT`] or [`IN_FLIGHT_BLOCKING_LOG`].
-    pub fn spawn(
-        raft: Raft<TypeConfig>,
-        progress: LogProgress,
-        forwarder: WriteForwarder,
-        in_flight: usize,
-    ) -> Self {
+    /// progress; `forwarder` reaches the other members.
+    pub fn spawn(raft: Raft<TypeConfig>, progress: LogProgress, forwarder: WriteForwarder) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let gate = Arc::new(BatchGate {
             raft: raft.clone(),
-            progress,
+            progress: progress.clone(),
             forwarder,
             open: AtomicBool::new(false),
             checked: AtomicU64::new(0),
@@ -214,7 +204,7 @@ impl Proposer {
             last_probe: std::sync::Mutex::new(None),
         });
         let stats = Arc::new(ProposerStats::default());
-        tokio::spawn(run(raft, rx, gate, stats.clone(), in_flight.max(1)));
+        tokio::spawn(run(raft, progress, rx, gate, stats.clone()));
         Self { tx, stats }
     }
 
@@ -237,12 +227,12 @@ impl Proposer {
 
 async fn run(
     raft: Raft<TypeConfig>,
+    progress: LogProgress,
     mut rx: mpsc::UnboundedReceiver<Pending>,
     gate: Arc<BatchGate>,
     stats: Arc<ProposerStats>,
-    in_flight: usize,
 ) {
-    let permits = Arc::new(Semaphore::new(in_flight));
+    let permits = Arc::new(Semaphore::new(IN_FLIGHT));
     let mut carry: Option<Pending> = None;
     loop {
         let first = match carry.take() {
@@ -285,9 +275,24 @@ async fn run(
             stats.batched.fetch_add(batch.len() as u64, Ordering::Relaxed);
         }
         let raft = raft.clone();
+        let progress = progress.clone();
         tokio::spawn(async move {
-            submit(&raft, batch).await;
-            drop(permit);
+            // Its entry comes after everything appended by now. The
+            // slot is free once an entry past that is durable (normally
+            // this one; an entry appended in between, such as a new
+            // leader's blank, frees it a little early, which costs only
+            // grouping), or once the proposal is answered (an error).
+            let mark = progress.appended();
+            let answered = submit(&raft, batch);
+            tokio::pin!(answered);
+            tokio::select! {
+                _ = &mut answered => {
+                    drop(permit);
+                    return;
+                }
+                _ = progress.durable_past(mark) => drop(permit),
+            }
+            answered.await;
         });
     }
 }

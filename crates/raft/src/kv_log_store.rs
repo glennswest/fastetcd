@@ -65,6 +65,10 @@ pub struct LogProgress {
     /// Highest index durably in the log: at startup the last entry on
     /// disk, then each append once its fsync returned.
     pub(crate) last_durable: Arc<AtomicU64>,
+    /// Woken whenever `last_durable` rises.
+    pub(crate) durable_changed: Arc<tokio::sync::Notify>,
+    /// Highest index handed to `append` (durable or not yet).
+    pub(crate) last_appended: Arc<AtomicU64>,
     /// Highest index of a membership entry handed to `append` since
     /// this process started. Raised before the entry is written, so
     /// openraft's metrics showing a membership at least this new means
@@ -96,6 +100,35 @@ impl LogProgress {
 
     pub(crate) fn note_vote(&self, vote: &Vote<NodeId>) {
         self.vote_term.fetch_max(vote.leader_id.term, Ordering::AcqRel);
+    }
+
+    /// `index + 1` of the last entry handed to `append`.
+    pub(crate) fn appended(&self) -> u64 {
+        self.last_appended.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_appended(&self, index: u64) {
+        self.last_appended.fetch_max(index + 1, Ordering::AcqRel);
+    }
+
+    /// An append's fsync returned: `index` is durable.
+    pub(crate) fn note_durable(&self, index: u64) {
+        self.last_durable.fetch_max(index + 1, Ordering::AcqRel);
+        self.durable_changed.notify_waiters();
+    }
+
+    /// Wait until an entry past `mark` (an [`appended`](Self::appended)
+    /// value) is durable.
+    pub(crate) async fn durable_past(&self, mark: u64) {
+        loop {
+            let woken = self.durable_changed.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.last_durable.load(Ordering::Acquire) > mark {
+                return;
+            }
+            woken.await;
+        }
     }
 }
 
@@ -217,6 +250,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
         let last_log_id = last.or(last_purged);
         if let Some(l) = &last_log_id {
             self.progress.last_durable.fetch_max(l.index + 1, Ordering::Release);
+            self.progress.last_appended.fetch_max(l.index + 1, Ordering::Release);
         }
         Ok(LogState {
             last_purged_log_id: last_purged,
@@ -328,6 +362,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             }
             let bytes = bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?;
             batch.put(TABLE_LOG, &idx_key(entry.log_id.index), &bytes);
+            self.progress.note_appended(entry.log_id.index);
             last = Some(entry.log_id.index);
         }
         // sync=true ensures fsync before commit returns.
@@ -336,7 +371,7 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
             .await
             .map_err(|e| io_err(ErrorVerb::Write, e))?;
         if let Some(last) = last {
-            self.progress.last_durable.fetch_max(last + 1, Ordering::Release);
+            self.progress.note_durable(last);
         }
         callback.log_io_completed(Ok(()));
         Ok(())
@@ -358,6 +393,9 @@ impl RaftLogStorage<TypeConfig> for KvLogStore {
         // leader, but keep the value true.
         self.progress
             .last_durable
+            .fetch_min(log_id.index, Ordering::Release);
+        self.progress
+            .last_appended
             .fetch_min(log_id.index, Ordering::Release);
         {
             let mut ts = self.progress.term_start.lock().unwrap();

@@ -1187,10 +1187,7 @@ async fn main() -> anyhow::Result<()> {
         .with_write_behind_stats(write_behind_stats)
         // Linearizable reads and batched writes without queueing in
         // openraft's RaftCore, on one member (#71) or several (#75).
-        .with_peer_read_index_and_batching(
-            log_progress.clone(),
-            fastetcd_raft::proposer::IN_FLIGHT,
-        ),
+        .with_peer_read_index_and_batching(log_progress.clone()),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).

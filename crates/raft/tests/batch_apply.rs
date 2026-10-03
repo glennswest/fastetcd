@@ -249,13 +249,7 @@ async fn the_proposer_batches_concurrent_proposals() {
     wait_for_leader(&raft).await;
     let before = raft.metrics().borrow().last_log_index.unwrap();
 
-    // The redb log's append waits for its fsync.
-    let proposer = Proposer::spawn(
-        raft.clone(),
-        progress,
-        WriteForwarder::new(empty_peers()),
-        fastetcd_raft::proposer::IN_FLIGHT_BLOCKING_LOG,
-    );
+    let proposer = Proposer::spawn(raft.clone(), progress, WriteForwarder::new(empty_peers()));
     let tasks: Vec<_> = (0..40)
         .map(|i| {
             let p = proposer.clone();
