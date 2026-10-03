@@ -181,18 +181,21 @@ K8S_CSV=$OUT/k8s.csv
 [ -f "$DUR_CSV" ] || echo "disk,members,contender,acked,lost,recovery_ms" >"$DUR_CSV"
 [ -f "$K8S_CSV" ] || echo "disk,members,contender,phase,who,what,p50_ms,p99_ms,max_ms" >"$K8S_CSV"
 
-# parse <raw-file>: rps,p50,p90,p99,p99.9,max from the last summary.
+# parse <raw-file> [first|last]: rps,p50,p90,p99,p99.9,max from the last
+# (or first) summary in it.
 parse() {
-    python3 - "$1" <<'PY'
+    python3 - "$1" "${2:-last}" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
-last = text.rsplit("Summary:", 1)[-1]
+parts = text.split("Summary:")
+block = parts[1] if sys.argv[2] == "first" and len(parts) > 1 else parts[-1]
+NUM = r"([0-9.]+(?:e[-+]?[0-9]+)?)"
 def num(pat):
-    m = re.search(pat, last)
+    m = re.search(pat, block)
     return float(m.group(1)) if m else float("nan")
-rps = num(r"Requests/sec:\s+([0-9.]+)")
-pct = lambda p: num(r"\b" + re.escape(p) + r"% in ([0-9.]+) secs") * 1000
-slow = num(r"Slowest:\s+([0-9.]+) secs") * 1000
+rps = num(r"Requests/sec:\s+" + NUM)
+pct = lambda p: num(r"\b" + re.escape(p) + r"% in " + NUM + " secs") * 1000
+slow = num(r"Slowest:\s+" + NUM + " secs") * 1000
 print(f"{rps:.1f},{pct('50'):.3f},{pct('90'):.3f},{pct('99'):.3f},{pct('99.9'):.3f},{slow:.3f}")
 PY
 }
@@ -206,6 +209,17 @@ bench_one() {
     if "$BENCHMARK" --endpoints "$(endpoints "$n")" --precise "$@" >"$raw" 2>&1; then
         local row
         row=$(parse "$raw")
+        if [ "$name" = watch-1000w ]; then
+            # Two summaries: creating the 1000 watches (latency), then the
+            # events delivered (only the rate means something: the tool
+            # times its own receive loop, not delivery).
+            local create
+            create=$(parse "$raw" first)
+            echo "   watch-create $create"
+            echo "$DISK,$n,$who,watch-create-1000w,10,1000,$create" >>"$BENCH_CSV"
+            row="${row%%,*},,,,,"
+            name=watch-events
+        fi
         echo "   $row"
         case $row in *nan*) echo "   (unparsed; the tool's output ends:)"; tail -n 40 "$raw" | sed 's/^/   | /' ;; esac
         echo "$DISK,$n,$who,$name,$clients,$total,$row" >>"$BENCH_CSV"
@@ -213,6 +227,18 @@ bench_one() {
         echo "   FAILED (see $raw): $(tail -n 3 "$raw" | tr '\n' ' ')"
         echo "$DISK,$n,$who,$name,$clients,$total,FAILED,,,,," >>"$BENCH_CSV"
     fi
+}
+
+# fastetcd's own WAL / checkpoint / write-behind counters, to explain a
+# stall (fastetcd#85 metrics; absent before v1.12).
+fe_metrics() {
+    local who=$1 n=$2 i
+    case $who in fastetcd-*) ;; *) return 0 ;; esac
+    for i in $(seq "$n"); do
+        curl -sf "http://127.0.0.1:$(metrics_port "$i")/metrics" |
+            grep -E '^fastetcd_(wal_fsync|checkpoint_(max|commit_max)|write_behind_(flush|back))' |
+            sed "s/^/   m$i /" || true
+    done
 }
 
 run_bench() {
@@ -225,6 +251,7 @@ run_bench() {
     rss_idle=$(rss_kb)
     bench_one "$who" "$n" put-1c 1 2000 --conns=1 --clients=1 \
         put --key-size=8 --sequential-keys --total=2000 --val-size=256
+    fe_metrics "$who" "$n"
 
     # The 1000-client put, with resources measured around it.
     local t0 c0 w0 x0 max=0 sampler
@@ -256,6 +283,7 @@ run_bench() {
         watch --streams=10 --watch-per-stream=100 --watched-key-total=100 --put-total="$WATCH_PUTS"
     bench_one "$who" "$n" lease-keepalive-1000c 1000 "$KEEPALIVE_TOTAL" --conns=100 --clients=1000 \
         lease-keepalive --total="$KEEPALIVE_TOTAL"
+    fe_metrics "$who" "$n"
     stop
     du -sh "$dir" | sed "s|^|   data on disk after the run: |"
 }
