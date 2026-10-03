@@ -369,9 +369,9 @@ async fn slow_node(
 async fn proposals_per_fsync() -> f64 {
     use std::sync::atomic::Ordering::Relaxed;
     const CLIENTS: usize = 20;
-    const EACH: usize = 6;
+    const EACH: usize = 3;
     let dir = tempfile::tempdir().unwrap();
-    let (raft, log, _sm) = slow_node(dir.path(), Duration::from_millis(50), Duration::ZERO).await;
+    let (raft, log, _sm) = slow_node(dir.path(), Duration::from_millis(200), Duration::ZERO).await;
     let proposer = fastetcd_raft::Proposer::spawn(
         raft.clone(),
         log.progress(),
@@ -416,12 +416,13 @@ async fn proposals_per_fsync() -> f64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writers_share_a_wal_fsync() {
     // Each batch is formed when the previous fsync returns, from what
-    // arrived during it: a writer waits about two fsyncs, so 20 writers
-    // put about 10 proposals in each. Before #95 (a slot freed at apply,
-    // three in flight) a writer waited about four: 4.9 per fsync here
-    // (20 ms fsyncs). 50 ms keeps a debug build's applies small beside it.
+    // arrived during it: a writer waits about two fsyncs, and the 20
+    // writers settle into two groups (1 and 19), 10 proposals per fsync.
+    // Before #95 (a slot freed at apply, three in flight) a writer waited
+    // about four: 4.6-4.9 per fsync here. Fsyncs of 200 ms keep a loaded
+    // debug build's applies small beside them.
     let per = proposals_per_fsync().await;
-    assert!(per >= 7.0, "20 writers, {per:.1} proposals per fsync");
+    assert!(per >= 8.0, "20 writers, {per:.1} proposals per fsync");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
