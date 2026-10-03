@@ -368,7 +368,7 @@ A data directory holds:
 | Path | What |
 |---|---|
 | `fastetcd.redb` | The data file: one redb ACID B-tree with the MVCC data, leases, auth and node metadata. |
-| `wal/` | The raft log and vote: a sequential write-ahead log in preallocated segments (`--wal-segment-bytes`, 16 MiB). |
+| `wal/` | The raft log and vote: a sequential write-ahead log in segments written full of zeros up front (`--wal-segment-bytes`, 16 MiB), plus `spare.wal.tmp`, the next one, made ready in the background. |
 | `snapshots/` | Retained raft snapshots. |
 
 There is no engine choice to make: `fastetcd-storage` also has `wal`

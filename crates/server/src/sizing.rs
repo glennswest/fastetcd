@@ -81,11 +81,11 @@ pub const COW_OVERHEAD_PCT: u64 = 160;
 /// middle of what a Kubernetes workload produces.
 pub const AVG_LOG_ENTRY_BYTES: u64 = 2 * 1024;
 
-/// The raft log lives in preallocated WAL segments (fastetcd#85): the
-/// one being written is full size from the start, and the one before it
-/// is kept until a checkpoint covers it. Sized at the default
-/// `--wal-segment-bytes`.
-pub const WAL_SLACK_BYTES: u64 = 2 * fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES;
+/// The raft log lives in WAL segments written full size up front
+/// (fastetcd#85): the one being written, the spare made ready behind
+/// it, and the one before it, kept until a checkpoint covers it. Sized
+/// at the default `--wal-segment-bytes`.
+pub const WAL_SLACK_BYTES: u64 = 3 * fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES;
 
 /// The volume must have room for the store to sit below its high-water
 /// mark, or reclaim runs continuously and never gets ahead.

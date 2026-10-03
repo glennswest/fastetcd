@@ -5,8 +5,9 @@
 
 ### 2026-10-02 — streaming writes: the raft log is a sequential WAL (#85, P1)
 - **perf:** The raft log moved out of the data file into a write-ahead
-  log in `<data-dir>/wal/`: checksummed records appended to preallocated
-  segments (`--wal-segment-bytes`, 16 MiB). A client's write now waits
+  log in `<data-dir>/wal/`: checksummed records appended to segments
+  written full of zeros in the background before use
+  (`--wal-segment-bytes`, 16 MiB), so a sync converts no extents. A client's write now waits
   for one sequential append-and-`fdatasync` instead of a durable redb
   commit, which also wrote every B-tree page the applies since the last
   one had dirtied (seeks on a spinning disk). One writer thread syncs
@@ -32,8 +33,8 @@
   (`*.corrupt.<ts>` / `*.replaced-<ts>`); `fastetcd restore` used to leave
   newer raft snapshots in place.
 - **docs:** 00-design, 01-configuration (new flags), 03-deploy (storage
-  layout, write path, upgrade note), 04-disk-space (two WAL segments in
-  the sizing model; ladder unchanged), 05-backup-and-recovery, README.
+  layout, write path, upgrade note), 04-disk-space (three WAL segments
+  in the sizing model; ladder unchanged), 05-backup-and-recovery, README.
 
 ## [v1.11.0] — 2026-10-02
 

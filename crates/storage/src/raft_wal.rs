@@ -8,9 +8,13 @@
 //! ## Layout
 //!
 //! `<dir>/<seq:016x>.wal`, one file per segment, numbered from 0.
-//! A new segment is preallocated (`fallocate` on Linux) to
-//! [`WalOptions::segment_bytes`], so an `fdatasync` after an append
-//! writes the data and not the file's growing size. Every write lands
+//! A new segment is written full of zeros to
+//! [`WalOptions::segment_bytes`] before it is used, so an `fdatasync`
+//! after an append writes the data and nothing else: no growing file
+//! size, and no unwritten extents to convert (with only `fallocate`,
+//! ext4 commits its journal on every such sync). A background thread
+//! keeps the next segment ready (`spare.wal.tmp`), as etcd's WAL file
+//! pipeline does, and a roll renames it into place. Every write lands
 //! at the end of the last segment: on a spinning disk the fsync on a
 //! client's path is a sequential write.
 //!
@@ -217,6 +221,63 @@ fn preallocate(file: &File, len: u64) {
     }
 }
 
+const SPARE: &str = "spare.wal.tmp";
+
+/// Write a zero-filled segment of `bytes` at `spare.wal.tmp`, synced.
+fn prepare_spare(dir: &Path, bytes: u64) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dir.join(SPARE))?;
+    let zeros = vec![0u8; 1 << 20];
+    let mut at = 0u64;
+    while at < bytes {
+        let n = (bytes - at).min(zeros.len() as u64) as usize;
+        file.write_all_at(&zeros[..n], at)?;
+        at += n as u64;
+    }
+    file.sync_all()?;
+    Ok(file)
+}
+
+/// Make the spare segment `seq`. Falls back to a preallocated new file
+/// if there is no spare (it failed: a full disk, most likely).
+fn install_spare(
+    dir: &Path,
+    seq: u64,
+    bytes: u64,
+    spare: Option<std::thread::JoinHandle<io::Result<File>>>,
+) -> io::Result<File> {
+    let ready = spare.map(|h| {
+        h.join()
+            .unwrap_or_else(|_| Err(io::Error::other("spare segment thread panicked")))
+    });
+    match ready {
+        Some(Ok(file)) => {
+            std::fs::rename(dir.join(SPARE), segment_path(dir, seq))?;
+            sync_dir(dir)?;
+            Ok(file)
+        }
+        other => {
+            if let Some(Err(e)) = other {
+                tracing::warn!(error = %e, "no zero-filled spare WAL segment; preallocating one");
+            }
+            let _ = std::fs::remove_file(dir.join(SPARE));
+            create_segment(dir, seq, bytes)
+        }
+    }
+}
+
+fn spawn_spare(dir: &Path, bytes: u64) -> Option<std::thread::JoinHandle<io::Result<File>>> {
+    let dir = dir.to_path_buf();
+    std::thread::Builder::new()
+        .name("raft-wal-spare".into())
+        .spawn(move || prepare_spare(&dir, bytes))
+        .ok()
+}
+
 fn create_segment(dir: &Path, seq: u64, bytes: u64) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -309,6 +370,8 @@ pub struct Wal {
     /// Current value of each sticky kind, written at each new segment.
     sticky: BTreeMap<u8, (u64, Vec<u8>)>,
     reader: Arc<WalReader>,
+    /// The next segment, being zero-filled in the background.
+    spare: Option<std::thread::JoinHandle<io::Result<File>>>,
 }
 
 impl Wal {
@@ -319,8 +382,9 @@ impl Wal {
         let seqs = list_segments(dir)?;
         let reader = Arc::new(WalReader::new(dir.to_path_buf()));
         let mut replay = Replay::default();
+        let _ = std::fs::remove_file(dir.join(SPARE));
         if seqs.is_empty() {
-            let file = create_segment(dir, 0, opts.segment_bytes)?;
+            let file = install_spare(dir, 0, opts.segment_bytes, spawn_spare(dir, opts.segment_bytes))?;
             let wal = Wal {
                 dir: dir.to_path_buf(),
                 opts,
@@ -329,6 +393,7 @@ impl Wal {
                 offset: 0,
                 sticky: BTreeMap::new(),
                 reader,
+                spare: spawn_spare(dir, opts.segment_bytes),
             };
             return Ok((wal, replay));
         }
@@ -415,6 +480,7 @@ impl Wal {
             offset: end_of_last,
             sticky: replay.meta.clone(),
             reader,
+            spare: spawn_spare(dir, opts.segment_bytes),
         };
         Ok((wal, replay))
     }
@@ -433,7 +499,8 @@ impl Wal {
     fn roll(&mut self) -> io::Result<()> {
         self.file.sync_data()?;
         let seq = self.segments.last().unwrap().seq + 1;
-        self.file = create_segment(&self.dir, seq, self.opts.segment_bytes)?;
+        self.file = install_spare(&self.dir, seq, self.opts.segment_bytes, self.spare.take())?;
+        self.spare = spawn_spare(&self.dir, self.opts.segment_bytes);
         self.offset = 0;
         self.segments.push(Segment { seq, max_entry: None });
         let mut buf = Vec::new();
@@ -511,6 +578,16 @@ impl Wal {
     /// Number of segment files.
     pub fn segment_count(&self) -> usize {
         self.segments.len()
+    }
+}
+
+impl Drop for Wal {
+    /// Let the spare finish, so nothing writes into this directory once
+    /// the log is closed (a migration renames it right after).
+    fn drop(&mut self) {
+        if let Some(h) = self.spare.take() {
+            let _ = h.join();
+        }
     }
 }
 
