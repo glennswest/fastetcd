@@ -1418,3 +1418,31 @@ Tracked live in the Claude task system. Snapshot of the order:
       (1.3–6x) and lease keepalive. Filed #92 (keepalive via Raft), #93
       (write-behind back-pressure behind the checkpoint fsync), #94 (P1,
       proposer caps writes per fsync on a slow disk).
+
+41. **Group commit on a slow disk (#95, P1; also #94) — in progress.**
+    Measured on benchslow (pve VM, fdatasync p50 25 ms that day), 1
+    member, etcd's `benchmark put`, 20 clients: etcd 219/s (avg 90 ms,
+    ~9 puts per WAL fsync of 35 ms); v1.12 34/s (avg 568 ms, ~4 puts per
+    fsync of 119 ms, and 92 checkpoints using 11.2 s of disk in ~12 s).
+    Lone writes (1 client, 3/s) are equal (p50 27 ms). With
+    `--wal-checkpoint-interval-ms 1000` v1.12 did 97/s and fsyncs fell
+    to ~40 ms: checkpoints running back to back slow every WAL fsync,
+    and the proposer's 3 in-flight writes cap what one fsync carries.
+    Plan:
+    - **Proposer**: up to 64 `client_write`s in flight (was 3). Since
+      #85 `append` does not wait for its fsync, so RaftCore takes them
+      at once and the WAL writer syncs whatever was appended during the
+      previous fsync in one go. Batches still form past 64.
+    - **Checkpoint pacing**: after a checkpoint that took `d`, the next
+      waits at least max(interval, 4·d) from its end, so checkpoints use
+      at most ~20% of a slow disk's time; on a fast disk (d ≪ 25 ms)
+      nothing changes. Write-behind bytes still bound RAM.
+    - **Metrics**: `fastetcd_wal_entries_synced_total`,
+      `fastetcd_wal_proposals_synced_total` (entries / proposals per
+      fsync = their rate / the fsync rate).
+    Work items:
+    - [ ] proposer in-flight; checkpoint pacing; metrics; tests.
+    - [ ] Docs (01, 03 § Metrics), changelog.
+    - [ ] sc-build green; benchslow: 20 / 1000 clients and lone writes
+      vs v1.12 and etcd; release; golden.
+    - Not verifiable here: the 5-pod run on server3 (X9 blade).
