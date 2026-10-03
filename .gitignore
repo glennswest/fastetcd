@@ -18,6 +18,8 @@ credentials/
 
 # Local data / fixtures
 data/
+# ...but benchmark results are published (fastetcd#90)
+!docs/benchmarks/data/
 *.db
 *.redb
 *.wal

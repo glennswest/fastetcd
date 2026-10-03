@@ -1,0 +1,4 @@
+disk,members,contender,rss_idle_mib,rss_load_max_mib,cpu_s_per_1000_puts,disk_write_kib_per_1000_puts,write_syscall_kib_per_1000_puts
+dev-ssd,3,etcd-v3.7.2,92.9,218.7,0.123,2172.8,3897.8
+dev-ssd,3,fastetcd-v1.11.0,46.8,1088.6,1.008,954105.6,940208.0
+dev-ssd,3,fastetcd-v1.12.0,50.9,2155.5,0.669,23398.6,9481.4
