@@ -9,7 +9,7 @@ B-tree.
 
 ## Status
 
-`v1.11.0` (see `CHANGELOG.md`). What works today, all through Raft,
+`v1.12.0` (see `CHANGELOG.md`). What works today, all through Raft,
 single- and multi-member, with linearizable reads by default:
 
 - The etcd v3 gRPC API: KV (Range, Put, DeleteRange, Txn, Compact),
@@ -197,7 +197,7 @@ fastetcd-migrate --from snap.db --to data-dir --preserve-revisions
 
 ## Testing
 
-`cargo test --workspace`: 299 tests in 42 test binaries at v1.11.0,
+`cargo test --workspace`: 337 tests in 44 test binaries at v1.12.0,
 including 3-member clusters over the real gRPC transport and the
 third-party `etcd-client` crate (`crates/server/tests/etcd_client_compat.rs`).
 GitHub Actions is off for this repo: on the StormCOS setup every push is

@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.12.0] — 2026-10-02
+
 ### 2026-10-02 — streaming writes: the raft log is a sequential WAL (#85, P1)
 - **perf:** The raft log moved out of the data file into a write-ahead
   log in `<data-dir>/wal/`: checksummed records appended to segments

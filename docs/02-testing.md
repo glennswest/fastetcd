@@ -15,7 +15,7 @@ lock too.
 
 ## Ring 1 — Workspace unit + integration tests
 
-Run with: `cargo test --workspace` (299 tests in 42 binaries at v1.11.0;
+Run with: `cargo test --workspace` (337 tests in 44 binaries at v1.12.0;
 one is `#[ignore]`d).
 
 - **Unit tests** in each crate: MVCC (revisions, txn, compaction, range
@@ -29,7 +29,15 @@ one is `#[ignore]`d).
   write (#71); `batch_apply.rs`: a batched entry applies each proposal
   at its own revision, a replay skips exactly the part already on disk,
   and the proposer turns 40 concurrent proposals into a few entries
-  (#75).
+  (#75); `wal_log_store.rs`: openraft's own log-store checks
+  (`openraft::testing::Suite`) over the WAL and the write-behind layer,
+  restart, the upgrade from a log in redb, and a node that snapshots,
+  drops WAL segments and restarts with everything (#85).
+- **storage** unit tests include `raft_wal` (round trip across
+  segments, truncate, purge, a torn tail cut and never resurrected,
+  damage in an older segment refused) and `write_behind` (engine
+  conformance, and 3000 random batches checked against a plain map
+  through flushes and syncs) (#85).
 - **server** (`crates/server/tests/`), through real tonic clients and,
   where it matters, a client port built as `main.rs` builds it:
   - KV, watch (incl. forced lag), lease and lease expiry, cluster and
@@ -43,7 +51,11 @@ one is `#[ignore]`d).
   - space alarm, corruption recovery from backups, `cluster_id`;
   - `apply_replay.rs`: SIGKILL the real binary after acknowledged puts;
     the unsynced applies are missing from the file, and a restart
-    replays them from the log (#71);
+    replays them from the WAL (#71, #85);
+  - `wal_upgrade.rs`: a data directory whose raft log is in redb (as
+    every version before 1.12 wrote it) starts on the real binary: the
+    log moves into `wal/`, every key is there, redb's copy is cleared
+    (#85);
   - `multinode_fastpath.rs`: 3 members, writers on the leader and a
     follower, linearizable readers on both checked against every
     acknowledged write; reads confirmed by quorum, writes batched; with a

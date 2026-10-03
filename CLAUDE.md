@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.11.0`** — A GET of a hot key reads nothing from disk (#82). Every
+**`1.12.0`** — Streaming writes (#85). The raft log is a sequential WAL
+in `<data-dir>/wal/` (`crates/storage/src/raft_wal.rs`: checksummed
+records in segments zero-filled in the background; torn tail cut at
+open), behind `WalLogStore` (`crates/raft/src/wal_log_store.rs`): a
+writer thread group-commits appends with one fdatasync and reports
+`LogFlushed` after it. Applies go into a write-behind layer in front of
+redb (`crates/storage/src/write_behind.rs`): RAM layers merged into
+every read, written into redb by the checkpointer every 100 ms /
+10000 entries and then committed durably, so no apply waits on redb's
+fsync. WAL segments go only once a checkpoint covers them. First start
+moves the log out of redb (one-way). 1 member on dev: writes ~2.5x,
+linearizable p99 50 → 0.6 ms. Flags `--wal-*`, `--write-behind-bytes`.
+
+Previous: **`1.11.0`** — A GET of a hot key reads nothing from disk (#82). Every
 key's index is resident in RAM, as etcd's treeIndex (loaded from
 `mvcc_idx` at open, changed only after the engine commit under the
 write-state lock), and the latest record of recently used keys sits in
@@ -546,8 +559,10 @@ Version locations (keep in sync):
 ## Architecture pillars
 
 - **Storage**: trait-first (`KvStore`). The server always runs on
-  `redb`: one file, `<data-dir>/fastetcd.redb`, holds MVCC, the raft
-  log, leases, auth and node metadata; raft snapshots are files in
+  `redb`: one file, `<data-dir>/fastetcd.redb`, holds MVCC, leases,
+  auth and node metadata, behind a write-behind layer (applies in RAM,
+  checkpointed in). The raft log and vote are a WAL in
+  `<data-dir>/wal/` (#85); raft snapshots are files in
   `<data-dir>/snapshots/`. `fastetcd-storage` also has `wal` and
   `iouring` (tokio-uring, feature `iouring`) engines that the server
   cannot select (#55).
@@ -1309,7 +1324,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       GET p99 < 20 ms on a spinning disk, RSS over a long run) needs the
       golden on that hardware.
 
-39. **Streaming writes: the raft log is a sequential WAL; redb is checkpointed in the background (#85, P1) — in progress.**
+39. **Streaming writes: the raft log is a sequential WAL; redb is checkpointed in the background (#85, P1) — done, shipped in v1.12.0.**
     Today the raft log lives in redb: every append is a durable redb
     commit, and since #71 that commit also carries every apply made
     since the last one (applies are non-durable redb commits). So the
@@ -1349,8 +1364,23 @@ Tracked live in the Claude task system. Snapshot of the order:
       metrics, sizing; multinode/fastpath/snapshot-transfer harnesses on
       the WAL; real-binary upgrade test (`wal_upgrade.rs`).
     - [x] Docs (00, 01, 03, 04, 05, README), changelog.
-    - [ ] Full workspace green on dev; bench vs v1.11.0; release.
-    - Not done here, and why: applies still write redb (non-durable) before
-      the client is answered, rather than an in-RAM overlay with redb
-      written later — responses need the apply's revisions, and the
-      durable B-tree write (the seeky part) is what left the client path.
+    - [x] Full workspace green on dev; bench vs v1.11.0; release.
+    - Changed while doing it (bench-driven): applies first stayed
+      non-durable redb commits, and the checkpoint's durable commit then
+      held redb's writer through its fsync, so applies stalled behind it
+      (write p99 2x worse than 1.11). Fixed with the write-behind layer
+      (the issue's point 2): applies never touch redb. And `fallocate`d
+      segments made every fdatasync an ext4 journal commit (~10 ms, up
+      to 3 s); segments are now zero-filled by a background thread.
+    - Verified: sc-build of 6074121, whole workspace green (337 tests,
+      `--locked --no-fail-fast`), incl. openraft's log-store Suite over
+      WAL + write-behind, a 3000-step model test of the write-behind,
+      a real-binary upgrade from a redb-log data dir, SIGKILL replay.
+      `read_latency.sh v1.11.0` (1 member, 2 rounds): writes 601 → 1662/s
+      and 693 → 1513/s, p50 44 → 18 ms, p99 135 → 111 / 125 → 135 ms,
+      linearizable p99 50 → 0.6 ms. 3 members: 683–924 writes/s vs
+      199–314, p99 165–236 ms vs 543–2935; maxima still multi-second
+      when the shared disk stalls (all members' WAL fsync max 5.15 s at
+      once), as before: #83.
+    - Not verified here: the X9 spinning-disk acceptance and the
+      power-cut durability stage (need the golden on that hardware).
