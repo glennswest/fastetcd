@@ -1,7 +1,9 @@
 //! Minimal concurrent load generator for fastetcd — throughput and
 //! latency for put / linearizable-get / serializable-get, and the read
-//! latency under write load of fastetcd#71 (`read-under-load`). Not a
-//! full benchmark suite; enough to characterize a cluster.
+//! latency under write load of fastetcd#71 (`read-under-load`), and a
+//! crash test (`durability-write` / `durability-check`, fastetcd#90).
+//! Not a full benchmark suite; enough to characterize a cluster. Speaks
+//! the plain etcd v3 API, so it runs against upstream etcd as well.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,9 +18,14 @@ use fastetcd_proto::etcdserverpb::kv_client::KvClient;
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:2379")]
     endpoint: String,
-    /// put | get-lin | get-ser | read-under-load
+    /// put | get-lin | get-ser | read-under-load | durability-write |
+    /// durability-check
     #[arg(long, default_value = "put")]
     mode: String,
+    /// durability-check: the `acked <client> <count>` lines
+    /// durability-write printed.
+    #[arg(long)]
+    acked_file: Option<std::path::PathBuf>,
     #[arg(long, default_value_t = 64)]
     conns: usize,
     #[arg(long, default_value_t = 50_000)]
@@ -151,11 +158,101 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn dur_key(client: usize, i: u64) -> Vec<u8> {
+    format!("/dur/{client:04}/{i:010}").into_bytes()
+}
+
+/// `conns` clients each put `/dur/<client>/<i>` for i = 0, 1, ... until a
+/// put fails (the server was killed) or `duration_secs` pass. Prints, per
+/// client, how many puts were acknowledged: `acked <client> <count>`. A
+/// put counts only once its response arrived.
+async fn durability_write(args: &Args) -> anyhow::Result<()> {
+    let value = vec![b'x'; args.val_bytes];
+    let deadline = Instant::now() + std::time::Duration::from_secs(args.duration_secs);
+    let mut handles = Vec::new();
+    for w in 0..args.conns {
+        let (endpoint, value) = (args.endpoint.clone(), value.clone());
+        handles.push(tokio::spawn(async move {
+            let Ok(mut c) = KvClient::connect(endpoint).await else { return 0u64 };
+            let mut acked = 0u64;
+            while Instant::now() < deadline {
+                let put = pb::PutRequest { key: dur_key(w, acked), value: value.clone(), ..Default::default() };
+                match tokio::time::timeout(std::time::Duration::from_secs(10), c.put(put)).await {
+                    Ok(Ok(_)) => acked += 1,
+                    _ => break,
+                }
+            }
+            acked
+        }));
+    }
+    let mut total = 0;
+    for (w, h) in handles.into_iter().enumerate() {
+        let n = h.await?;
+        total += n;
+        println!("acked {w} {n}");
+    }
+    println!("total_acked {total}");
+    Ok(())
+}
+
+/// After a restart: time until a linearizable read succeeds
+/// (`recovery_ms`), then, for every client in `--acked-file`, how many of
+/// its acknowledged keys are missing (`lost`).
+async fn durability_check(args: &Args) -> anyhow::Result<()> {
+    let path = args.acked_file.as_ref().ok_or_else(|| anyhow::anyhow!("--acked-file is required"))?;
+    let mut acked: Vec<(usize, u64)> = Vec::new();
+    for line in std::fs::read_to_string(path)?.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() == 3 && f[0] == "acked" {
+            acked.push((f[1].parse()?, f[2].parse()?));
+        }
+    }
+    let started = Instant::now();
+    let mut c = loop {
+        if started.elapsed() > std::time::Duration::from_secs(300) {
+            anyhow::bail!("no linearizable read within 300 s of the restart");
+        }
+        if let Ok(mut c) = KvClient::connect(args.endpoint.clone()).await {
+            let probe = pb::RangeRequest { key: b"/dur/".to_vec(), count_only: true, ..Default::default() };
+            if c.range(probe).await.is_ok() {
+                break c;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let recovery_ms = started.elapsed().as_millis();
+    let (mut lost, mut total) = (0u64, 0u64);
+    for (w, n) in acked {
+        if n == 0 {
+            continue;
+        }
+        let got = c
+            .range(pb::RangeRequest {
+                key: dur_key(w, 0),
+                range_end: dur_key(w, n),
+                count_only: true,
+                ..Default::default()
+            })
+            .await?
+            .into_inner()
+            .count as u64;
+        total += n;
+        lost += n.saturating_sub(got);
+    }
+    println!("recovery_ms {recovery_ms}");
+    println!("acked {total}");
+    println!("lost {lost}");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Arc::new(Args::parse());
-    if args.mode == "read-under-load" {
-        return read_under_load(&args).await;
+    match args.mode.as_str() {
+        "read-under-load" => return read_under_load(&args).await,
+        "durability-write" => return durability_write(&args).await,
+        "durability-check" => return durability_check(&args).await,
+        _ => {}
     }
     let value = vec![b'x'; args.val_bytes];
 
