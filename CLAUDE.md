@@ -1384,3 +1384,31 @@ Tracked live in the Claude task system. Snapshot of the order:
       once), as before: #83.
     - Not verified here: the X9 spinning-disk acceptance and the
       power-cut durability stage (need the golden on that hardware).
+
+40. **Research: upstream etcd vs fastetcd v1.11 / v1.12, fast and slow disk (#90) — in progress.**
+    Deliverable `docs/benchmarks/etcd-vs-fastetcd.md` + CSVs in
+    `docs/benchmarks/data/`, reproducible by `tests/bench/compare.sh
+    <etcd-version>`. Plan:
+    - Contenders: etcd release binary (pinned version + sha256 from its
+      SHA256SUMS), fastetcd v1.11.0 and v1.12.0 built from the tags.
+    - etcd's own `benchmark` tool built from the etcd tag with a
+      downloaded Go: put, range (linearizable / serializable), txn-put,
+      watch, lease-keepalive; 1 member then 3 members.
+    - Durability: `fastetcd-bench --mode durability` writes per-client
+      sequential keys, logs the last acknowledged one, the server is
+      SIGKILLed mid-write; after restart, count missing acknowledged keys
+      and time to first linearizable read. (kill -9 only on dev: a power
+      cut needs a VM.)
+    - Resources: RSS idle / under load, CPU, `/proc/<pid>/io` write_bytes
+      per 1000 writes.
+    - Kubernetes-shaped: rustkube's `test/e2e/get-latency.sh` with
+      `RK_FASTETCD` pointing at each contender (a flag-translating wrapper
+      for etcd).
+    - Slow disk: a throttled pve VM, requested on #90 (2026-10-03); no
+      unprivileged way to throttle dev's disk.
+    Work items:
+    - [ ] fastetcd-bench durability mode; compare.sh (download, build, run,
+      CSV); sc-build runs on dev (fast disk).
+    - [ ] rustkube rig per contender.
+    - [ ] Doc with tables + conclusion; changelog.
+    - [ ] Slow-disk run on the VM when provided.
