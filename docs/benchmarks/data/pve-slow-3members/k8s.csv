@@ -1,0 +1,46 @@
+disk,members,contender,phase,who,what,p50_ms,p99_ms,max_ms
+pve-slow,1,etcd-v3.7.2,idle,sa,GET lease,0.3,41.4,63.3
+pve-slow,1,etcd-v3.7.2,idle,sa,LIST leases,0.3,1.2,43.0
+pve-slow,1,etcd-v3.7.2,idle,sa,GET crd,0.3,0.8,42.7
+pve-slow,1,etcd-v3.7.2,idle,admin,GET lease,0.3,1.2,43.0
+pve-slow,1,etcd-v3.7.2,idle,admin,LIST leases,0.3,0.9,42.7
+pve-slow,1,etcd-v3.7.2,idle,store,linearizable,0.2,0.5,1.5
+pve-slow,1,etcd-v3.7.2,idle,store,serializable,0.2,0.9,1.1
+pve-slow,1,etcd-v3.7.2,load,sa,GET lease,145.0,835.2,1763.9
+pve-slow,1,etcd-v3.7.2,load,sa,LIST leases,136.4,1298.2,2200.0
+pve-slow,1,etcd-v3.7.2,load,sa,GET crd,132.6,660.5,1647.1
+pve-slow,1,etcd-v3.7.2,load,admin,GET lease,131.3,1007.7,1338.3
+pve-slow,1,etcd-v3.7.2,load,admin,LIST leases,118.0,455.5,519.6
+pve-slow,1,etcd-v3.7.2,load,store,linearizable,71.8,835.1,1424.9
+pve-slow,1,etcd-v3.7.2,load,store,serializable,0.2,0.8,2.3
+pve-slow,1,etcd-v3.7.2,load,40 clients,renew loops/s,82,,
+pve-slow,1,fastetcd-v1.11.0,idle,sa,GET lease,0.4,1.7,42.0
+pve-slow,1,fastetcd-v1.11.0,idle,sa,LIST leases,0.4,1.2,42.3
+pve-slow,1,fastetcd-v1.11.0,idle,sa,GET crd,0.2,0.9,41.7
+pve-slow,1,fastetcd-v1.11.0,idle,admin,GET lease,0.2,0.8,42.2
+pve-slow,1,fastetcd-v1.11.0,idle,admin,LIST leases,0.2,0.9,42.7
+pve-slow,1,fastetcd-v1.11.0,idle,store,linearizable,0.1,0.1,0.6
+pve-slow,1,fastetcd-v1.11.0,idle,store,serializable,0.1,0.3,0.3
+pve-slow,1,fastetcd-v1.11.0,load,sa,GET lease,0.3,293.8,322.2
+pve-slow,1,fastetcd-v1.11.0,load,sa,LIST leases,0.2,1.0,41.9
+pve-slow,1,fastetcd-v1.11.0,load,sa,GET crd,0.2,0.9,42.3
+pve-slow,1,fastetcd-v1.11.0,load,admin,GET lease,0.2,125.2,178.9
+pve-slow,1,fastetcd-v1.11.0,load,admin,LIST leases,0.2,1.1,41.9
+pve-slow,1,fastetcd-v1.11.0,load,store,linearizable,0.0,0.3,0.5
+pve-slow,1,fastetcd-v1.11.0,load,store,serializable,0.0,0.0,0.0
+pve-slow,1,fastetcd-v1.11.0,load,40 clients,renew loops/s,27,,
+pve-slow,1,fastetcd-v1.12.0,idle,sa,GET lease,0.2,1.0,42.4
+pve-slow,1,fastetcd-v1.12.0,idle,sa,LIST leases,0.2,0.9,43.0
+pve-slow,1,fastetcd-v1.12.0,idle,sa,GET crd,0.2,0.7,42.5
+pve-slow,1,fastetcd-v1.12.0,idle,admin,GET lease,0.2,0.7,43.0
+pve-slow,1,fastetcd-v1.12.0,idle,admin,LIST leases,0.2,0.8,42.0
+pve-slow,1,fastetcd-v1.12.0,idle,store,linearizable,0.1,0.3,0.4
+pve-slow,1,fastetcd-v1.12.0,idle,store,serializable,0.1,0.3,0.3
+pve-slow,1,fastetcd-v1.12.0,load,sa,GET lease,0.2,1.0,42.4
+pve-slow,1,fastetcd-v1.12.0,load,sa,LIST leases,0.4,1.1,41.9
+pve-slow,1,fastetcd-v1.12.0,load,sa,GET crd,0.2,0.9,42.1
+pve-slow,1,fastetcd-v1.12.0,load,admin,GET lease,0.2,1.2,42.8
+pve-slow,1,fastetcd-v1.12.0,load,admin,LIST leases,0.2,0.8,42.7
+pve-slow,1,fastetcd-v1.12.0,load,store,linearizable,0.1,0.1,0.5
+pve-slow,1,fastetcd-v1.12.0,load,store,serializable,0.1,0.4,0.4
+pve-slow,1,fastetcd-v1.12.0,load,40 clients,renew loops/s,74,,

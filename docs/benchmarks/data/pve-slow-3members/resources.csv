@@ -1,0 +1,4 @@
+disk,members,contender,rss_idle_mib,rss_load_max_mib,cpu_s_per_1000_puts,disk_write_kib_per_1000_puts,write_syscall_kib_per_1000_puts
+pve-slow,3,etcd-v3.7.2,88.0,196.8,0.096,3142.8,4210.0
+pve-slow,3,fastetcd-v1.11.0,45.8,671.0,0.602,221874.0,242988.8
+pve-slow,3,fastetcd-v1.12.0,49.6,696.0,0.303,5147.6,5447.3
