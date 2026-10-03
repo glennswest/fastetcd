@@ -272,7 +272,15 @@ run_bench() {
                         c/tick*k, w/1024*k, x/1024*k }' >>"$RES_CSV"
     tail -n 1 "$RES_CSV"
 
-    "$ETCDCTL" --endpoints "$(endpoints "$n")" put foo bar >/dev/null
+    # The cluster may be electing after the heaviest load (seen: fastetcd
+    # v1.11.0, 3 members); wait for it rather than fail the run.
+    local t=0
+    until "$ETCDCTL" --endpoints "$(endpoints "$n")" --command-timeout 5s put foo bar >/dev/null 2>&1; do
+        t=$((t + 1))
+        [ "$t" -ge 120 ] && { echo "   no leader for 2 minutes after put-1000c"; break; }
+        sleep 1
+    done
+    [ "$t" -gt 0 ] && echo "   (after put-1000c the cluster took ~${t} s to accept a write again)"
     bench_one "$who" "$n" range-lin-1000c 1000 "$RANGE_TOTAL" --conns=100 --clients=1000 \
         range foo --consistency=l --total="$RANGE_TOTAL"
     bench_one "$who" "$n" range-ser-1000c 1000 "$RANGE_TOTAL" --conns=100 --clients=1000 \
