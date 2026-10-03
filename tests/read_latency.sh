@@ -27,6 +27,7 @@ TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 BENCH=$TARGET/release/fastetcd-bench
 
 MEMBERS=${MEMBERS:-1}
+BENCH_FAILED=0
 
 # Start MEMBERS members of `bin` under $1's directory; print their pids.
 start_members() {
@@ -66,8 +67,13 @@ run() {
     # leader may be either, so both a leader and a follower get measured.
     for i in $(seq "$((MEMBERS > 1 ? 2 : 1))"); do
         echo "-- client port of member $i"
-        "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
-            --conns 40 --duration-secs 20 --probes 200
+        if ! "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
+            --conns 40 --duration-secs 20 --probes 200 2>"$dir/bench.err"; then
+            echo "BENCH FAILED: $(grep -m1 -o 'message: "[^"]*"' "$dir/bench.err" || tail -n 2 "$dir/bench.err")"
+            echo "-- members' elections, warnings and errors:"
+            grep -hiE "vote|elect|leader|WARN|ERROR|panic" "$dir"/log* | tail -n 60 || true
+            BENCH_FAILED=1
+        fi
     done
     if [ "${METRICS:-0}" = 1 ]; then
         for i in $(seq "$MEMBERS"); do
@@ -103,3 +109,4 @@ if [ $# -ge 1 ]; then
     git worktree remove --force "$WORK/base-src"
 fi
 run "this tree $(git rev-parse --short HEAD)" "$TARGET/release/fastetcd"
+exit "$BENCH_FAILED"
