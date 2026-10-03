@@ -10,7 +10,20 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.12.0`** — Streaming writes (#85). The raft log is a sequential WAL
+**`1.13.0`** — Group commit on a slow disk (#95). openraft 0.9.24's
+RaftCore appends one entry at a time and awaits its fsync
+(`append_to_log` awaits `LogFlushed`), so writes are grouped only by
+the proposer's batches: one batch in RaftCore at a time (was three),
+the next formed when it is answered. Checkpoints are paced (the next
+waits 4x the last one's duration), so on a slow disk they no longer
+run back to back ahead of every WAL fsync. Metrics
+`fastetcd_wal_{entries,proposals}_synced_total`,
+`fastetcd_checkpoint_pace_seconds`. benchslow (fsync p50 ~35 ms), 1
+member: 30 writes/s offered, avg 562 → 100–135 ms (etcd 121); 20
+clients 26 → 133–186/s (etcd 89); 3 members: lone p50 248 → 136 ms
+(etcd 42, #97).
+
+Previous: **`1.12.0`** — Streaming writes (#85). The raft log is a sequential WAL
 in `<data-dir>/wal/` (`crates/storage/src/raft_wal.rs`: checksummed
 records in segments zero-filled in the background; torn tail cut at
 open), behind `WalLogStore` (`crates/raft/src/wal_log_store.rs`): a
@@ -1419,7 +1432,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       (write-behind back-pressure behind the checkpoint fsync), #94 (P1,
       proposer caps writes per fsync on a slow disk).
 
-41. **Group commit on a slow disk (#95, P1; also #94) — in progress.**
+41. **Group commit on a slow disk (#95, P1; also #94) — done, shipped in v1.13.0.**
     Measured on benchslow (pve VM, fdatasync p50 25 ms that day), 1
     member, etcd's `benchmark put`, 20 clients: etcd 219/s (avg 90 ms,
     ~9 puts per WAL fsync of 35 ms); v1.12 34/s (avg 568 ms, ~4 puts per
@@ -1448,8 +1461,25 @@ Tracked live in the Claude task system. Snapshot of the order:
       `fastetcd_wal_proposals_synced_total` (entries / proposals per
       fsync = their rate / the fsync rate).
     Work items:
-    - [ ] proposer in-flight; checkpoint pacing; metrics; tests.
-    - [ ] Docs (01, 03 § Metrics), changelog.
-    - [ ] sc-build green; benchslow: 20 / 1000 clients and lone writes
+    - [x] proposer in-flight; checkpoint pacing; metrics; tests.
+    - [x] Docs (00, 01, 03 § Metrics), changelog.
+    - [x] sc-build green; benchslow: 20 / 1000 clients and lone writes
       vs v1.12 and etcd; release; golden.
+    - Verified: sc-build of cb8c285, whole workspace green (339 tests,
+      `--locked --no-fail-fast`). `concurrent_writers_share_a_wal_fsync`
+      (20 closed-loop writers, 200 ms fsyncs): 10–12 proposals per fsync
+      in 5 repeats; with `IN_FLIGHT = 3` put back, 4.6 and it fails.
+      `slow_checkpoints_leave_the_disk_to_the_wal`: paced to 4x a 40 ms
+      checkpoint, last write still made durable. benchslow, release build
+      of cb8c285 vs v1.12.0 vs etcd v3.7.2 (etcd `benchmark put`), 1
+      member: lone p50 31–45 / 44 / 34 ms; 10 clients at 30/s 29.8 and
+      27.4/s avg 100 / 135 ms vs 15.3/s 562 ms vs 29.3/s 121 ms; 20
+      clients 133 / 186/s vs 26/s vs 89/s; 1000 clients 1 432 / 4 029/s
+      vs 788/s vs 7 142/s. 3 members (one disk): lone p50 136 / 248 /
+      42 ms; 30/s 24.5/s avg 308 ms vs 10.9/s 833 ms vs 26.5/s 275 ms;
+      1000 clients 1 121 / 421 / 2 540/s.
+    - Filed: #97 (3 members, a lone write pays the leader's and a
+      follower's fsync in series: openraft 0.9 replicates only after the
+      leader's own fsync). Still open: #94 (`MAX_BATCH` 256 caps writes
+      per fsync at 1000 clients).
     - Not verifiable here: the 5-pod run on server3 (X9 blade).

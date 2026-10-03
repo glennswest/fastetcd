@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.13.0] — 2026-10-03
+
 ### 2026-10-03 — group commit on a slow disk (#95, #94)
 - **perf:** Group commit: concurrent writes share one WAL fsync. openraft
   0.9's RaftCore appends one log entry at a time and waits for its fsync
