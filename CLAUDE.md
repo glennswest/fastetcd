@@ -1434,10 +1434,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       fsync. Wrong: openraft 0.9.24 `RaftCore::append_to_log` awaits
       the `LogFlushed` callback, so every fsync carries exactly one
       entry (measured: `entries_synced == fsyncs`) and 64 in flight was
-      worse (1.6 per fsync in the test, 21/s on benchslow). Group commit
-      must happen in the proposer: one batch waiting for its fsync (slot
-      freed when an entry past what was appended at submit is durable,
-      `LogProgress::durable_past`), the next formed when it returns.
+      worse (1.6 per fsync in the test, 21/s on benchslow). Then tried
+      freeing the slot when a batch is durable (d993c78): RaftCore,
+      blocked on the next batch's fsync, then answers a batch an fsync
+      late. Kept: **one batch in flight, slot freed when answered**
+      (benchslow, interleaved: 1 member light load 70 vs 210 ms avg,
+      etcd 120; 3 members lone p50 75 vs 119 ms; bursts equal or better).
     - **Checkpoint pacing**: after a checkpoint that took `d`, the next
       waits at least max(interval, 4·d) from its end, so checkpoints use
       at most ~20% of a slow disk's time; on a fast disk (d ≪ 25 ms)

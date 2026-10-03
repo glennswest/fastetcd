@@ -415,12 +415,12 @@ async fn proposals_per_fsync() -> f64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writers_share_a_wal_fsync() {
-    // Each batch is formed when the previous fsync returns, from what
-    // arrived during it: a writer waits about two fsyncs, and the 20
-    // writers settle into two groups (1 and 19), 10 proposals per fsync.
-    // Before #95 (a slot freed at apply, three in flight) a writer waited
-    // about four: 4.6-4.9 per fsync here. Fsyncs of 200 ms keep a loaded
-    // debug build's applies small beside them.
+    // One batch in RaftCore at a time, the next formed when it is
+    // answered: the 20 writers settle into two alternating groups,
+    // about 10 proposals per fsync. Before #95 (three in flight) the
+    // batches queued in RaftCore and a writer waited about four fsyncs:
+    // 4.6-4.9 per fsync here. Fsyncs of 200 ms keep a loaded debug
+    // build's applies small beside them.
     let per = proposals_per_fsync().await;
     assert!(per >= 8.0, "20 writers, {per:.1} proposals per fsync");
 }

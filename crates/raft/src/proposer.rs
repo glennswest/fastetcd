@@ -11,13 +11,18 @@
 //! its own response back. A proposal that finds nothing in flight goes
 //! as a plain entry at once, exactly as without the proposer.
 //!
-//! **Group commit** (fastetcd#95): only [`IN_FLIGHT`] batch is ever
-//! waiting for its fsync. The next one is formed the moment that fsync
-//! returns, from everything that arrived while it ran, and goes to
-//! RaftCore at once. Before #95 a batch's slot was freed only when the
-//! batch had been applied, with three in flight: the batches queued in
-//! RaftCore behind each other, a write waited about three fsyncs, and
-//! 20 closed-loop writers put ~4 writes in each fsync of a slow disk.
+//! **Group commit** (fastetcd#95): only [`IN_FLIGHT`] batch is in
+//! RaftCore at a time. The next one is formed the moment the previous
+//! is answered, from everything that arrived while it was written and
+//! applied, and goes to RaftCore at once. One, not more: RaftCore cannot
+//! answer a batch while it waits on the next one's fsync, so a second
+//! batch in flight delays the first one's answers by a whole fsync and
+//! splits the writers into more, smaller groups. #75 had three in
+//! flight; they queued in RaftCore behind each other, a write waited
+//! about four fsyncs, and 20 writers put ~4 writes in each fsync of a
+//! slow disk. Freeing the slot once a batch is durable rather than
+//! answered was tried too: the same answers wait an fsync behind the
+//! next batch (light load on a slow disk: 70 ms answered vs 210 ms).
 //!
 //! A `Batch` entry cannot be decoded by a member older than this, so
 //! nothing is batched until every member (voters and learners) has
@@ -38,9 +43,7 @@ use crate::kv_log_store::LogProgress;
 use crate::network::{ConfirmError, WriteForwarder};
 use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
-/// Proposals not yet durable in the log at once (see the module docs).
-/// One: a second would be formed while the first's fsync runs, wait in
-/// RaftCore behind it, and carry only what arrived before it was formed.
+/// `client_write`s in flight at once (see the module docs).
 pub const IN_FLIGHT: usize = 1;
 /// Most proposals in one batch.
 pub const MAX_BATCH: usize = 256;
@@ -196,7 +199,7 @@ impl Proposer {
         let (tx, rx) = mpsc::unbounded_channel();
         let gate = Arc::new(BatchGate {
             raft: raft.clone(),
-            progress: progress.clone(),
+            progress,
             forwarder,
             open: AtomicBool::new(false),
             checked: AtomicU64::new(0),
@@ -204,7 +207,7 @@ impl Proposer {
             last_probe: std::sync::Mutex::new(None),
         });
         let stats = Arc::new(ProposerStats::default());
-        tokio::spawn(run(raft, progress, rx, gate, stats.clone()));
+        tokio::spawn(run(raft, rx, gate, stats.clone()));
         Self { tx, stats }
     }
 
@@ -227,7 +230,6 @@ impl Proposer {
 
 async fn run(
     raft: Raft<TypeConfig>,
-    progress: LogProgress,
     mut rx: mpsc::UnboundedReceiver<Pending>,
     gate: Arc<BatchGate>,
     stats: Arc<ProposerStats>,
@@ -275,24 +277,9 @@ async fn run(
             stats.batched.fetch_add(batch.len() as u64, Ordering::Relaxed);
         }
         let raft = raft.clone();
-        let progress = progress.clone();
         tokio::spawn(async move {
-            // Its entry comes after everything appended by now. The
-            // slot is free once an entry past that is durable (normally
-            // this one; an entry appended in between, such as a new
-            // leader's blank, frees it a little early, which costs only
-            // grouping), or once the proposal is answered (an error).
-            let mark = progress.appended();
-            let answered = submit(&raft, batch);
-            tokio::pin!(answered);
-            tokio::select! {
-                _ = &mut answered => {
-                    drop(permit);
-                    return;
-                }
-                _ = progress.durable_past(mark) => drop(permit),
-            }
-            answered.await;
+            submit(&raft, batch).await;
+            drop(permit);
         });
     }
 }

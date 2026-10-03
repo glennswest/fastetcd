@@ -211,12 +211,12 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
    fsync (up to 256 proposals, 512 KiB), each applied at its own
    revision with its own answer (#75). RaftCore appends one entry at a
    time and waits for its fsync, so group commit happens here (#95):
-   only one proposal is ever waiting for its fsync, and the next batch
-   is formed the moment that fsync returns, from everything that
-   arrived during it (a write waits about two fsyncs under load, one
-   when alone). #75 freed a slot only once its batch was applied, with
-   three in flight; the batches queued in RaftCore and a write waited
-   about four fsyncs. Batches are
+   one batch is in RaftCore at a time, and the next is formed the
+   moment it is answered, from everything that arrived meanwhile (a
+   write waits about two fsyncs under load, one when alone). A second
+   batch in flight would make RaftCore wait on its fsync before it
+   could answer the first; #75 had three, and a write waited about four
+   fsyncs. Batches are
    proposed only once every member has answered `ConfirmLeader` (an
    older member cannot decode one), re-checked on membership changes.
    Applying a batch records `(index, done)` with each proposal's commit,

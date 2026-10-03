@@ -7,13 +7,12 @@
 - **perf:** Group commit: concurrent writes share one WAL fsync. openraft
   0.9's RaftCore appends one log entry at a time and waits for its fsync
   (`append_to_log` awaits `LogFlushed`; #85 assumed it did not), so the
-  proposer is where writes are grouped. It now keeps one batch waiting
-  for its fsync, not three waiting for their apply: the next batch is
-  formed the moment that fsync returns, from everything that arrived
-  during it. Before, batches queued in RaftCore behind each other and a
-  write waited ~4 fsyncs; on a slow disk 20 writers got ~4 writes per
-  fsync. `LogProgress` tracks the last appended index and wakes waiters
-  when an append becomes durable.
+  proposer is where writes are grouped. It now keeps one batch in RaftCore
+  (was three): the next is formed when the previous is answered, from
+  everything that arrived meanwhile. With three, batches queued in
+  RaftCore behind each other, RaftCore could not answer one while it
+  waited on the next one's fsync, and a write waited ~4 fsyncs; on a slow
+  disk 20 writers got ~4 writes per fsync, now ~10.
 - **perf:** Checkpoints are paced: after one that took `d`, the next waits
   at least `4·d`. On a slow disk a checkpoint took about the 100 ms
   interval, so they ran back to back and every WAL fsync queued behind

@@ -478,7 +478,6 @@ impl WalLogStore {
             .or(last_purged.map(|p| p.index));
         if let Some(l) = last_index {
             progress.last_durable.fetch_max(l + 1, Ordering::Release);
-            progress.last_appended.fetch_max(l + 1, Ordering::Release);
         }
         let committed_index = Arc::new(AtomicU64::new(0));
         if let Some(c) = &committed {
@@ -749,7 +748,6 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
                     _ => 0,
                 };
                 let index = entry.log_id.index;
-                self.progress.note_appended(index);
                 let bytes =
                     Arc::new(bincode::serialize(&entry).map_err(|e| io_err(ErrorVerb::Write, e))?);
                 // An entry replaces whatever was at its index and after.
@@ -772,7 +770,7 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
             done: Some(Box::new(move |r: io::Result<()>| {
                 if r.is_ok() {
                     if let Some(last) = last {
-                        progress.note_durable(last);
+                        progress.last_durable.fetch_max(last + 1, Ordering::Release);
                     }
                 }
                 callback.log_io_completed(r);
@@ -791,9 +789,6 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
         // leader, but keep the value true.
         self.progress
             .last_durable
-            .fetch_min(log_id.index, Ordering::Release);
-        self.progress
-            .last_appended
             .fetch_min(log_id.index, Ordering::Release);
         {
             let mut ts = self.progress.term_start.lock().unwrap();
