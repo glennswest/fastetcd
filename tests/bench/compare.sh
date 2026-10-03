@@ -32,6 +32,7 @@
 #   GO_VERSION     default 1.26.8 (what etcd v3.7.2's go.mod asks for)
 #
 # Through sc-build: sc-build 'MEMBERS=1 tests/bench/compare.sh v3.7.2'.
+# Needs: cargo, gcc, git, curl, python3 and protoc (protobuf-compiler).
 # Everything lives under tmp/compare; nothing needs root.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
