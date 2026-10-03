@@ -3,6 +3,24 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-03 — upstream etcd vs fastetcd, side by side (#90)
+- **docs:** `docs/benchmarks/etcd-vs-fastetcd.md`: etcd v3.7.2 vs fastetcd
+  v1.11.0 and v1.12.0 on three disks (build box SSD, a pve VM on SSD, a
+  pve VM throttled to ~6 fsyncs/s), 1 and 3 members: etcd's own
+  `benchmark` workloads, SIGKILL durability, resources, and rustkube's
+  apiserver rig. Raw CSVs and summaries in `docs/benchmarks/data/`.
+  In short: under Kubernetes-shaped load v1.12's GET p99 is 10–800x lower
+  than etcd's (1.0 vs 835 ms on the slow disk) at a similar write rate;
+  etcd keeps more raw write throughput (1.3–6x), most on the slow disk
+  (#94), and much faster lease keepalives (#92). No server lost an
+  acknowledged write in 21 crash-restarts.
+- **test:** `tests/bench/compare.sh <etcd-version>` (downloads and checks
+  etcd, builds its `benchmark` with a downloaded Go, builds fastetcd tags;
+  `MEMBERS`, `PARTS`, `BENCH_TIMEOUT`, sizes), `tests/bench/extract.py`,
+  `tests/bench/report.py`. `fastetcd-bench --mode durability-write` /
+  `durability-check`.
+- **chore:** `.gitignore` no longer hides `docs/benchmarks/data/`.
+
 ## [v1.12.0] — 2026-10-02
 
 ### 2026-10-02 — streaming writes: the raft log is a sequential WAL (#85, P1)

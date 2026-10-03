@@ -1385,7 +1385,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Not verified here: the X9 spinning-disk acceptance and the
       power-cut durability stage (need the golden on that hardware).
 
-40. **Research: upstream etcd vs fastetcd v1.11 / v1.12, fast and slow disk (#90) — in progress.**
+40. **Research: upstream etcd vs fastetcd v1.11 / v1.12, fast and slow disk (#90) — done (docs; no release).**
     Deliverable `docs/benchmarks/etcd-vs-fastetcd.md` + CSVs in
     `docs/benchmarks/data/`, reproducible by `tests/bench/compare.sh
     <etcd-version>`. Plan:
@@ -1407,8 +1407,14 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Slow disk: a throttled pve VM, requested on #90 (2026-10-03); no
       unprivileged way to throttle dev's disk.
     Work items:
-    - [ ] fastetcd-bench durability mode; compare.sh (download, build, run,
+    - [x] fastetcd-bench durability mode; compare.sh (download, build, run,
       CSV); sc-build runs on dev (fast disk).
-    - [ ] rustkube rig per contender.
-    - [ ] Doc with tables + conclusion; changelog.
-    - [ ] Slow-disk run on the VM when provided.
+    - [x] rustkube rig per contender.
+    - [x] Doc with tables + conclusion; changelog.
+    - [x] Slow-disk run on the VMs the master provided (pve benchfast /
+      benchslow, user `bench`; the master removes them).
+    - Result: v1.12 wins reads under load everywhere (apiserver GET p99
+      1.0 vs 835 ms on the slow disk); etcd wins raw write throughput
+      (1.3–6x) and lease keepalive. Filed #92 (keepalive via Raft), #93
+      (write-behind back-pressure behind the checkpoint fsync), #94 (P1,
+      proposer caps writes per fsync on a slow disk).
