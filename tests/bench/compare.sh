@@ -207,6 +207,7 @@ bench_one() {
         local row
         row=$(parse "$raw")
         echo "   $row"
+        case $row in *nan*) echo "   (unparsed; the tool's output ends:)"; tail -n 40 "$raw" | sed 's/^/   | /' ;; esac
         echo "$DISK,$n,$who,$name,$clients,$total,$row" >>"$BENCH_CSV"
     else
         echo "   FAILED (see $raw): $(tail -n 3 "$raw" | tr '\n' ' ')"
@@ -351,6 +352,14 @@ case " $PARTS " in
     ;;
 esac
 
+# The raw summaries, so a run whose files are gone (sc-build deletes its
+# drive) still shows what each number came from.
+echo "== raw benchmark summaries"
+for f in "$OUT"/raw/bench-*.txt; do
+    [ -f "$f" ] || continue
+    echo "--- $(basename "$f" .txt)"
+    awk '/[Ss]ummary/ {p = 1} p && !/^\s*[0-9.]+ \[/ && !/^Response time histogram/ {print}' "$f"
+done
 echo "== results in $OUT"
 for f in "$BENCH_CSV" "$RES_CSV" "$DUR_CSV" "$K8S_CSV"; do
     if [ "$(wc -l <"$f")" -gt 1 ]; then
