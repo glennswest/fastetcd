@@ -354,6 +354,10 @@ async fn a_change_made_on_one_member_is_enforced_on_every_member() {
         let auth = n.state.auth.clone();
         let t = alice.clone();
         wait_for("token replicated", || auth.user_for_token(&t).is_some()).await;
+        // root's too: it is used on another member below, and a member
+        // knows a token only once it has applied its Authenticate.
+        let t = root.clone();
+        wait_for("root's token replicated", || auth.user_for_token(&t).is_some()).await;
         get(n, Some(&alice), "config/a").await.unwrap();
         let err = get(n, Some(&alice), "secret/a").await.unwrap_err();
         assert_eq!(err.code(), Code::PermissionDenied, "member {}: {err:?}", n.id);
