@@ -94,6 +94,11 @@ it always opens redb (#55).
 
 ## fastetcd vs etcd
 
+Measured side by side with etcd v3.7.2 on a fast and a slow disk:
+[docs/benchmarks/etcd-vs-fastetcd.md](docs/benchmarks/etcd-vs-fastetcd.md).
+Under Kubernetes-shaped load fastetcd v1.12's reads stay fast where
+etcd's wait on the disk; etcd still has more raw write throughput (#94).
+
 fastetcd targets the same wire protocol and consensus semantics as
 upstream etcd, but the implementation differs in ways that affect
 resource use, latency predictability, and operational shape. The
