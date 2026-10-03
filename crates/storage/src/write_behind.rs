@@ -354,36 +354,32 @@ impl OverlaySnapshot {
             return self.base.range(table, start, end, limit).await;
         }
         let view = self.view(table, &start, &end);
-        let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let full = |out: &Vec<(Vec<u8>, Vec<u8>)>| limit > 0 && out.len() >= limit;
-        let page = if limit == 0 { 0 } else { (limit * 2).max(256) };
-        let mut cursor = start.clone();
-        // Layer keys not yet emitted, in order.
-        let mut pending = view
+        // Layer keys with a value, in order; `next` is the first not yet
+        // emitted. Owned, so nothing borrowed lives across an await.
+        let pending: Vec<(Vec<u8>, Vec<u8>)> = view
             .entries
             .iter()
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, v)| (k.clone(), v.clone().unwrap()))
-            .peekable();
+            .filter_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+            .collect();
+        let mut next = 0usize;
+        let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let page = if limit == 0 { 0 } else { (limit * 2).max(256) };
+        let mut cursor = start.clone();
         loop {
             let rows = self.base.range(table, cursor.clone(), end.clone(), page).await?;
             let exhausted = page == 0 || rows.len() < page;
             let page_hi = rows.last().map(|(k, _)| k.clone());
             for (k, v) in rows {
-                while let Some((pk, _)) = pending.peek() {
-                    if pk.as_slice() < k.as_slice() {
-                        let (pk, pv) = pending.next().unwrap();
-                        out.push((pk, pv));
-                        if full(&out) {
-                            return Ok(out);
-                        }
-                    } else {
-                        break;
+                while next < pending.len() && pending[next].0 < k {
+                    out.push(pending[next].clone());
+                    next += 1;
+                    if limit > 0 && out.len() >= limit {
+                        return Ok(out);
                     }
                 }
                 if !view.hides(&k) {
                     out.push((k, v));
-                    if full(&out) {
+                    if limit > 0 && out.len() >= limit {
                         return Ok(out);
                     }
                 }
@@ -394,22 +390,19 @@ impl OverlaySnapshot {
             // Layer keys up to this page's last key belong before the
             // next page.
             let hi = page_hi.expect("a full page has a last row");
-            while let Some((pk, _)) = pending.peek() {
-                if pk.as_slice() <= hi.as_slice() {
-                    let (pk, pv) = pending.next().unwrap();
-                    out.push((pk, pv));
-                    if full(&out) {
-                        return Ok(out);
-                    }
-                } else {
-                    break;
+            while next < pending.len() && pending[next].0 <= hi {
+                out.push(pending[next].clone());
+                next += 1;
+                if limit > 0 && out.len() >= limit {
+                    return Ok(out);
                 }
             }
             cursor = Bound::Excluded(hi);
         }
-        for (pk, pv) in pending {
-            out.push((pk, pv));
-            if full(&out) {
+        while next < pending.len() {
+            out.push(pending[next].clone());
+            next += 1;
+            if limit > 0 && out.len() >= limit {
                 break;
             }
         }
