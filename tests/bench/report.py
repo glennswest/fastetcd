@@ -41,6 +41,8 @@ def fmt(v, digits=0):
         x = float(v)
     except ValueError:
         return v
+    if x != x:  # nan: the tool printed no such percentile
+        return "–"
     if digits == 0:
         return f"{x:,.0f}".replace(",", " ")
     return f"{x:.{digits}f}"
