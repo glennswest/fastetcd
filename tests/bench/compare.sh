@@ -26,7 +26,9 @@
 #   OUT            results directory (default tmp/compare/out)
 #   PORT_BASE      first port used (default 24000); two runs at once on
 #                  one host need different bases
-#   PUT_TOTAL / RANGE_TOTAL / KEEPALIVE_TOTAL / WATCH_PUTS   workload sizes
+#   PUT_TOTAL / PUT1C_TOTAL / RANGE_TOTAL / KEEPALIVE_TOTAL / WATCH_PUTS
+#                  workload sizes (a slow disk wants a small PUT1C_TOTAL:
+#                  one client does one fsync per put)
 #   GO_VERSION     default 1.26.8 (what etcd v3.7.2's go.mod asks for)
 #
 # Through sc-build: sc-build 'MEMBERS=1 tests/bench/compare.sh v3.7.2'.
@@ -43,6 +45,7 @@ WORK=$ROOT/tmp/compare
 OUT=${OUT:-$WORK/out}
 PORT_BASE=${PORT_BASE:-24000}
 PUT_TOTAL=${PUT_TOTAL:-20000}
+PUT1C_TOTAL=${PUT1C_TOTAL:-2000}
 RANGE_TOTAL=${RANGE_TOTAL:-100000}
 KEEPALIVE_TOTAL=${KEEPALIVE_TOTAL:-50000}
 WATCH_PUTS=${WATCH_PUTS:-2000}
@@ -249,8 +252,8 @@ run_bench() {
     sleep 2
     local rss_idle
     rss_idle=$(rss_kb)
-    bench_one "$who" "$n" put-1c 1 2000 --conns=1 --clients=1 \
-        put --key-size=8 --sequential-keys --total=2000 --val-size=256
+    bench_one "$who" "$n" put-1c 1 "$PUT1C_TOTAL" --conns=1 --clients=1 \
+        put --key-size=8 --sequential-keys --total="$PUT1C_TOTAL" --val-size=256
     fe_metrics "$who" "$n"
 
     # The 1000-client put, with resources measured around it.
