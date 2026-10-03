@@ -840,9 +840,20 @@ pub fn spawn_checkpointer(
             // Write back what the non-durable commits left in the page
             // cache without holding redb's writer lock; the commit's own
             // fsync then has little left, so applies wait less on it.
+            // Applies keep dirtying pages meanwhile, so repeat while a
+            // pass is slow: each one leaves less for the next (at most
+            // a few passes).
             let file = data_file.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                std::fs::File::open(file).and_then(|f| f.sync_data())
+            let _ = tokio::task::spawn_blocking(move || -> io::Result<()> {
+                let f = std::fs::File::open(file)?;
+                for _ in 0..4 {
+                    let t = Instant::now();
+                    f.sync_data()?;
+                    if t.elapsed() < Duration::from_millis(5) {
+                        break;
+                    }
+                }
+                Ok(())
             })
             .await;
             let locked = Instant::now();
