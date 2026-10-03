@@ -383,6 +383,15 @@ struct Args {
     #[arg(long, env = "FASTETCD_WAL_CHECKPOINT_ENTRIES", default_value_t = 10_000)]
     wal_checkpoint_entries: u64,
 
+    /// Applied writes held in RAM until a checkpoint writes them into the
+    /// data file, in bytes. Past it, an apply writes them out first.
+    #[arg(
+        long,
+        env = "FASTETCD_WRITE_BEHIND_BYTES",
+        default_value_t = fastetcd_storage::write_behind::DEFAULT_MAX_BYTES as u64
+    )]
+    write_behind_bytes: u64,
+
     /// Directory for periodic backups of the whole store, on a
     /// **different volume** from `--data-dir`: a device that loses writes
     /// can corrupt the data file and, on the same volume, the backups
@@ -834,7 +843,15 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .await?;
-    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(engine);
+    // Applies (non-durable commits) are held in RAM and written into the
+    // data file in batches by the checkpoint, so an apply never waits on
+    // the data file's fsync (fastetcd#85).
+    let write_behind = fastetcd_storage::write_behind::WriteBehind::new(
+        Arc::new(engine),
+        args.write_behind_bytes as usize,
+    );
+    let write_behind_stats = write_behind.stats();
+    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(write_behind);
     let recovery_alarm =
         Arc::new(fastetcd_server::recovery::RecoveryAlarm::load(&engine).await?);
     if let Some(r) = recovery_alarm.active() {
@@ -1043,7 +1060,6 @@ async fn main() -> anyhow::Result<()> {
     let _checkpointer = fastetcd_raft::wal_log_store::spawn_checkpointer(
         checkpoint_log,
         sm.applied_index(),
-        data_file.clone(),
         fastetcd_raft::wal_log_store::CheckpointConfig {
             interval: std::time::Duration::from_millis(args.wal_checkpoint_interval_ms.max(1)),
             entries: args.wal_checkpoint_entries.max(1),
@@ -1165,6 +1181,7 @@ async fn main() -> anyhow::Result<()> {
         .with_client_cert_auth(args.client_cert_auth)
         .with_committed_index(committed_index)
         .with_wal_stats(wal_stats)
+        .with_write_behind_stats(write_behind_stats)
         // Linearizable reads and batched writes without queueing in
         // openraft's RaftCore, on one member (#71) or several (#75).
         .with_peer_read_index_and_batching(log_progress.clone()),

@@ -55,7 +55,11 @@
 //!     `fastetcd_checkpoint_failures_total`,
 //!     `fastetcd_checkpoint_commit_seconds_total` (counters),
 //!     `fastetcd_checkpoint_commit_max_seconds` (gauge),
-//!     `fastetcd_checkpoint_durable_applied_index` (gauge)
+//!     `fastetcd_checkpoint_durable_applied_index` (gauge); the
+//!     write-behind layer: `fastetcd_write_behind_bytes` / `_batches`
+//!     (gauges), `fastetcd_write_behind_flushes_total`,
+//!     `fastetcd_write_behind_flush_seconds_total`,
+//!     `fastetcd_write_behind_backpressure_total` (counters)
 //!
 //! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
 //! when the endpoint starts (fastetcd#29; see that module):
@@ -451,6 +455,9 @@ impl Metrics {
         if let Some(w) = &state.wal {
             self.wal.refresh(w);
         }
+        if let Some(w) = &state.write_behind {
+            self.wal.refresh_write_behind(w);
+        }
         if let Some(r) = &state.read_index {
             let s = r.stats();
             for (path, n) in [("sole_voter", &s.sole_voter), ("quorum", &s.quorum), ("raft", &s.raft)] {
@@ -627,6 +634,11 @@ pub struct WalMetrics {
     checkpoint_seconds: Counter<f64, AtomicU64>,
     checkpoint_failures: Counter,
     durable_applied: Gauge,
+    wb_bytes: Gauge,
+    wb_layers: Gauge,
+    wb_flushes: Counter,
+    wb_flush_seconds: Counter<f64, AtomicU64>,
+    wb_backpressure: Counter,
 }
 
 impl WalMetrics {
@@ -645,6 +657,11 @@ impl WalMetrics {
             checkpoint_seconds: Counter::default(),
             checkpoint_failures: Counter::default(),
             durable_applied: Gauge::default(),
+            wb_bytes: Gauge::default(),
+            wb_layers: Gauge::default(),
+            wb_flushes: Counter::default(),
+            wb_flush_seconds: Counter::default(),
+            wb_backpressure: Counter::default(),
         }
     }
 
@@ -706,6 +723,31 @@ impl WalMetrics {
             self.checkpoint_failures.clone(),
         );
         reg.register(
+            "fastetcd_write_behind_bytes",
+            "Applied writes held in RAM, not yet written into the data file",
+            self.wb_bytes.clone(),
+        );
+        reg.register(
+            "fastetcd_write_behind_batches",
+            "Applied batches held in RAM, not yet written into the data file",
+            self.wb_layers.clone(),
+        );
+        reg.register(
+            "fastetcd_write_behind_flushes",
+            "Writes of the held batches into the data file",
+            self.wb_flushes.clone(),
+        );
+        reg.register(
+            "fastetcd_write_behind_flush_seconds",
+            "Time spent writing held batches into the data file (readers wait on this)",
+            self.wb_flush_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_write_behind_backpressure",
+            "Applies that had to write the held batches out first (over --write-behind-bytes)",
+            self.wb_backpressure.clone(),
+        );
+        reg.register(
             "fastetcd_checkpoint_durable_applied_index",
             "Applied raft index (+1) the last checkpoint made durable in the data file",
             self.durable_applied.clone(),
@@ -728,6 +770,17 @@ impl WalMetrics {
         catch_up_seconds(&self.checkpoint_seconds, load(&s.checkpoint_nanos));
         catch_up(&self.checkpoint_failures, load(&s.checkpoint_failures));
         self.durable_applied.set(load(&s.durable_applied) as i64);
+    }
+}
+
+impl WalMetrics {
+    fn refresh_write_behind(&self, s: &fastetcd_storage::write_behind::WriteBehindStats) {
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        self.wb_bytes.set(load(&s.layer_bytes) as i64);
+        self.wb_layers.set(load(&s.layers) as i64);
+        catch_up(&self.wb_flushes, load(&s.flushes));
+        catch_up_seconds(&self.wb_flush_seconds, load(&s.flush_nanos));
+        catch_up(&self.wb_backpressure, load(&s.backpressure));
     }
 }
 

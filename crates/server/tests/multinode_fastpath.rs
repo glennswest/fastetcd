@@ -94,7 +94,6 @@ async fn start_node(id: NodeId, older: bool) -> Node {
     fastetcd_raft::wal_log_store::spawn_checkpointer(
         log.clone(),
         sm.applied_index(),
-        dir.path().join("data.redb"),
         Default::default(),
     );
     let config = Arc::new(

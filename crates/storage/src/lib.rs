@@ -18,6 +18,8 @@
 pub mod fs_space;
 pub mod kvstore;
 pub mod mvcc;
+/// Non-durable commits held in RAM, written to the engine in batches (fastetcd#85).
+pub mod write_behind;
 /// The raft log's sequential write-ahead log (fastetcd#85).
 #[cfg(unix)]
 pub mod raft_wal;

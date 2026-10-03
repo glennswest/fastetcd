@@ -19,6 +19,7 @@ use fastetcd_raft::wal_log_store::{
 use fastetcd_raft::FastetcdStateMachine;
 use fastetcd_storage::mvcc::{Mutation, MvccStore};
 use fastetcd_storage::redb_engine::RedbEngine;
+use fastetcd_storage::write_behind::WriteBehind;
 use fastetcd_storage::KvStore;
 
 fn small() -> WalLogOptions {
@@ -43,6 +44,8 @@ async fn open_dir(dir: &std::path::Path) -> (Arc<dyn KvStore>, WalLogStore, Fast
             Err(e) => panic!("open: {e}"),
         }
     };
+    // As the server runs it: applies held in RAM in front of redb.
+    let engine: Arc<dyn KvStore> = Arc::new(WriteBehind::new(engine, 64 * 1024));
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
     let sm = FastetcdStateMachine::open(mvcc, dir.join("snapshots")).await.unwrap();
     let log = WalLogStore::open(&wal_dir(dir), engine.clone(), small()).await.unwrap();
@@ -257,7 +260,6 @@ async fn a_node_purges_wal_segments_and_restarts_with_everything() {
         let checkpointer = spawn_checkpointer(
             log.clone(),
             sm.applied_index(),
-            dir.path().join("fastetcd.redb"),
             CheckpointConfig { interval: Duration::from_millis(20), entries: 25 },
         );
         let raft = Raft::<TypeConfig>::new(1, config(), NopNetwork, log.clone(), sm.clone())

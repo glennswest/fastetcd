@@ -53,6 +53,8 @@ pub struct ServerState {
     pub committed_index: Option<Arc<AtomicU64>>,
     /// The raft WAL's counters, for `/metrics` (fastetcd#85).
     pub wal: Option<Arc<fastetcd_raft::wal_log_store::WalStats>>,
+    /// The write-behind layer's counters (fastetcd#85).
+    pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
     /// (fastetcd#71). `None`: every read barrier is openraft's.
     pub read_index: Option<fastetcd_raft::LocalReadIndex>,
@@ -84,9 +86,19 @@ impl ServerState {
             traffic: Arc::new(Traffic::default()),
             committed_index: None,
             wal: None,
+            write_behind: None,
             read_index: None,
             proposer: None,
         }
+    }
+
+    /// Report the write-behind layer's counters on `/metrics` (fastetcd#85).
+    pub fn with_write_behind_stats(
+        mut self,
+        stats: Arc<fastetcd_storage::write_behind::WriteBehindStats>,
+    ) -> Self {
+        self.write_behind = Some(stats);
+        self
     }
 
     /// Report the raft WAL's counters on `/metrics` (fastetcd#85).

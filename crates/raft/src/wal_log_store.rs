@@ -19,8 +19,10 @@
 //!   committed id is a record that rides the next sync (openraft accepts
 //!   an older committed id after a crash).
 //! - **redb** is made durable by the [checkpointer](spawn_checkpointer),
-//!   every `interval` or `entries` applied entries: fdatasync the data
-//!   file outside redb's writer lock, then one durable commit. A crash
+//!   every `interval` or `entries` applied entries: the applies held in
+//!   RAM by the write-behind layer in front of redb are written into it
+//!   and committed durably, without applies ever waiting on that commit
+//!   (`fastetcd_storage::write_behind`). A crash
 //!   loses at most the applies since the last checkpoint, and the WAL
 //!   replays them (openraft re-applies up to the committed id; a leader
 //!   re-commits the rest).
@@ -805,11 +807,12 @@ impl Default for CheckpointConfig {
 
 /// Make the data file durable in the background and let the WAL drop
 /// what it no longer needs (see the module docs). `applied` is the state
-/// machine's applied watch (`index + 1`), `data_file` the redb file.
+/// machine's applied watch (`index + 1`). The store's engine is normally
+/// a [`fastetcd_storage::write_behind::WriteBehind`], whose `sync` writes
+/// the applies held in RAM into the data file and commits it durably.
 pub fn spawn_checkpointer(
     store: WalLogStore,
     applied: watch::Receiver<u64>,
-    data_file: PathBuf,
     cfg: CheckpointConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -837,25 +840,6 @@ pub fn spawn_checkpointer(
                 continue;
             }
             let t = Instant::now();
-            // Write back what the non-durable commits left in the page
-            // cache without holding redb's writer lock; the commit's own
-            // fsync then has little left, so applies wait less on it.
-            // Applies keep dirtying pages meanwhile, so repeat while a
-            // pass is slow: each one leaves less for the next (at most
-            // a few passes).
-            let file = data_file.clone();
-            let _ = tokio::task::spawn_blocking(move || -> io::Result<()> {
-                let f = std::fs::File::open(file)?;
-                for _ in 0..4 {
-                    let t = Instant::now();
-                    f.sync_data()?;
-                    if t.elapsed() < Duration::from_millis(5) {
-                        break;
-                    }
-                }
-                Ok(())
-            })
-            .await;
             let locked = Instant::now();
             if let Err(e) = store.engine.sync().await {
                 store.stats.checkpoint_failures.fetch_add(1, Ordering::Relaxed);
