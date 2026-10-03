@@ -30,7 +30,7 @@
 #                  workload sizes (a slow disk wants a small PUT1C_TOTAL:
 #                  one client does one fsync per put)
 #   BENCH_TIMEOUT  seconds; cut each benchmark workload off after it and
-#                  record "<rate" (what its progress counter reached)
+#                  record "~rate" (its progress over that time)
 #   GO_VERSION     default 1.26.8 (what etcd v3.7.2's go.mod asks for)
 #
 # Through sc-build: sc-build 'MEMBERS=1 tests/bench/compare.sh v3.7.2'.
@@ -216,11 +216,11 @@ bench_one() {
     [ -n "${BENCH_TIMEOUT:-}" ] && cap=(timeout --signal=INT "$BENCH_TIMEOUT")
     "${cap[@]}" "$BENCHMARK" --endpoints "$(endpoints "$n")" --precise "$@" >"$raw" 2>&1 || rc=$?
     if [ "$rc" -eq 124 ]; then
-        # Cut off: the rate is at most what the progress counter reached.
+        # Cut off: the rate is its progress over the time it had.
         local got
         got=$(tr '\r' '\n' <"$raw" | grep -oE '^[0-9]+ / [0-9]+' | tail -n 1 | cut -d' ' -f1)
         local lb
-        lb=$(awk -v d="${got:-0}" -v t="$BENCH_TIMEOUT" 'BEGIN { printf "<%.1f", d / t }')
+        lb=$(awk -v d="${got:-0}" -v t="$BENCH_TIMEOUT" 'BEGIN { printf "~%.1f", d / t }')
         echo "   cut off after ${BENCH_TIMEOUT} s at ${got:-0} of $total: $lb/s"
         echo "$DISK,$n,$who,$name,$clients,$total,$lb,,,,," >>"$BENCH_CSV"
     elif [ "$rc" -eq 0 ]; then
