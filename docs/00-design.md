@@ -84,11 +84,17 @@ production system. We integrate by:
   source of the in-place upgrade.
 - Implementing `RaftStateMachine` as the MVCC store applying committed
   entries. Each apply commits its writes and its `last_applied_log_id`
-  in one batch **without an fsync** (redb `Durability::None`): it is
-  visible at once. The **checkpointer** makes the data file durable
-  every `--wal-checkpoint-interval-ms` (100) or `--wal-checkpoint-entries`
-  applied entries: an `fdatasync` of the file outside redb's writer
-  lock, then one durable commit. A crash loses at most the applies since
+  as one batch **without an fsync** into the **write-behind** layer in
+  front of redb (`crates/storage/src/write_behind.rs`): an immutable
+  in-RAM layer, visible at once, since a snapshot is the layer list plus
+  a redb snapshot taken together and reads merge them (newest wins).
+  The **checkpointer**, every `--wal-checkpoint-interval-ms` (100) or
+  `--wal-checkpoint-entries` applied entries, writes the layers into
+  redb as one non-durable commit (dropping them from the list in the
+  same step for readers) and then commits durably. Every redb write is
+  serialized behind one flush lock, so an apply never waits on redb's
+  writer or its fsync; past `--write-behind-bytes` (64 MiB) held, an
+  apply writes the layers out first (back-pressure). A crash loses at most the applies since
   the last checkpoint, together with the applied position that records
   them, and openraft replays them from the WAL into the same state
   (#71, #85). Snapshot installs, migration bulk loads and startup

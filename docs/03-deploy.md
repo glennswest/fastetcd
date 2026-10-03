@@ -384,13 +384,15 @@ spinning disk or a network block device does best. One writer thread
 syncs everything appended while the previous sync ran, so concurrent
 writes share one `fdatasync`.
 
-Applying an entry updates the data file without an fsync (#71) and the
-RAM index and value cache ([Memory](#memory)), so reads see it at once.
-A **checkpoint** then makes the data file durable in the background:
-at most `--wal-checkpoint-interval-ms` (100) after an apply, or after
-`--wal-checkpoint-entries` (10000) entries. It first flushes the data
-file's dirty pages without holding redb's writer lock, then makes one
-durable commit, so applies wait as little as possible on it.
+Applying an entry does not touch the data file: its writes are held in
+RAM (the write-behind layer, up to `--write-behind-bytes`, 64 MiB) and
+in the RAM index and value cache ([Memory](#memory)), and reads see
+them at once. A **checkpoint** then writes them into the data file and
+makes it durable, in the background: at most
+`--wal-checkpoint-interval-ms` (100) after an apply, or after
+`--wal-checkpoint-entries` (10000) entries. An apply never waits on the
+data file's fsync; only if more than `--write-behind-bytes` is held
+does it write them out first.
 
 After a crash the data file is as of its last checkpoint, and the WAL
 replays the rest: a member re-applies up to the committed index it
@@ -408,7 +410,13 @@ Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_wal_bytes_appended_total`, `fastetcd_wal_segments`,
 `fastetcd_wal_cached_bytes`, `fastetcd_checkpoints_total`,
 `fastetcd_checkpoint_seconds_total`, `fastetcd_checkpoint_failures_total`,
-`fastetcd_checkpoint_durable_applied_index`. Average fsync time is
+`fastetcd_checkpoint_commit_seconds_total`, `fastetcd_checkpoint_durable_applied_index`,
+`fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`,
+`fastetcd_checkpoint_commit_max_seconds`; the write-behind layer:
+`fastetcd_write_behind_bytes`, `fastetcd_write_behind_batches`,
+`fastetcd_write_behind_flushes_total`,
+`fastetcd_write_behind_flush_seconds_total`,
+`fastetcd_write_behind_backpressure_total`. Average fsync time is
 `rate(fastetcd_wal_fsync_seconds_total) / rate(fastetcd_wal_fsyncs_total)`.
 
 **Upgrading to 1.12** moves the raft log out of the data file on the
@@ -448,6 +456,7 @@ Memory to expect, beyond the process's own few tens of MiB:
 | Value cache | Up to `--value-cache-bytes` (default min(128 MiB, 5% of memory)). |
 | Engine cache | Up to `--engine-cache-bytes` (default 256 MiB), redb's page cache, filled as pages are read. |
 | Raft log cache | Up to `--wal-cache-bytes` (default 64 MiB): recent raft entries, for replication. |
+| Write-behind | Up to `--write-behind-bytes` (default 64 MiB): applied writes not yet in the data file (about 100 ms worth). |
 
 The kernel's page cache comes on top and is reclaimable. The startup log
 line `RAM cache:` gives the configured budgets and the index's size; the

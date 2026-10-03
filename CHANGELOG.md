@@ -14,15 +14,25 @@
   everything appended while the previous sync ran (group commit), and
   openraft is told each append is durable afterwards, so RaftCore does
   not wait on the disk.
-- **perf:** The data file is made durable in the background: a
-  checkpoint every `--wal-checkpoint-interval-ms` (100) or
-  `--wal-checkpoint-entries` (10000) applied entries, which first
-  flushes the file's dirty pages outside redb's writer lock and then
-  makes one durable commit. A crash loses at most the applies since the
-  last checkpoint, and the WAL replays them. WAL segments are deleted
-  only once a checkpoint covers every entry in them.
+- **perf:** Applies no longer touch the data file. A write-behind layer
+  in front of redb (`crates/storage/src/write_behind.rs`) holds each
+  applied batch in RAM, visible to reads at once (a snapshot is the
+  held batches plus a redb snapshot, merged). A checkpoint every
+  `--wal-checkpoint-interval-ms` (100) or `--wal-checkpoint-entries`
+  (10000) applied entries writes them into redb as one commit and makes
+  it durable; applies never wait on that fsync. Past
+  `--write-behind-bytes` (64 MiB) held, an apply writes them out first.
+  A crash loses at most the applies since the last checkpoint, and the
+  WAL replays them. WAL segments are deleted only once a checkpoint
+  covers every entry in them.
 - **feat:** `--wal-cache-bytes` (64 MiB): recent raft entries kept in RAM
-  for replication. Metrics `fastetcd_wal_*` and `fastetcd_checkpoint*`.
+  for replication. Metrics `fastetcd_wal_*`, `fastetcd_checkpoint*` and
+  `fastetcd_write_behind_*`. `tests/read_latency.sh` with `METRICS=1`
+  prints them after a run.
+- **perf:** Measured with `tests/read_latency.sh v1.11.0` on dev's disk,
+  one member, two rounds: writes 601 → 1662/s and 693 → 1513/s, write
+  p50 44 → 18 ms, p99 135 → 111 and 125 → 135 ms, linearizable read p99
+  50 → 0.6 ms.
 - **feat:** In-place upgrade: on the first start the log is copied from
   redb's `raft_log`/`raft_meta` into a new WAL (built in `wal.tmp/`,
   renamed), then `raft_log` is cleared. One-way: do not downgrade a
