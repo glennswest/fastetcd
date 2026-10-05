@@ -35,6 +35,8 @@ difference (README § Compatibility boundary), with an issue.
 
 ---
 
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
+
 ## Where it sits in StormCOS
 
 stormcentral's graph (`stormcentral check`): fastetcd **depends on
@@ -52,6 +54,8 @@ disarm) and **flowsdn**'s ClusterMesh store (planned deployment; its
 peer-port policy is in flowsdn `deploy/clustermesh/`).
 
 ---
+
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
 
 ## How it works
 
@@ -79,6 +83,8 @@ durable in the background, and the WAL is purged only behind it.
 
 ---
 
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
+
 ## What it does today (1/2) — the etcd API
 
 From `docs/00-design.md` § Wire-compat surface, each tested with the
@@ -98,6 +104,8 @@ and JSON. Single- and multi-member; a follower forwards writes and
 linearizable reads to the leader.
 
 ---
+
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
 
 ## What it does today (2/2) — operating it
 
@@ -119,6 +127,8 @@ linearizable reads to the leader.
 
 ---
 
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
+
 ## Performance, measured
 
 `docs/benchmarks/etcd-vs-fastetcd.md` (#90), etcd v3.7.2 vs fastetcd on
@@ -137,6 +147,8 @@ keepalives. v1.13.0 (#95) narrowed the write gap on the slow disk
 ahead, #94).
 
 ---
+
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
 
 ## Interfaces
 
@@ -158,6 +170,8 @@ ahead, #94).
   defrag, compact, alarm, auth members/adopt); `fastetcd-bench`.
 
 ---
+
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
 
 ## How it ships and runs
 
@@ -181,6 +195,8 @@ ahead, #94).
 
 ---
 
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
+
 ## Status — open issues that matter
 
 | | Issue |
@@ -193,6 +209,8 @@ Auth is enforced but **not yet a security boundary**: #47.
 `gh issue list` for everything.
 
 ---
+
+<style scoped>pre { font-size: 0.5em; } table, ul { font-size: 0.7em; }</style>
 
 ## Planned (not in the code)
 
