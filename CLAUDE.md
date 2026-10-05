@@ -1483,3 +1483,17 @@ Tracked live in the Claude task system. Snapshot of the order:
       leader's own fsync). Still open: #94 (`MAX_BATCH` 256 caps writes
       per fsync at 1000 clients).
     - Not verifiable here: the 5-pod run on server3 (X9 blade).
+
+42. **A presentation of its purpose and functionality (#27, P2) — in progress (docs).**
+    `docs/presentation.md`, a Marp deck of 8–15 slides like the other
+    components' decks: purpose; place in stormcos (stormcentral's graph:
+    rustkube and irondirectory depend on it, it depends on nothing;
+    stormconsole and flowsdn's ClusterMesh read it); one architecture
+    diagram; what works today, from the code; planned work on its own
+    slide; interfaces; how it ships (special golden, stage mode) and runs
+    (stormd); status and the open issues that matter. Every claim
+    checked against the code or the doc it came from.
+    Work items:
+    - [ ] Deck; README/docs link; changelog.
+    - [ ] Verify: renders with marp-cli (sc-build, dev has npx?) or count
+      slides; claims re-checked; close #27.
