@@ -1,7 +1,8 @@
 # fastetcd
 
 A Rust implementation of the **etcd v3 wire protocol**, focused on
-low resource overhead and predictable latency. Wire-compatible with
+low resource overhead and predictable latency. A slide deck of its purpose and
+functionality: [docs/presentation.md](docs/presentation.md). Wire-compatible with
 unmodified etcd v3 clients (third-party `etcd-client` Rust crate
 exercises the full surface in the integration tests). Multi-node
 Raft via `openraft`. Data is stored in `redb`, a single-file ACID

@@ -3,6 +3,14 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-05
+- **docs:** `docs/presentation.md`, a 12-slide Marp deck of fastetcd's
+  purpose and functionality (#27): the problem, its place in StormCOS
+  (stormcentral's graph), one architecture diagram, what works today
+  from the code, measured performance, interfaces, how it ships (special
+  golden, stage mode) and runs (stormd), open issues that matter, and
+  planned work on its own slide. Linked from the README.
+
 ## [v1.13.0] — 2026-10-03
 
 ### 2026-10-03 — group commit on a slow disk (#95, #94)
