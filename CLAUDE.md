@@ -1484,7 +1484,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       per fsync at 1000 clients).
     - Not verifiable here: the 5-pod run on server3 (X9 blade).
 
-42. **A presentation of its purpose and functionality (#27, P2) — in progress (docs).**
+42. **A presentation of its purpose and functionality (#27, P2) — done (docs; no release).**
     `docs/presentation.md`, a Marp deck of 8–15 slides like the other
     components' decks: purpose; place in stormcos (stormcentral's graph:
     rustkube and irondirectory depend on it, it depends on nothing;
@@ -1494,6 +1494,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     (stormd); status and the open issues that matter. Every claim
     checked against the code or the doc it came from.
     Work items:
-    - [ ] Deck; README/docs link; changelog.
-    - [ ] Verify: renders with marp-cli (sc-build, dev has npx?) or count
-      slides; claims re-checked; close #27.
+    - [x] Deck; README link; changelog.
+    - [x] Verify: sc-build of the deck commit runs `npx
+      @marp-team/marp-cli@4 docs/presentation.md` on dev: renders, 12
+      slides. PNG export needs a browser dev lacks, so the layout was not
+      looked at; dense slides use smaller type. Defaults, flags, metric
+      and RPC names re-checked against main.rs / the protos; the golden
+      against stormcos `deploy/build-goldens.sh` (stage mode, #81).
