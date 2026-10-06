@@ -3,7 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-10-06
+## [v1.15.0] — 2026-10-06
+
+### 2026-10-06 — a live snapshot can be restored (#61)
 - **fix:** A live snapshot can be restored (#61, P1). `Maintenance.Snapshot`
   (`etcdctl snapshot save`, `fastetcd-ctl snapshot-save`) streamed the
   raft snapshot body, which `fastetcd restore`, `fastetcd-migrate` and

@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.14.1`** — Boolean flags take etcd-style values (#53, P1).
+**`1.15.0`** — A live snapshot can be restored (#61, P1).
+`Maintenance.Snapshot` (`etcdctl snapshot save`, `fastetcd-ctl
+snapshot-save`) streamed the raft snapshot body, which nothing restores.
+It now streams the `--backup-dir` backup format (`backup::Dump`: every
+table through the write-behind layer, one point in time, SHA-256),
+encoded straight into the stream; `fastetcd restore` restores it.
+`fastetcd-ctl snapshot-save` checks the checksum. Not BoltDB: etcdctl
+`snapshot status/restore` still cannot read it.
+
+Previous: **`1.14.1`** — Boolean flags take etcd-style values (#53, P1).
 `--auto-defrag`/`--upgrade-backup` were clap switches: `=false` was a
 parse error and the Helm chart's `--auto-defrag=true` stopped every pod.
 Now every server bool flag takes `--flag`, `--flag=true|false|1|0` and
@@ -1637,9 +1646,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       snapshot-save as a hot backup if that is unrestorable (it now is).
     - etcdctl `snapshot status/restore` still need BoltDB: documented.
     Work items:
-    - [ ] backup.rs: dump + writer split; maintenance.rs stream.
-    - [ ] ctl verify; restore's messages.
-    - [ ] Tests: snapshot-save over gRPC → `fastetcd restore` → start →
+    - [x] backup.rs: dump + writer split; maintenance.rs stream.
+    - [x] ctl verify; restore's messages.
+    - [x] Tests: snapshot-save over gRPC → `fastetcd restore` → start →
       keys, leases and auth present; checksum; a write made just before
       the snapshot (write-behind) is in it; old-format file refused.
-    - [ ] Docs (03 § Backups, 05), changelog; release; golden; close #61.
+    - [x] Docs (03 § Backups, 05), changelog; release; golden; close #61.
+    - Verified: sc-build of 2580a61, 352 tests pass (the 1 failure #45);
+      `snapshot_restore.rs` 2/2. With v1.14.1's maintenance.rs put back
+      on dev, the restore test fails (the stream is not a backup).
