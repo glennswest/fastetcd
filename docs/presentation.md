@@ -222,7 +222,7 @@ Auth is enforced but **not yet a security boundary**: #47.
 - **Writes on slow disks and 3 members**: more writes per fsync (#94),
   replicate before the leader's own fsync (#97), keepalive off Raft
   (#92), configurable election timeouts (#103).
-- **Operations**: restore a live snapshot (#61), migrate leases and
+- **Operations**: migrate leases and
   auth (#60), `fastetcd-ctl` over TLS (#59), a rolling-upgrade test
   (#65), test containers on the test machines (#36).
 
