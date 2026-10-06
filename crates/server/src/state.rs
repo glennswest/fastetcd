@@ -14,6 +14,7 @@ use crate::traffic::{GaugeHold, Traffic};
 use fastetcd_raft::precheck::{self, PrecheckError};
 use fastetcd_raft::{ProposeError, Proposer};
 use fastetcd_raft::types::MembershipChange;
+use fastetcd_storage::mvcc::Refusal;
 use fastetcd_raft::{
     FastetcdLogEntry, FastetcdLogResponse, FastetcdStateMachine, TypeConfig, WriteForwarder,
 };
@@ -198,14 +199,16 @@ impl ServerState {
     ) -> Result<FastetcdLogResponse, Status> {
         let _pending = GaugeHold::new(&self.traffic.proposals_pending, 1);
         // On the leader, refuse a put naming a lease that does not exist
-        // before proposing it (#19; see `fastetcd_raft::precheck`). A
-        // follower forwards and the leader checks.
+        // (#19), and a request the state machine would refuse (#49),
+        // before proposing it (see `fastetcd_raft::precheck`). A follower
+        // forwards and the leader checks.
         if precheck::is_leader(&self.raft) {
-            match precheck::check_leases(&self.raft, self.read_index.as_ref(), self.sm.mvcc(), &entry).await {
+            match precheck::check(&self.raft, self.read_index.as_ref(), self.sm.mvcc(), &entry).await {
                 Ok(()) => {}
                 Err(PrecheckError::LeaseNotFound) => {
                     return Err(Status::not_found(precheck::LEASE_NOT_FOUND))
                 }
+                Err(PrecheckError::Refused(r)) => return Err(refusal_status(&r)),
                 Err(PrecheckError::Unavailable(m)) => return Err(Status::unavailable(m)),
             }
         }
@@ -218,17 +221,23 @@ impl ServerState {
                 .map(|w| w.data)
                 .map_err(ProposeError::from),
         };
-        match result {
-            Ok(r) => Ok(r),
+        let response = match result {
+            Ok(r) => r,
             Err(ProposeError::ForwardToLeader { leader_id: Some(leader_id), .. }) => {
                 self.forwarder.forward(leader_id, &entry).await.map_err(|msg| {
                     if msg == precheck::LEASE_NOT_FOUND {
                         return Status::not_found(msg);
                     }
                     Status::unavailable(format!("forwarded write to leader {leader_id}: {msg}"))
-                })
+                })?
             }
-            Err(e) => Err(Status::unavailable(format!("raft client_write: {e}"))),
+            Err(e) => return Err(Status::unavailable(format!("raft client_write: {e}"))),
+        };
+        // Refused at apply: nothing was applied; the client gets etcd's
+        // error (#49).
+        match response {
+            FastetcdLogResponse::Refused { refusal, .. } => Err(refusal_status(&refusal)),
+            r => Ok(r),
         }
     }
 
@@ -359,6 +368,16 @@ impl ServerState {
                     ))
                 }),
         )
+    }
+}
+
+/// The gRPC status etcd answers a refused request with (`rpctypes`).
+pub fn refusal_status(r: &Refusal) -> Status {
+    let msg = r.message().to_string();
+    match r {
+        Refusal::KeyNotFound | Refusal::InvalidArgument(_) => Status::invalid_argument(msg),
+        Refusal::LeaseNotFound => Status::not_found(msg),
+        Refusal::Compacted | Refusal::FutureRevision => Status::out_of_range(msg),
     }
 }
 

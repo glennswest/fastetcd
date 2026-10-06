@@ -92,13 +92,18 @@ pub async fn compact_to_retention(
         .client_write(FastetcdLogEntry::Compact { rev: target })
         .await
     {
-        Ok(w) => {
-            if let FastetcdLogResponse::Compact { compact_rev } = w.data {
+        Ok(w) => match w.data {
+            FastetcdLogResponse::Compact { compact_rev } => {
                 tracing::debug!(target: "fastetcd::compaction", compact_rev, "compacted");
-                return Ok(Some(compact_rev));
+                Ok(Some(compact_rev))
             }
-            Ok(Some(target))
-        }
+            // Raced with another compaction past `target` (#49).
+            FastetcdLogResponse::Refused { refusal, .. } => {
+                tracing::debug!(target: "fastetcd::compaction", %refusal, "compaction refused");
+                Ok(None)
+            }
+            _ => Ok(Some(target)),
+        },
         Err(e) => {
             // ForwardToLeader during a transition is expected; the next
             // leader picks it up on its next tick.

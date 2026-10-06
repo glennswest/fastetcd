@@ -815,6 +815,39 @@ async fn apply_data(
     data: &FastetcdLogEntry,
     log_index: u64,
 ) -> Result<FastetcdLogResponse, anyhow::Error> {
+    match apply_request(mvcc, data, log_index).await {
+        Ok(r) => Ok(r),
+        // A request that cannot apply wrote nothing and is refused on
+        // every member alike: answer it, and keep applying. Only a real
+        // storage failure may stop the state machine (fastetcd#49).
+        Err(ApplyError::Mvcc(e)) => match e.refusal() {
+            Some(refusal) => {
+                tracing::debug!(log_index, %refusal, "entry refused at apply");
+                let revision = mvcc.current_revision().await;
+                Ok(FastetcdLogResponse::Refused { revision, refusal })
+            }
+            None => Err(e.into()),
+        },
+        Err(ApplyError::Other(e)) => Err(e),
+    }
+}
+
+enum ApplyError {
+    Mvcc(fastetcd_storage::mvcc::MvccError),
+    Other(anyhow::Error),
+}
+
+impl From<fastetcd_storage::mvcc::MvccError> for ApplyError {
+    fn from(e: fastetcd_storage::mvcc::MvccError) -> Self {
+        ApplyError::Mvcc(e)
+    }
+}
+
+async fn apply_request(
+    mvcc: &MvccStore,
+    data: &FastetcdLogEntry,
+    log_index: u64,
+) -> Result<FastetcdLogResponse, ApplyError> {
     match data {
         FastetcdLogEntry::Apply { mutations } => {
             let (revision, results) = mvcc.apply(mutations).await?;
@@ -857,7 +890,9 @@ async fn apply_data(
             Ok(FastetcdLogResponse::Auth { revision, log_index, result })
         }
         // Applied by `FastetcdStateMachine::apply_batch`.
-        FastetcdLogEntry::Batch(_) => anyhow::bail!("nested batch in log entry {log_index}"),
+        FastetcdLogEntry::Batch(_) => Err(ApplyError::Other(anyhow::anyhow!(
+            "nested batch in log entry {log_index}"
+        ))),
     }
 }
 

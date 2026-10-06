@@ -34,5 +34,5 @@ pub use revision::Revision;
 pub use store::{
     BulkKey, Compare, CompareOp, CompareTarget, LeaseGrantResult, LeaseRevokeResult,
     LeaseTtlResult, Mutation, MutationResult, MvccError, MvccResult, MvccStore, OpCounts, RangeOp,
-    RangeResult, TxnOp, TxnOpResult, TxnResult,
+    RangeResult, Refusal, TxnOp, TxnOpResult, TxnResult,
 };

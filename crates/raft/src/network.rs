@@ -534,11 +534,22 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
             bincode::deserialize(&request.into_inner().data)
                 .map_err(|e| Status::invalid_argument(format!("decode ForwardWrite: {e}")))?;
         // The leader refuses a put naming a lease that does not exist
-        // before proposing it (#19). A node that is not the leader skips
-        // the check: `client_write` refuses it below anyway.
+        // (#19), and a request the state machine would refuse (#49),
+        // before proposing it. A node that is not the leader skips the
+        // check: `client_write` refuses it below anyway.
         if crate::precheck::is_leader(&self.raft) {
-            if let Err(e) = crate::precheck::check_leases(&self.raft, self.read_index.as_ref(), &self.mvcc, &entry).await {
-                let result: Result<crate::types::FastetcdLogResponse, String> = Err(e.to_string());
+            if let Err(e) = crate::precheck::check(&self.raft, self.read_index.as_ref(), &self.mvcc, &entry).await {
+                let result: Result<crate::types::FastetcdLogResponse, String> = match e {
+                    // Answered as the apply would have: the caller turns
+                    // it into the client's error. (A follower older than
+                    // 1.14 cannot decode it and reports the forward as
+                    // failed; the request is refused either way.)
+                    crate::precheck::PrecheckError::Refused(refusal) => {
+                        let revision = self.mvcc.current_revision().await;
+                        Ok(crate::types::FastetcdLogResponse::Refused { revision, refusal })
+                    }
+                    e => Err(e.to_string()),
+                };
                 let data = bincode::serialize(&result)
                     .map_err(|e| Status::internal(format!("encode response: {e}")))?;
                 return Ok(Response::new(pb::RaftPayload { data }));

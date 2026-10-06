@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use fastetcd_storage::mvcc::auth::{AuthApplyError, AuthOp, AuthTables};
 use fastetcd_storage::mvcc::{
     Compare, LeaseGrantResult, LeaseId, LeaseRevokeResult, LeaseTtlResult, Mutation,
-    MutationResult, RangeOp, RangeResult, TxnOp, TxnResult,
+    MutationResult, RangeOp, RangeResult, Refusal, TxnOp, TxnResult,
 };
 
 /// Cluster-unique node identifier. We use u64 to match openraft's
@@ -196,6 +196,12 @@ pub enum FastetcdLogResponse {
     },
     /// Result of a `Batch` entry: one response per proposal, in order.
     Batch(Vec<FastetcdLogResponse>),
+    /// The entry was refused at apply and changed nothing (fastetcd#49):
+    /// a request that cannot apply, such as a put with `ignore_value` on
+    /// a missing key. Every member refuses it alike; the serving member
+    /// answers the client with `refusal`'s etcd error. Appended last so
+    /// every existing variant keeps its bincode tag.
+    Refused { revision: i64, refusal: Refusal },
 }
 
 impl FastetcdLogResponse {
@@ -214,6 +220,7 @@ impl FastetcdLogResponse {
             FastetcdLogResponse::Batch(rs) => {
                 rs.iter().map(|r| r.header_revision()).max().unwrap_or(0)
             }
+            FastetcdLogResponse::Refused { revision, .. } => *revision,
         }
     }
 }
