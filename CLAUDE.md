@@ -1616,3 +1616,30 @@ Tracked live in the Claude task system. Snapshot of the order:
       rendered pods (defaults, autoDefrag=false, bool flags in extraArgs)
       started and served a put/get; the v1.14.0 binary refused
       `--auto-defrag=true`/`=false` with the issue's error.
+
+46. **A live snapshot can be restored (#61, P1).** `Maintenance.Snapshot`
+    (`etcdctl snapshot save`, `fastetcd-ctl snapshot-save`) streamed the
+    raft snapshot body, which nothing reads back (`fastetcd restore`,
+    `fastetcd-migrate` and etcdctl all refuse it), and which lacks the
+    lease tables (#41), the raft membership and node metadata anyway.
+    Plan (the issue's second option):
+    - The RPC streams a `FEBACKUP` file, the format of `--backup-dir`
+      backups: every table from one engine snapshot (through the
+      write-behind layer, so RAM-only applies are in it), checksummed.
+      `fastetcd restore <file>` already restores it. Encoded straight
+      into the gRPC stream from a blocking thread: no temp file (a
+      full copy could fill a bounded volume, #14), no second copy in
+      RAM; `remaining_bytes` from bincode's serialized sizes.
+    - `fastetcd-ctl snapshot-save` checks the magic and the checksum
+      after writing and says how to restore it.
+    - `fastetcd restore` on a pre-fix raft-snapshot file says what it is
+      and that it cannot be restored; its error no longer points at
+      snapshot-save as a hot backup if that is unrestorable (it now is).
+    - etcdctl `snapshot status/restore` still need BoltDB: documented.
+    Work items:
+    - [ ] backup.rs: dump + writer split; maintenance.rs stream.
+    - [ ] ctl verify; restore's messages.
+    - [ ] Tests: snapshot-save over gRPC → `fastetcd restore` → start →
+      keys, leases and auth present; checksum; a write made just before
+      the snapshot (write-behind) is in it; old-format file refused.
+    - [ ] Docs (03 § Backups, 05), changelog; release; golden; close #61.
