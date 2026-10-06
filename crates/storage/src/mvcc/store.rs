@@ -95,8 +95,66 @@ pub enum MvccError {
     #[error("required revision {requested} is in the future (current_rev = {current_rev})")]
     FutureRevision { requested: i64, current_rev: i64 },
 
+    /// The request cannot be applied; nothing was written (fastetcd#49).
+    /// Raised before an apply changes anything, from state every member
+    /// holds alike, so each member refuses the same entry.
+    #[error("{0}")]
+    Refused(Refusal),
+
     #[error("mvcc internal: {0}")]
     Internal(String),
+}
+
+impl MvccError {
+    /// The request-level refusal this error is, if any: an apply that
+    /// returns one has written nothing, and must answer the client
+    /// rather than stop the state machine (fastetcd#49). Storage and
+    /// internal errors are not refusals.
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            MvccError::Refused(r) => Some(r.clone()),
+            MvccError::Compacted { .. } => Some(Refusal::Compacted),
+            MvccError::FutureRevision { .. } => Some(Refusal::FutureRevision),
+            MvccError::Storage(_) | MvccError::Internal(_) => None,
+        }
+    }
+}
+
+/// Why a request was refused at apply (or by the leader before
+/// proposing it), with etcd's error for each. Carried in raft responses,
+/// so variants are only ever appended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    /// A put with `ignore_value` / `ignore_lease` on a key that does not
+    /// exist (etcd `ErrKeyNotFound`).
+    KeyNotFound,
+    /// A lease that does not exist (etcd `ErrLeaseNotFound`).
+    LeaseNotFound,
+    /// A revision at or below the compacted one (etcd `ErrCompacted`).
+    Compacted,
+    /// A revision above the current one (etcd `ErrFutureRev`).
+    FutureRevision,
+    /// Any other invalid request; the text is the client's error.
+    InvalidArgument(String),
+}
+
+impl Refusal {
+    /// etcd's error text for the refusal (`rpctypes`).
+    pub fn message(&self) -> &str {
+        match self {
+            Refusal::KeyNotFound => "etcdserver: key not found",
+            Refusal::LeaseNotFound => "etcdserver: requested lease not found",
+            Refusal::Compacted => "etcdserver: mvcc: required revision has been compacted",
+            Refusal::FutureRevision => "etcdserver: mvcc: required revision is a future revision",
+            Refusal::InvalidArgument(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
 }
 
 pub type MvccResult<T> = Result<T, MvccError>;
@@ -109,8 +167,8 @@ pub enum Mutation {
         value: Vec<u8>,
         lease: i64,
         /// If true, ignore `value` and keep the previously-stored value
-        /// (matching etcd `Put.ignore_value`). Errors if the key doesn't
-        /// exist.
+        /// (matching etcd `Put.ignore_value`). Refused with
+        /// [`Refusal::KeyNotFound`] if the key doesn't exist.
         ignore_value: bool,
         /// If true, ignore `lease` and keep the previously-attached
         /// lease (matching etcd `Put.ignore_lease`).
@@ -961,9 +1019,9 @@ impl MvccStore {
         now_unix: i64,
     ) -> MvccResult<LeaseGrantResult> {
         if ttl_secs <= 0 {
-            return Err(MvccError::Internal(format!(
+            return Err(MvccError::Refused(Refusal::InvalidArgument(format!(
                 "lease TTL must be positive, got {ttl_secs}"
-            )));
+            ))));
         }
         let mut state = self.inner.write_state.lock().await;
         let mut batch = WriteBatch::new();
@@ -1001,8 +1059,8 @@ impl MvccStore {
     }
 
     /// Refresh a lease's deadline. Returns the granted TTL (so the
-    /// caller can pass it back to the client) or
-    /// `MvccError::Internal` if the lease does not exist.
+    /// caller can pass it back to the client), or refuses with
+    /// [`Refusal::LeaseNotFound`] if the lease does not exist.
     pub async fn apply_lease_keepalive(
         &self,
         id: LeaseId,
@@ -1014,7 +1072,7 @@ impl MvccStore {
         let _state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
         let Some(rec_bytes) = snap.get(TABLE_LEASE, &lease_id_key(id)).await? else {
-            return Err(MvccError::Internal(format!("lease {id} not found")));
+            return Err(MvccError::Refused(Refusal::LeaseNotFound));
         };
         let mut rec: LeaseRecord = bincode::deserialize(&rec_bytes)
             .map_err(|e| MvccError::Internal(format!("deserialize LeaseRecord: {e}")))?;
@@ -1185,15 +1243,15 @@ impl MvccStore {
     /// Compaction itself does NOT consume a `main` revision; the
     /// current revision counter is unchanged.
     ///
-    /// Errors if `rev` is `<= 0`, `> current_revision`, or
-    /// `< compact_revision` (etcd treats Compact at the current
-    /// compact rev as a no-op; we error to surface bugs — match
-    /// upstream's behavior in a follow-up if tests demand it).
+    /// Refuses (nothing changed) if `rev` is `<= 0`, `> current_revision`
+    /// ([`MvccError::FutureRevision`]) or `< compact_revision`
+    /// ([`MvccError::Compacted`]). Compacting at the current compact
+    /// revision again is a no-op.
     pub async fn compact(&self, rev: i64) -> MvccResult<i64> {
         if rev <= 0 {
-            return Err(MvccError::Internal(format!(
+            return Err(MvccError::Refused(Refusal::InvalidArgument(format!(
                 "compact rev must be > 0, got {rev}"
-            )));
+            ))));
         }
         let mut state = self.inner.write_state.lock().await;
         if rev > state.current_rev {
@@ -1203,10 +1261,10 @@ impl MvccStore {
             });
         }
         if rev < state.compact_rev {
-            return Err(MvccError::Internal(format!(
-                "compact rev {rev} is below current compact_rev {}",
-                state.compact_rev
-            )));
+            return Err(MvccError::Compacted {
+                requested: rev,
+                compact_rev: state.compact_rev,
+            });
         }
         if rev == state.compact_rev {
             return Ok(rev); // idempotent
@@ -1502,15 +1560,11 @@ impl MvccStore {
                     None
                 };
 
-                if *ignore_value && prev.is_none() {
-                    return Err(MvccError::Internal(
-                        "ignore_value set on Put for a non-existent key".into(),
-                    ));
-                }
-                if *ignore_lease && prev.is_none() {
-                    return Err(MvccError::Internal(
-                        "ignore_lease set on Put for a non-existent key".into(),
-                    ));
+                // etcd's ErrKeyNotFound. A refusal, not an internal
+                // error: it is the client's request, and an error here
+                // used to stop every member's apply (fastetcd#49).
+                if (*ignore_value || *ignore_lease) && prev.is_none() {
+                    return Err(MvccError::Refused(Refusal::KeyNotFound));
                 }
 
                 let effective_value = if *ignore_value {
@@ -2615,9 +2669,67 @@ mod tests {
         s.compact(2).await.unwrap();
         // Same rev: no-op.
         s.compact(2).await.unwrap();
-        // Older rev: error.
+        // Older rev: refused as etcd's ErrCompacted.
         let err = s.compact(1).await.err().unwrap();
-        assert!(matches!(err, MvccError::Internal(_)));
+        assert!(matches!(err, MvccError::Compacted { .. }));
+        assert_eq!(err.refusal(), Some(Refusal::Compacted));
+    }
+
+    // fastetcd#49: a request that cannot apply is a refusal that writes
+    // nothing, never an internal error.
+    #[tokio::test]
+    async fn ignore_value_or_lease_on_a_missing_key_is_refused_and_writes_nothing() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"there", b"v")]).await.unwrap();
+        let before = s.current_revision().await;
+        for (iv, il) in [(true, false), (false, true), (true, true)] {
+            let m = Mutation::Put {
+                key: b"missing".to_vec(),
+                value: b"x".to_vec(),
+                lease: 0,
+                ignore_value: iv,
+                ignore_lease: il,
+                prev_kv: false,
+            };
+            let err = s.apply(&[put(b"other", b"y"), m.clone()]).await.err().unwrap();
+            assert_eq!(err.refusal(), Some(Refusal::KeyNotFound), "{err}");
+            // In a txn, after a write in the same branch: still nothing.
+            let err = s
+                .txn(&[], &[TxnOp::Mutation(put(b"other", b"y")), TxnOp::Mutation(m)], &[])
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.refusal(), Some(Refusal::KeyNotFound), "{err}");
+        }
+        assert_eq!(s.current_revision().await, before);
+        let r = s.range(b"other", b"", 0, 0, false, false).await.unwrap();
+        assert!(r.kvs.is_empty());
+        // The key exists once put earlier in the same txn.
+        let iv = Mutation::Put {
+            key: b"new".to_vec(),
+            value: Vec::new(),
+            lease: 0,
+            ignore_value: true,
+            ignore_lease: false,
+            prev_kv: false,
+        };
+        s.txn(&[], &[TxnOp::Mutation(put(b"new", b"n")), TxnOp::Mutation(iv)], &[])
+            .await
+            .unwrap();
+        let r = s.range(b"new", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(r.kvs[0].value, b"n");
+    }
+
+    #[tokio::test]
+    async fn lease_requests_that_cannot_apply_are_refusals() {
+        let (_d, s) = open_mvcc().await;
+        let err = s.apply_lease_keepalive(42, 0).await.err().unwrap();
+        assert_eq!(err.refusal(), Some(Refusal::LeaseNotFound));
+        let err = s.apply_lease_grant(0, 0, 0).await.err().unwrap();
+        assert!(matches!(err.refusal(), Some(Refusal::InvalidArgument(_))));
+        let err = s.compact(0).await.err().unwrap();
+        assert!(matches!(err.refusal(), Some(Refusal::InvalidArgument(_))));
+        assert_eq!(s.compact(9).await.err().unwrap().refusal(), Some(Refusal::FutureRevision));
     }
 
     #[tokio::test]

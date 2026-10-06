@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::lease_server::Lease;
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
+use fastetcd_storage::mvcc::Refusal;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
@@ -119,6 +120,24 @@ impl Lease for LeaseService {
                     .await
                 {
                     Ok(data) => data,
+                    // etcd answers a keep-alive of a lease that does not
+                    // exist (expired, revoked) with TTL 0, not an error;
+                    // clientv3 takes that as the lease being gone (#49).
+                    Err(status)
+                        if status.code() == tonic::Code::NotFound
+                            && status.message() == Refusal::LeaseNotFound.message() =>
+                    {
+                        let revision = state.sm.mvcc().current_revision().await;
+                        let resp = pb::LeaseKeepAliveResponse {
+                            header: Some(response_header(&state, revision).await),
+                            id: req.id,
+                            ttl: 0,
+                        };
+                        if tx.send(Ok(resp)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                     Err(status) => {
                         let _ = tx.send(Err(status)).await;
                         continue;
