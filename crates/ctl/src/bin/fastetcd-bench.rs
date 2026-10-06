@@ -329,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     other => panic!("unknown mode {other}"),
                 }
-                local.push((at, t.elapsed().as_micros() as u64));
+                local.push(t.elapsed().as_micros() as u64);
             }
             lat.lock().await.extend(local);
         }));
