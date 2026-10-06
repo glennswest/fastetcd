@@ -1536,3 +1536,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       applied, replay), gRPC single node (put/txn/compact/keepalive),
       3-member (cluster keeps serving after each).
     - [ ] Docs, changelog; release; close #49.
+
+44. **3 members: multi-second write maxima under read_latency (#83, P2).**
+    Worked while #49 is paused (its WIP is on branch
+    `wip/2026-10-06-49-refusals`, not merged). Dev's shared disk stalls
+    every member's fsync at once (#85), so first tell disk stalls from
+    fastetcd stalls:
+    - Bench prints when its slowest writes started (UTC, as the logs);
+      the WAL warns `slow raft WAL fdatasync` at >= 1 s (etcd's
+      threshold); `METRICS=1` adds leader-change / proposal metrics and
+      the members' election + slow-fsync log lines.
+    - `DATA_ROOT=/dev/shm`: the same bench on tmpfs, where no fsync
+      stalls. Maxima there are fastetcd's own.
+    Work items:
+    - [ ] Instrumentation; sc-build: 3 members, v1.13 (main) on disk and
+      tmpfs, interleaved, twice.
+    - [ ] Attribute each multi-second max (disk / election / proposer /
+      other); fix what is fastetcd's, or file it.
+    - [ ] Changelog, docs (02-testing); close #83.
