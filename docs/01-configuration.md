@@ -6,9 +6,8 @@ A variable named `ETCD_*` in the last column is also read, as a drop-in
 for an existing etcd configuration, when the `FASTETCD_*` one is unset.
 
 Boolean flags take values as etcd's do (#53): the flag alone is true,
-`--flag=true` / `--flag=false` set it (also `=1` / `=0`), and the value
-must follow `=`: `--auto-defrag false` is not a value, as in etcd. Their
-env vars take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. So
+and `--flag=true` / `--flag=false` set it (also `=1` / `=0`;
+`--flag false` works as well). Their env vars take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. So
 `--auto-defrag=false` or `FASTETCD_AUTO_DEFRAG=0` turns reclaim's
 defragment off. The subcommands' `--force`, `--repair` and the like are
 plain switches.

@@ -38,9 +38,10 @@ use fastetcd_storage::redb_engine::RedbEngine;
 /// stopped); `sizing` needs no data directory.
 ///
 /// Boolean flags take values as etcd's (Go's flag package) do (#53):
-/// `--flag` alone is true, `--flag=true` / `--flag=false` set it, and
-/// a value must follow `=` (`--flag false` is not a value). Their env
-/// vars take true/false, 1/0, yes/no, on/off.
+/// `--flag` alone is true and `--flag=true` / `--flag=false` set it.
+/// `--flag false` is accepted too, as fastetcd 1.8-1.14 accepted it
+/// for `--enable-grpc-gateway`. Their env vars take true/false, 1/0,
+/// yes/no, on/off.
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd", version, about)]
 struct Args {
@@ -125,7 +126,6 @@ struct Args {
         env = "FASTETCD_FORCE_NEW_CLUSTER",
         default_value_t = false,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -141,7 +141,6 @@ struct Args {
         env = "FASTETCD_UPGRADE_BACKUP",
         default_value_t = true,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -187,7 +186,6 @@ struct Args {
         env = "FASTETCD_CLIENT_CERT_AUTH",
         default_value_t = false,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -220,7 +218,6 @@ struct Args {
         env = "FASTETCD_PEER_CLIENT_CERT_AUTH",
         default_value_t = false,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -235,7 +232,6 @@ struct Args {
         env = "FASTETCD_ENABLE_GRPC_GATEWAY",
         default_value_t = true,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -346,7 +342,6 @@ struct Args {
         env = "FASTETCD_AUTO_DEFRAG",
         default_value_t = true,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -515,7 +510,6 @@ struct Args {
         long,
         default_value_t = false,
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
@@ -1535,9 +1529,10 @@ mod tests {
             }
             assert!(parse(&[&format!("--{name}=maybe")]).is_err(), "--{name}=maybe");
         }
-        // A bare flag before a subcommand does not swallow it.
-        let a = parse(&["--auto-defrag", "sizing", "--nodes", "3"]).unwrap();
-        assert!(a.auto_defrag && matches!(a.command, Some(Command::Sizing { .. })));
+        // The value as the next argument, as `--enable-grpc-gateway false`
+        // has been accepted since 1.8; a bare flag before another flag.
+        let a = parse(&["--auto-defrag", "false", "--upgrade-backup", "--client-cert-auth", "0"]).unwrap();
+        assert!(!a.auto_defrag && a.upgrade_backup && !a.client_cert_auth);
     }
 
     #[test]

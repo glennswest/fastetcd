@@ -1595,11 +1595,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     (etcd) takes `--flag`, `--flag=true|false` (and 1/0, t/f), not
     `--flag false`. Plan, for every server bool flag (`--force`,
     `--repair` and other subcommand switches stay switches):
-    - `num_args = 0..=1, require_equals, default_missing_value = "true",
+    - `num_args = 0..=1, default_missing_value = "true",
       BoolishValueParser`: bare = true, `=false` turns it off, env vars
-      take true/false/1/0/yes/no/on/off.
-    - `--enable-grpc-gateway false` (space) no longer works (etcd's
-      doesn't either); `--enable-grpc-gateway=false` does.
+      take true/false/1/0/yes/no/on/off. No `require_equals`: `--flag
+      false` (accepted for `--enable-grpc-gateway` since 1.8) keeps
+      working, so nothing that parsed before breaks (a PATCH, 1.14.1).
     Work items:
     - [ ] main.rs flags; unit tests parsing each form.
     - [ ] `tests/chart_args.sh`: render the chart with helm and start the

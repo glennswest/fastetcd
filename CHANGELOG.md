@@ -13,9 +13,8 @@
   env vars take true/false, 1/0, yes/no, on/off. For
   `--auto-defrag`, `--upgrade-backup`, `--enable-grpc-gateway`,
   `--client-cert-auth`, `--peer-client-cert-auth`,
-  `--force-new-cluster` and `--enable-pprof`. **Changed:** the value
-  must follow `=`; `--enable-grpc-gateway false` (space), accepted
-  since 1.8, is now refused, as etcd refuses it.
+  `--force-new-cluster` and `--enable-pprof`. Every form accepted
+  before still works (`--enable-grpc-gateway false` too).
 - **test:** `tests/chart_args.sh` renders the Helm chart and starts the
   rendered pod command (defaults, `space.autoDefrag=false`, bool flags
   in `extraArgs`), checking it serves.
