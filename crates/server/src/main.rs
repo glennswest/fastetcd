@@ -1549,8 +1549,10 @@ mod tests {
         ] {
             let var = format!("FASTETCD_TEST_{}_{}", id.to_uppercase(), v.to_uppercase());
             std::env::set_var(&var, v);
+            // clap takes an env name it can keep: leak this test's one.
+            let name: &'static str = Box::leak(var.clone().into_boxed_str());
             let m = Args::command()
-                .mut_arg(id, |a| a.env(var.clone()))
+                .mut_arg(id, |a| a.env(name))
                 .try_get_matches_from(["fastetcd"])
                 .unwrap_or_else(|e| panic!("{var}={v}: {e}"));
             let a = Args::from_arg_matches(&m).unwrap();
