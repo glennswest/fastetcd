@@ -71,7 +71,8 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
 
     let value = vec![b'x'; args.val_bytes];
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writes: Arc<Mutex<Vec<u64>>> = Arc::default();
+    // (when the write started, its latency in µs), for the stall list.
+    let writes: Arc<Mutex<Vec<(std::time::SystemTime, u64)>>> = Arc::default();
     let mut handles = Vec::new();
     for w in 0..args.conns {
         let (endpoint, value, stop, writes) =
@@ -89,7 +90,7 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
                     .unwrap()
                     .into_inner();
                 let rev = got.kvs.first().map_or(0, |kv| kv.mod_revision);
-                let t = Instant::now();
+                let (t, at) = (Instant::now(), std::time::SystemTime::now());
                 c.txn(pb::TxnRequest {
                     compare: vec![pb::Compare {
                         result: CompareResult::Equal as i32,
@@ -109,7 +110,7 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
                 })
                 .await
                 .unwrap();
-                local.push(t.elapsed().as_micros() as u64);
+                local.push((at, t.elapsed().as_micros() as u64));
                 if i % 5 == 0 {
                     c.range(pb::RangeRequest {
                         key: b"/load/".to_vec(),
@@ -150,12 +151,42 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
         h.await?;
     }
     let window = started.elapsed().as_secs_f64() + 2.0;
-    let writes = Arc::try_unwrap(writes).unwrap().into_inner();
+    let mut writes = Arc::try_unwrap(writes).unwrap().into_inner();
     println!("mode=read-under-load conns={} val={}B", args.conns, args.val_bytes);
-    println!("  writes: {:.0}/s, {}", writes.len() as f64 / window, summary(writes));
+    println!(
+        "  writes: {:.0}/s, {}",
+        writes.len() as f64 / window,
+        summary(writes.iter().map(|w| w.1).collect())
+    );
+    // When the slowest writes started (UTC, as the members' logs print
+    // it), so a stall can be matched to an election or a slow fsync in
+    // the logs (fastetcd#83).
+    writes.sort_unstable_by_key(|w| std::cmp::Reverse(w.1));
+    let slow: Vec<String> = writes
+        .iter()
+        .take(5)
+        .filter(|w| w.1 >= 200_000)
+        .map(|w| format!("{} {:.2} s", utc_time(w.0), w.1 as f64 / 1e6))
+        .collect();
+    if !slow.is_empty() {
+        let over = |ms: u64| writes.iter().filter(|w| w.1 >= ms * 1000).count();
+        println!(
+            "  slow writes: {} >= 200 ms, {} >= 1 s; slowest started at {}",
+            over(200),
+            over(1000),
+            slow.join(", ")
+        );
+    }
     println!("  linearizable range: {}", summary(lin));
     println!("  serializable range: {}", summary(ser));
     Ok(())
+}
+
+/// `HH:MM:SS.mmm` UTC of `t`.
+fn utc_time(t: std::time::SystemTime) -> String {
+    let ms = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let s = ms / 1000 % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, s / 60 % 60, s % 60, ms % 1000)
 }
 
 fn dur_key(client: usize, i: u64) -> Vec<u8> {
@@ -298,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     other => panic!("unknown mode {other}"),
                 }
-                local.push(t.elapsed().as_micros() as u64);
+                local.push((at, t.elapsed().as_micros() as u64));
             }
             lat.lock().await.extend(local);
         }));

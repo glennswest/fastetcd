@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **feat:** A raft WAL fdatasync of 1 s or more is logged at WARN
+  (`slow raft WAL fdatasync`, `took_ms`), as etcd logs a slow fdatasync,
+  so a write stall can be matched to the disk (#83).
+- **test:** `fastetcd-bench --mode read-under-load` prints when its
+  slowest writes started (UTC); `tests/read_latency.sh` with `METRICS=1`
+  prints leader-change and proposal metrics and the members' election
+  and slow-fsync lines, and `DATA_ROOT=/dev/shm` runs it on tmpfs (#83).
+
 ### 2026-10-05
 - **docs:** `docs/presentation.md`, a 12-slide Marp deck of fastetcd's
   purpose and functionality (#27): the problem, its place in StormCOS

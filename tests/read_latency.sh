@@ -12,15 +12,23 @@
 # Txn, a prefix Range every fifth loop, and a sequential probe of 200
 # linearizable then 200 serializable Ranges of one key. Run it through
 # sc-build: `sc-build 'tests/read_latency.sh v1.8.0'`. METRICS=1 also
-# serves /metrics and prints each member's WAL and checkpoint lines
-# after the run (#85).
+# serves /metrics and prints each member's WAL, checkpoint, leader and
+# proposal lines after the run (#85), and the members' election and
+# slow-fsync log lines, to match the bench's slowest writes against (#83).
+# DATA_ROOT=/dev/shm puts the data dirs on tmpfs instead: no fsync can
+# stall there, so a stall that remains is fastetcd's, not the disk's.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 WORK=$ROOT/tmp/read-latency
 rm -rf "$WORK"
 mkdir -p "$WORK"
-echo "data volume: $(df -hT "$WORK" | tail -1)"
+DATA=$WORK
+if [ -n "${DATA_ROOT:-}" ]; then
+    DATA=$(mktemp -d -p "$DATA_ROOT" fastetcd-read-latency.XXXXXX)
+    trap 'rm -rf "$DATA"' EXIT
+fi
+echo "data volume: $(df -hT "$DATA" | tail -1)"
 
 cargo build --release --locked -p fastetcd-server -p fastetcd-ctl
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
@@ -29,9 +37,10 @@ BENCH=$TARGET/release/fastetcd-bench
 MEMBERS=${MEMBERS:-1}
 BENCH_FAILED=0
 
-# Start MEMBERS members of `bin` under $1's directory; print their pids.
+# Start MEMBERS members of `bin`, data dirs under $1 and logs in $3;
+# print their pids.
 start_members() {
-    local dir=$1 bin=$2 cluster="" i
+    local dir=$1 bin=$2 logs=$3 cluster="" i
     for i in $(seq "$MEMBERS"); do
         cluster+="${cluster:+,}n$i=http://127.0.0.1:$((23800 + i))"
     done
@@ -45,16 +54,16 @@ start_members() {
                 --initial-advertise-peer-urls "http://127.0.0.1:$((23800 + i))"
                 --initial-cluster-token read-latency)
         fi
-        "$bin" "${args[@]}" >"$dir/log$i" 2>&1 &
+        "$bin" "${args[@]}" >"$logs/log$i" 2>&1 &
         echo $!
     done
 }
 
 run() {
     local name=$1 bin=$2 dir=$WORK/$1 i
-    mkdir -p "$dir"
+    mkdir -p "$dir" "$DATA/$1"
     local pids
-    pids=$(start_members "$dir" "$bin")
+    pids=$(start_members "$DATA/$1" "$bin" "$dir")
     for i in $(seq "$MEMBERS"); do
         for _ in $(seq 100); do
             curl -sf "http://127.0.0.1:$((23790 + i))/health" >/dev/null && break
@@ -79,8 +88,10 @@ run() {
         for i in $(seq "$MEMBERS"); do
             echo "-- metrics of member $i"
             curl -sf "http://127.0.0.1:$((23810 + i))/metrics" |
-                grep -E '^(fastetcd_wal|fastetcd_checkpoint)' || true
+                grep -E '^(fastetcd_wal|fastetcd_checkpoint|fastetcd_proposal|etcd_server_(is_leader|leader_changes|proposals_pending))' || true
         done
+        echo "-- members' elections and slow fsyncs:"
+        grep -hE "slow raft WAL|vote|elect|leader" "$dir"/log* | grep -E "WARN|INFO" | tail -n 40 || true
     fi
     local pid
     for pid in $pids; do

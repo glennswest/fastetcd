@@ -68,6 +68,9 @@ use fastetcd_storage::{KvStore, WriteBatch, WriteOptions};
 use crate::kv_log_store::{
     LogProgress, META_COMMITTED, META_LAST_PURGED, META_VOTE, TABLE_LOG, TABLE_META,
 };
+
+/// An fdatasync at least this long is logged (etcd's `warnSyncDuration`).
+const SLOW_FSYNC: Duration = Duration::from_secs(1);
 use crate::types::{NodeId, TypeConfig};
 
 /// The WAL directory inside a data directory.
@@ -285,6 +288,16 @@ fn writer(
             stats.fsyncs.fetch_add(1, Ordering::Relaxed);
             stats.fsync_nanos.fetch_add(took, Ordering::Relaxed);
             stats.fsync_max_nanos.fetch_max(took, Ordering::Relaxed);
+            if took >= SLOW_FSYNC.as_nanos() as u64 {
+                // etcd's "slow fdatasync" warning, at its threshold: a
+                // timestamped record that tells a disk stall from a
+                // stall inside fastetcd (#83).
+                tracing::warn!(
+                    took_ms = took / 1_000_000,
+                    entries,
+                    "slow raft WAL fdatasync"
+                );
+            }
             if failed.is_none() {
                 stats.entries_synced.fetch_add(entries, Ordering::Relaxed);
                 stats.proposals_synced.fetch_add(proposals, Ordering::Relaxed);

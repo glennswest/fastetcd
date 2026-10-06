@@ -73,7 +73,12 @@ read-under-load` (40 clients looping GET + CAS Txn, a prefix Range every
 fifth loop, a probe of 200 linearizable and 200 serializable Ranges)
 against this tree and, if given, a baseline ref; `MEMBERS=3` runs a
 local three-member cluster and measures through two members' client
-ports (#75).
+ports (#75). Each run prints when its five slowest writes (>= 200 ms)
+started, in UTC as the members' logs print it; `METRICS=1` adds each
+member's WAL, checkpoint, leader-change and proposal metrics and their
+election and `slow raft WAL fdatasync` log lines, so a stall can be
+put down to the disk, an election or fastetcd (#83). `DATA_ROOT=/dev/shm`
+puts the data dirs on tmpfs, where no fsync stalls.
 
 Against upstream etcd (#90): `tests/bench/compare.sh <etcd-version>`
 downloads the etcd release (sha256-checked), builds etcd's own

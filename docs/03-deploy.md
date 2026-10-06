@@ -415,6 +415,10 @@ The raft log is purged after each snapshot (`--snapshot-count`), but a
 WAL segment is deleted only once a checkpoint has made the data file
 durable past every entry in it.
 
+An fdatasync of the WAL that takes 1 s or more (etcd's threshold) is
+logged at WARN as `slow raft WAL fdatasync` with `took_ms`: a write
+stall at that time was the disk's.
+
 Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_wal_bytes_appended_total`, `fastetcd_wal_segments`,
 `fastetcd_wal_cached_bytes`, `fastetcd_checkpoints_total`,
