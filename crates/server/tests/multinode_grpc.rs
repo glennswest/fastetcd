@@ -919,3 +919,114 @@ async fn list_revision_matches_contents_and_watch_continues_it() {
     }
     let _ = (&n1, &n2, &n3);
 }
+
+/// fastetcd#49: a request that cannot apply, sent to the leader or to a
+/// follower, gets etcd's error, and every member keeps applying. One
+/// such entry used to stop the state machine on all three members.
+#[tokio::test]
+async fn a_refused_request_stops_no_member() {
+    use pb::request_op::Request as Op;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+    let nodes = [&n1, &n2, &n3];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let leader_id = loop {
+        if let Some(l) = n1.raft.metrics().borrow().current_leader {
+            break l;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no leader elected in 10s");
+        sleep(Duration::from_millis(100)).await;
+    };
+    let leader = nodes[leader_id as usize - 1];
+    let follower = nodes.into_iter().find(|n| n.raft.metrics().borrow().id != leader_id).unwrap();
+
+    let put = |key: &str, ignore_value: bool| pb::PutRequest {
+        key: key.as_bytes().to_vec(),
+        value: b"v".to_vec(),
+        ignore_value,
+        ..Default::default()
+    };
+    let mut via_leader = KvClient::connect(leader.client_endpoint.clone()).await.unwrap();
+    via_leader.put(put("there", false)).await.unwrap();
+
+    for n in [leader, follower] {
+        let mut kv = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
+        // Refused by the leader before proposing.
+        let s = kv.put(put("missing", true)).await.unwrap_err();
+        assert_eq!((s.code(), s.message()), (tonic::Code::InvalidArgument, "etcdserver: key not found"));
+        // Proposed and refused by every member's state machine: the key
+        // exists when the leader checks, and the txn deletes it first.
+        let s = kv
+            .txn(pb::TxnRequest {
+                compare: vec![],
+                success: vec![
+                    pb::RequestOp {
+                        request: Some(Op::RequestDeleteRange(pb::DeleteRangeRequest {
+                            key: b"there".to_vec(),
+                            ..Default::default()
+                        })),
+                    },
+                    pb::RequestOp { request: Some(Op::RequestPut(put("there", true))) },
+                ],
+                failure: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!((s.code(), s.message()), (tonic::Code::InvalidArgument, "etcdserver: key not found"));
+        let s = kv
+            .compact(pb::CompactionRequest { revision: 999, physical: false })
+            .await
+            .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::OutOfRange, "{s:?}");
+    }
+
+    // Every member still applies: a write through the follower reaches
+    // all three, and each applied every log entry the leader has.
+    let mut via_follower = KvClient::connect(follower.client_endpoint.clone()).await.unwrap();
+    via_follower.put(put("after", false)).await.expect("the cluster still takes writes");
+    let last = leader.raft.metrics().borrow().last_log_index.unwrap();
+    for n in nodes {
+        let mut kv = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let applied = n.raft.metrics().borrow().last_applied.map(|l| l.index);
+            let r = kv
+                .range(pb::RangeRequest { key: b"after".to_vec(), serializable: true, ..Default::default() })
+                .await
+                .unwrap()
+                .into_inner();
+            if applied >= Some(last) && r.kvs.len() == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "member {} stopped applying at {applied:?} (leader at {last})",
+                n.client_endpoint
+            );
+            sleep(Duration::from_millis(100)).await;
+        }
+        let r = kv
+            .range(pb::RangeRequest { key: b"there".to_vec(), serializable: true, ..Default::default() })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.kvs.len(), 1, "the refused txn's delete was applied on {}", n.client_endpoint);
+    }
+}

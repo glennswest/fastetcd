@@ -527,6 +527,18 @@ the last member is upgraded. After that:
 
 The same holds for replicated auth entries since 1.5.0.
 
+**A request that cannot apply (1.14, #49).** A put with `ignore_value`
+or `ignore_lease` on a missing key, a `Compact` outside the store's
+revisions, a keep-alive of a lease that is gone: from 1.14 the state
+machine refuses such an entry (nothing applied) and keeps going; before
+1.14 it stopped, on every member. A 1.14 leader also refuses them before
+proposing, so they rarely reach the log, but one can (a Txn that deletes
+a key and then puts it with `ignore_value`), and a member older than
+1.14 stops on it, so finish a rolling upgrade to 1.14 before relying on
+it. During the upgrade a write sent to an older follower that the 1.14
+leader refuses comes back `Unavailable` instead of etcd's error (the
+follower cannot decode the refusal); the write is refused either way.
+
 ### Cluster id
 
 Every response header carries a `cluster_id`. Clients that talk to

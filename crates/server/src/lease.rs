@@ -19,6 +19,11 @@ use fastetcd_proto::etcdserverpb::lease_server::Lease;
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use fastetcd_storage::mvcc::Refusal;
 use tokio::sync::mpsc;
+
+/// etcd's minimum lease TTL with its default timing (heartbeat 100 ms,
+/// election 1 s: ceil(1.5 x election timeout) = 2 s). A grant asking
+/// for TTL <= 0 gets this.
+pub const MIN_LEASE_TTL_SECS: i64 = 2;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
@@ -58,10 +63,14 @@ impl Lease for LeaseService {
         // a new lease is a new keyspace to fill (fastetcd#14). Revoke
         // and keep-alive stay available.
         self.state.space.check_write()?;
+        // etcd grants a TTL <= 0 at its minimum lease TTL rather than
+        // refusing it; the state machine refuses one that reaches it
+        // (#49), so it is raised here, before proposing.
+        let ttl_secs = if req.ttl <= 0 { MIN_LEASE_TTL_SECS } else { req.ttl };
         let resp = self
             .propose(FastetcdLogEntry::LeaseGrant {
                 id: req.id,
-                ttl_secs: req.ttl,
+                ttl_secs,
                 now_unix: now_unix(),
             })
             .await?;

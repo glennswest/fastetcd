@@ -399,14 +399,12 @@ async fn txn_result_to_response(
 }
 
 fn mvcc_error_to_status(e: fastetcd_storage::mvcc::MvccError) -> Status {
-    use fastetcd_storage::mvcc::MvccError;
-    match e {
-        MvccError::Compacted { .. } => {
-            // etcd uses gRPC code OutOfRange for ErrCompacted.
-            Status::out_of_range(e.to_string())
-        }
-        MvccError::FutureRevision { .. } => Status::out_of_range(e.to_string()),
-        MvccError::Storage(_) | MvccError::Internal(_) => Status::internal(e.to_string()),
+    // A refused request (a compacted or future revision, ...) gets
+    // etcd's code and text: clientv3 recognises ErrCompacted by its
+    // message (#49).
+    match e.refusal() {
+        Some(r) => crate::state::refusal_status(&r),
+        None => Status::internal(e.to_string()),
     }
 }
 

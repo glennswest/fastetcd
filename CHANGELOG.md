@@ -4,6 +4,24 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-06
+- **fix:** A request that cannot apply no longer stops every member
+  (#49, P0). A put with `ignore_value`/`ignore_lease` on a missing key
+  (alone, in a Txn, or in a batch with other clients' writes), `Compact`
+  at a future revision, at 0 or below the compacted one, a keep-alive of
+  a lease that does not exist, a `LeaseGrant` with TTL <= 0 and a Txn
+  `Range` at a compacted or future revision failed inside raft apply,
+  which openraft turns into a storage error that stops the state machine
+  on every member, and again on every restart as the entry replays. Each
+  is now a refusal (`Refusal`, raised before anything is written; a new
+  `FastetcdLogResponse::Refused`): the state machine answers it and keeps
+  applying, the rest of a batch included. The leader also refuses them
+  before proposing (`precheck.rs`). Clients get etcd's errors:
+  `etcdserver: key not found` (InvalidArgument), `etcdserver: mvcc:
+  required revision has been compacted` / `is a future revision`
+  (OutOfRange, also on a plain Range, which used to carry fastetcd's
+  own text), lease not found (NotFound); a keep-alive of a missing lease
+  answers TTL 0, and a grant of TTL <= 0 gets 2 s, as in etcd. A member
+  older than 1.14 still stops on such an entry (03-deploy).
 - **feat:** A raft WAL fdatasync of 1 s or more is logged at WARN
   (`slow raft WAL fdatasync`, `took_ms`), as etcd logs a slow fdatasync,
   so a write stall can be matched to the disk (#83).
