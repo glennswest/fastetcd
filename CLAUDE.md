@@ -1501,3 +1501,38 @@ Tracked live in the Claude task system. Snapshot of the order:
       looked at; dense slides use smaller type. Defaults, flags, metric
       and RPC names re-checked against main.rs / the protos; the golden
       against stormcos `deploy/build-goldens.sh` (stage mode, #81).
+
+43. **A request-level error at apply never stops a member (#49, P0).**
+    `MvccStore` returns an error for a request that cannot apply, and
+    the state machine turns every apply error into an openraft
+    `StorageError`, which stops RaftCore on every member (and again on
+    replay). Triggers found reading the code, not only the issue's: a
+    Put with `ignore_value`/`ignore_lease` on a missing key (alone or in
+    a Txn), `Compact` at a future revision, below the compacted one or
+    <= 0, `LeaseKeepAlive` of an unknown lease, `LeaseGrant` with TTL
+    <= 0, a Txn `Range` at a compacted or future revision. Since #75 a
+    batch carrying one of them fails the whole batch. Plan:
+    - storage: `Refusal` (KeyNotFound, LeaseNotFound, Compacted,
+      FutureRevision, InvalidArgument) and `MvccError::Refused`; every
+      request-level error is raised before anything is written, so a
+      refused entry applies nothing.
+    - raft: `apply_data` turns a refusal into `FastetcdLogResponse::
+      Refused { revision, refusal }` (new variant, appended); only
+      storage/internal errors stay fatal. Same on every member (the
+      state they check is replicated).
+    - Leader precheck (`precheck.rs`, beside #19's lease check, with
+      the read barrier on a hit): ignore_* put on a missing key with no
+      earlier put of it in the same op list, Compact out of range,
+      KeepAlive of a missing lease, TTL <= 0. Refused before proposing,
+      so mixed-version members never see such an entry from a new leader.
+    - server: refusal → etcd's gRPC status (`etcdserver: key not found`
+      InvalidArgument, lease not found NotFound, `mvcc: required
+      revision has been compacted` / `is a future revision` OutOfRange);
+      KeepAlive of an unknown lease answers TTL 0, as etcd's does.
+    Work items:
+    - [ ] storage Refusal + raise sites; raft Refused response, apply,
+      precheck, ForwardWrite; server mapping, lease keepalive, compaction.
+    - [ ] Tests: apply-level (raft, refused entry + batch neighbours
+      applied, replay), gRPC single node (put/txn/compact/keepalive),
+      3-member (cluster keeps serving after each).
+    - [ ] Docs, changelog; release; close #49.
