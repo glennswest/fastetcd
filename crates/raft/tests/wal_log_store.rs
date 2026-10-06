@@ -459,7 +459,9 @@ async fn slow_checkpoints_leave_the_disk_to_the_wal() {
     assert!(pace >= CHECKPOINT * fastetcd_raft::wal_log_store::CHECKPOINT_PACE);
     // Paced, not skipped: the last write still becomes durable.
     let applied = *sm.applied_index().borrow();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // The next checkpoint waits 4x the last one's duration, and on a
+    // loaded build disk one can take seconds (#109).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while stats.durable_applied.load(Relaxed) < applied {
         assert!(tokio::time::Instant::now() < deadline, "no checkpoint covered the last write");
         tokio::time::sleep(Duration::from_millis(20)).await;
