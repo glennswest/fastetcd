@@ -1549,8 +1549,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `DATA_ROOT=/dev/shm`: the same bench on tmpfs, where no fsync
       stalls. Maxima there are fastetcd's own.
     Work items:
-    - [ ] Instrumentation; sc-build: 3 members, v1.13 (main) on disk and
-      tmpfs, interleaved, twice.
+    - [x] Instrumentation (0698e2f).
+    - [ ] sc-build: 3 members, main on disk and tmpfs, interleaved,
+      twice (`for r in 1 2; do MEMBERS=3 METRICS=1 tests/read_latency.sh;
+      DATA_ROOT=/dev/shm MEMBERS=3 METRICS=1 tests/read_latency.sh;
+      done`). Started 2026-10-06 at 0698e2f, output in this checkout's
+      tmp/bench83.log (not committed); workspace test in tmp/build83.log.
+      Paused there for #49 (P0): resume by reading those logs, or rerun.
     - [ ] Attribute each multi-second max (disk / election / proposer /
       other); fix what is fastetcd's, or file it.
     - [ ] Changelog, docs (02-testing); close #83.
