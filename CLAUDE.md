@@ -1585,3 +1585,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] Attribute each multi-second max (disk / election / proposer /
       other); fix what is fastetcd's, or file it.
     - [ ] Changelog, docs (02-testing); close #83.
+
+45. **Bool flags take etcd's values; the chart's pods start (#53, P1).**
+    `--auto-defrag`/`--upgrade-backup` (default on) were clap `SetTrue`
+    switches: `=false` and the chart's `--auto-defrag=true` were parse
+    errors, so every chart pod exited at startup, and only the env var
+    with exactly `false` could turn them off. `--client-cert-auth=true`
+    and the other default-off flags fail the same way. Go's flag package
+    (etcd) takes `--flag`, `--flag=true|false` (and 1/0, t/f), not
+    `--flag false`. Plan, for every server bool flag (`--force`,
+    `--repair` and other subcommand switches stay switches):
+    - `num_args = 0..=1, require_equals, default_missing_value = "true",
+      BoolishValueParser`: bare = true, `=false` turns it off, env vars
+      take true/false/1/0/yes/no/on/off.
+    - `--enable-grpc-gateway false` (space) no longer works (etcd's
+      doesn't either); `--enable-grpc-gateway=false` does.
+    Work items:
+    - [ ] main.rs flags; unit tests parsing each form.
+    - [ ] `tests/chart_args.sh`: render the chart with helm and start the
+      rendered command for real (autoDefrag true and false), on sc-build.
+    - [ ] Docs (01-configuration), changelog; release; golden; close #53.
