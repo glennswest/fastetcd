@@ -271,8 +271,10 @@ async fn a_node_purges_wal_segments_and_restarts_with_everything() {
             raft.client_write(put(i)).await.unwrap();
         }
         // Snapshots every 50 entries purge the log; checkpoints let the
-        // WAL drop the segments behind them.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        // WAL drop the segments behind them. Checkpoints are paced to 4x
+        // their last duration (#95), so on a loaded build box this takes
+        // far longer than 20 s now and then (#109).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         loop {
             let segs = stats.segments.load(std::sync::atomic::Ordering::Relaxed);
             if segs <= 8 && log.pending_purge().is_none() {
