@@ -1580,9 +1580,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] sc-build: 3 members, main on disk and tmpfs, interleaved,
       twice (`for r in 1 2; do MEMBERS=3 METRICS=1 tests/read_latency.sh;
       DATA_ROOT=/dev/shm MEMBERS=3 METRICS=1 tests/read_latency.sh;
-      done`). Started 2026-10-06 at 0698e2f, output in this checkout's
-      tmp/bench83.log (not committed); workspace test in tmp/build83.log.
-      Paused there for #49 (P0): resume by reading those logs, or rerun.
+      done`). The 0698e2f run measured nothing: the bench edit broke
+      put mode's build (#106, fixed f3a3d6b). Rerun it on main.
     - [ ] Attribute each multi-second max (disk / election / proposer /
       other); fix what is fastetcd's, or file it.
     - [ ] Changelog, docs (02-testing); close #83.
