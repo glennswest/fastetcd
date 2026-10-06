@@ -3,6 +3,8 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v1.16.0] — 2026-10-06
+
 ### 2026-10-06 — leases in raft snapshots (#41)
 - **fix:** Raft snapshots carry the lease tables (#41, P1). A snapshot
   held the MVCC and auth tables only, so a member caught up by one had

@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.15.0`** — A live snapshot can be restored (#61, P1).
+**`1.16.0`** — Raft snapshots carry the lease tables (#41, P1).
+A member caught up by a snapshot had no record of leases granted before
+it (and kept stale ones): their keys never expired there, and a revoke
+left them behind on it alone. `LeaseTables` travel in a second trailer
+(`FETCDTR2`) after the auth trailer and replace every lease row on
+install; compatible both ways with 1.5–1.15. Members caught up before
+1.16 keep wrong tables until re-added (03-deploy). Moving #19's check to
+apply: #115.
+
+Previous: **`1.15.0`** — A live snapshot can be restored (#61, P1).
 `Maintenance.Snapshot` (`etcdctl snapshot save`, `fastetcd-ctl
 snapshot-save`) streamed the raft snapshot body, which nothing restores.
 It now streams the `--backup-dir` backup format (`backup::Dump`: every
@@ -1676,10 +1685,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       snapshot install, which no version gate can see, so an apply-time
       check would make members disagree. Follow-up issue.
     Work items:
-    - [ ] storage LeaseTables; raft trailer + build + install; unit tests
+    - [x] storage LeaseTables; raft trailer + build + install; unit tests
       (both directions of compat).
-    - [ ] Tests: install on an empty learner and on one with stale leases
-      (lease + keys there, stale gone); expiry/revoke after install
-      deletes the keys; a snapshot from an older leader leaves them.
-    - [ ] Docs (03 upgrade note: members caught up before 1.16 may hold
+    - [x] Tests: install on a learner with a stale lease (leader's lease
+      + keys + deadline there, stale gone, revoke deletes the keys, ids
+      allocate after the leader's); a real chunked InstallSnapshot
+      carries a lease (`snapshot_transfer_grpc`); old bodies decode.
+    - [x] Docs (03 upgrade note: members caught up before 1.16 may hold
       wrong lease tables; remedy), changelog; release; close #41.
+    - Verified: sc-build of 686f580, whole workspace green (356 tests).
