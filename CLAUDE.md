@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.14.0`** — A request that cannot apply no longer stops every
+**`1.14.1`** — Boolean flags take etcd-style values (#53, P1).
+`--auto-defrag`/`--upgrade-backup` were clap switches: `=false` was a
+parse error and the Helm chart's `--auto-defrag=true` stopped every pod.
+Now every server bool flag takes `--flag`, `--flag=true|false|1|0` and
+`--flag false`; env vars take true/false/1/0/yes/no/on/off.
+`tests/chart_args.sh` renders the chart and starts the rendered command.
+
+Previous: **`1.14.0`** — A request that cannot apply no longer stops every
 member (#49, P0). A put with `ignore_value`/`ignore_lease` on a missing
 key, `Compact` out of range, a keep-alive of a missing lease, a grant of
 TTL <= 0 and a Txn `Range` at a compacted/future revision failed inside
@@ -1601,7 +1608,11 @@ Tracked live in the Claude task system. Snapshot of the order:
       false` (accepted for `--enable-grpc-gateway` since 1.8) keeps
       working, so nothing that parsed before breaks (a PATCH, 1.14.1).
     Work items:
-    - [ ] main.rs flags; unit tests parsing each form.
-    - [ ] `tests/chart_args.sh`: render the chart with helm and start the
+    - [x] main.rs flags; unit tests parsing each form.
+    - [x] `tests/chart_args.sh`: render the chart with helm and start the
       rendered command for real (autoDefrag true and false), on sc-build.
-    - [ ] Docs (01-configuration), changelog; release; golden; close #53.
+    - [x] Docs (01-configuration), changelog; release; golden; close #53.
+    - Verified: sc-build of 62d87ed ran `tests/chart_args.sh`: three
+      rendered pods (defaults, autoDefrag=false, bool flags in extraArgs)
+      started and served a put/get; the v1.14.0 binary refused
+      `--auto-defrag=true`/`=false` with the issue's error.

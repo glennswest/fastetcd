@@ -3,7 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-10-06
+## [v1.14.1] — 2026-10-06
+
+### 2026-10-06 — boolean flags take values; the chart's pods start (#53)
 - **fix:** Boolean flags take values as etcd's do (#53, P1). They were
   clap switches, so `--auto-defrag=false` and `--upgrade-backup=false`
   were parse errors (only the env var set to exactly `false` turned
