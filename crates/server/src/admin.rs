@@ -330,8 +330,9 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
     if !backup.exists() {
         anyhow::bail!("backup file {} does not exist", backup.display());
     }
-    // A periodic backup from `--backup-dir` (fastetcd#37), or a raw copy
-    // of the data file from `fastetcd backup`.
+    // A backup file — periodic from `--backup-dir` (fastetcd#37), or a
+    // live one from `Maintenance.Snapshot` (#61) — or a raw copy of the
+    // data file from `fastetcd backup`.
     let periodic = crate::backup::is_backup_file(backup);
     let backup_rev = if periodic {
         crate::backup::verify(backup)
@@ -339,7 +340,14 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
             .revision
     } else {
         revision_of(backup).await.map_err(|e| {
-            anyhow::anyhow!("{} is not a readable fastetcd backup: {e}", backup.display())
+            anyhow::anyhow!(
+                "{} is neither a fastetcd backup nor a fastetcd data file ({e}). A \
+                 `fastetcd-ctl snapshot-save` / `etcdctl snapshot save` file from fastetcd \
+                 1.14.1 or earlier holds a raft snapshot, which cannot be restored: take a \
+                 new one with a later fastetcd (fastetcd#61). An upstream etcd snapshot \
+                 (BoltDB) is imported with `fastetcd-migrate` instead.",
+                backup.display()
+            )
         })?
     };
 

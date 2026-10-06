@@ -5,9 +5,11 @@
 //! the whole node: the MVCC data, the raft log and vote, leases, auth,
 //! and the node-local metadata such as the cluster id. It is the state
 //! a crash at that instant would have left, which is a state fastetcd
-//! must already start from. The raft snapshot that `Maintenance.Snapshot`
-//! serves would not do: it carries only the MVCC tables, so restoring
-//! from it would lose leases, users and the cluster id.
+//! must already start from. `Maintenance.Snapshot` (`etcdctl snapshot
+//! save`, `fastetcd-ctl snapshot-save`) streams the same format, so a
+//! live snapshot restores with `fastetcd restore` (fastetcd#61). Before
+//! that it streamed the raft snapshot body, which carries only the MVCC
+//! tables and which nothing could restore.
 //!
 //! File format (`fastetcd-backup-<unix-ms>-rev<revision>.fbak`):
 //!
@@ -111,6 +113,75 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
+/// Every table in `engine`, read from one engine snapshot (a single
+/// point-in-time view), and the header describing it.
+pub struct Dump {
+    pub header: BackupHeader,
+    tables: Vec<TableDump>,
+}
+
+impl Dump {
+    /// Read every table. The snapshot is dropped as soon as the tables
+    /// are read, so it holds no read transaction while they are written.
+    pub async fn read(engine: &Arc<dyn KvStore>, node_id: NodeId) -> anyhow::Result<Dump> {
+        let tables = {
+            let snap = engine.snapshot().await?;
+            let mut tables = Vec::new();
+            for name in snap.table_names().await? {
+                let rows = snap
+                    .range(&name, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded, 0)
+                    .await?;
+                tables.push(TableDump { name, rows });
+            }
+            tables
+        };
+        let header = BackupHeader {
+            fastetcd_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_unix_ms: unix_ms(),
+            node_id,
+            cluster_id: find(&tables, TABLE_NODE_META, b"cluster_id")
+                .and_then(|v| <[u8; 8]>::try_from(v).ok())
+                .map(u64::from_be_bytes),
+            revision: find(&tables, "mvcc_meta", b"current_rev")
+                .and_then(|v| <[u8; 8]>::try_from(v).ok())
+                .map(i64::from_be_bytes)
+                .unwrap_or(0),
+            members: find(&tables, "mvcc_meta", META_KEY_RAFT_MEMBERSHIP)
+                .and_then(|v| {
+                    bincode::deserialize::<openraft::StoredMembership<NodeId, openraft::BasicNode>>(
+                        v,
+                    )
+                    .ok()
+                })
+                .map(|m| m.membership().nodes().map(|(id, _)| *id).collect())
+                .unwrap_or_default(),
+        };
+        Ok(Dump { header, tables })
+    }
+
+    /// Bytes [`write_to`](Self::write_to) writes.
+    pub fn encoded_len(&self) -> io::Result<u64> {
+        let header = bincode::serialized_size(&self.header).map_err(bincode_io)?;
+        let tables = bincode::serialized_size(&self.tables).map_err(bincode_io)?;
+        Ok(MAGIC.len() as u64 + 4 + header + tables + 32)
+    }
+
+    /// Write the backup file format to `w`: what `fastetcd restore`
+    /// reads, from a file in `--backup-dir` or from `Maintenance.Snapshot`
+    /// (fastetcd#61).
+    pub fn write_to<W: Write>(&self, w: W) -> io::Result<W> {
+        let mut w = HashingWriter { inner: w, hash: Sha256::new() };
+        w.write_all(MAGIC)?;
+        w.write_all(&FORMAT.to_le_bytes())?;
+        bincode::serialize_into(&mut w, &self.header).map_err(bincode_io)?;
+        bincode::serialize_into(&mut w, &self.tables).map_err(bincode_io)?;
+        let digest = w.hash.finalize();
+        let mut inner = w.inner;
+        inner.write_all(&digest)?;
+        Ok(inner)
+    }
+}
+
 /// Take a backup of every table in `engine` into `dir`, then roll off
 /// all but the newest `retain`.
 pub async fn take(
@@ -119,41 +190,9 @@ pub async fn take(
     node_id: NodeId,
     retain: usize,
 ) -> anyhow::Result<BackupInfo> {
-    // One snapshot for every table: a single point-in-time view. It is
-    // dropped as soon as the tables are read, before anything is
-    // written, so it holds no read transaction during the disk write.
-    let tables = {
-        let snap = engine.snapshot().await?;
-        let mut tables = Vec::new();
-        for name in snap.table_names().await? {
-            let rows = snap
-                .range(&name, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded, 0)
-                .await?;
-            tables.push(TableDump { name, rows });
-        }
-        tables
-    };
-    let header = BackupHeader {
-        fastetcd_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_unix_ms: unix_ms(),
-        node_id,
-        cluster_id: find(&tables, TABLE_NODE_META, b"cluster_id")
-            .and_then(|v| <[u8; 8]>::try_from(v).ok())
-            .map(u64::from_be_bytes),
-        revision: find(&tables, "mvcc_meta", b"current_rev")
-            .and_then(|v| <[u8; 8]>::try_from(v).ok())
-            .map(i64::from_be_bytes)
-            .unwrap_or(0),
-        members: find(&tables, "mvcc_meta", META_KEY_RAFT_MEMBERSHIP)
-            .and_then(|v| {
-                bincode::deserialize::<openraft::StoredMembership<NodeId, openraft::BasicNode>>(v)
-                    .ok()
-            })
-            .map(|m| m.membership().nodes().map(|(id, _)| *id).collect())
-            .unwrap_or_default(),
-    };
+    let dump = Dump::read(engine, node_id).await?;
     let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || write_backup(&dir, header, &tables, retain)).await?
+    tokio::task::spawn_blocking(move || write_backup(&dir, &dump, retain)).await?
 }
 
 fn find<'a>(tables: &'a [TableDump], table: &str, key: &[u8]) -> Option<&'a [u8]> {
@@ -166,12 +205,8 @@ fn find<'a>(tables: &'a [TableDump], table: &str, key: &[u8]) -> Option<&'a [u8]
         .map(|(_, v)| v.as_slice())
 }
 
-fn write_backup(
-    dir: &Path,
-    header: BackupHeader,
-    tables: &[TableDump],
-    retain: usize,
-) -> anyhow::Result<BackupInfo> {
+fn write_backup(dir: &Path, dump: &Dump, retain: usize) -> anyhow::Result<BackupInfo> {
+    let header = dump.header.clone();
     std::fs::create_dir_all(dir)?;
     remove_temp_files(dir);
     let name = format!(
@@ -180,13 +215,13 @@ fn write_backup(
     );
     let path = dir.join(&name);
     let tmp = dir.join(format!(".{name}{TMP_SUFFIX}"));
-    let written = write_file(&tmp, &header, tables).or_else(|e| {
+    let written = write_file(&tmp, dump).or_else(|e| {
         // Out of room: give up the oldest backup and try once more, so
         // a full backup volume keeps a fresh backup rather than none.
         if fastetcd_raft::snapshot_store::is_out_of_space(&e) && list(dir).len() > 1 {
             let _ = std::fs::remove_file(&tmp);
             prune(dir, list(dir).len() - 1);
-            write_file(&tmp, &header, tables)
+            write_file(&tmp, dump)
         } else {
             Err(e)
         }
@@ -200,20 +235,10 @@ fn write_backup(
     Ok(BackupInfo { path, header })
 }
 
-fn write_file(path: &Path, header: &BackupHeader, tables: &[TableDump]) -> io::Result<()> {
+fn write_file(path: &Path, dump: &Dump) -> io::Result<()> {
     let file = File::create(path)?;
-    let mut w = HashingWriter {
-        inner: BufWriter::with_capacity(1 << 20, file),
-        hash: Sha256::new(),
-    };
-    w.write_all(MAGIC)?;
-    w.write_all(&FORMAT.to_le_bytes())?;
-    bincode::serialize_into(&mut w, header).map_err(bincode_io)?;
-    bincode::serialize_into(&mut w, tables).map_err(bincode_io)?;
-    let digest = w.hash.finalize();
-    let mut inner = w.inner;
-    inner.write_all(&digest)?;
-    let file = inner.into_inner().map_err(|e| e.into_error())?;
+    let w = dump.write_to(BufWriter::with_capacity(1 << 20, file))?;
+    let file = w.into_inner().map_err(|e| e.into_error())?;
     file.sync_all()
 }
 

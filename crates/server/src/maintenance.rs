@@ -15,8 +15,9 @@
 //!   through Raft (it changes no state, only layout) and is not gated
 //!   on the NOSPACE alarm, so it works on a store that is already
 //!   refusing writes — which is exactly when it is needed.
-//! - `Snapshot` — streams the bincode-serialized state machine snapshot
-//!   to the client in 64 KiB chunks.
+//! - `Snapshot` — streams a backup file of every table (the format of
+//!   `--backup-dir` backups, `crate::backup`) in 64 KiB chunks, which
+//!   `fastetcd restore` restores (fastetcd#61).
 //! - `MoveLeader` — `Status::unimplemented` until peer transport lands.
 //! - `Downgrade` — `Status::unimplemented`.
 
@@ -25,10 +26,7 @@ use std::sync::Arc;
 
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::maintenance_server::Maintenance;
-use openraft::storage::RaftStateMachine;
-use openraft::RaftSnapshotBuilder;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -287,57 +285,31 @@ impl Maintenance for MaintenanceService {
     ) -> Result<Response<Self::SnapshotStream>, Status> {
         // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
         crate::authz::require_admin(&self.state, &request).await?;
-        // Build a snapshot of the MVCC state.
-        let mut sm = self.state.sm.clone();
-        let mut builder = sm.get_snapshot_builder().await;
-        let snap = builder
-            .build_snapshot()
+        // A backup file of every table, as `--backup-dir` writes, which
+        // `fastetcd restore` restores (fastetcd#61). Read through the
+        // write-behind layer, so it holds every applied write. It is
+        // encoded straight into the stream: no temp file on a volume
+        // that may be bounded (#14), no second copy in memory.
+        let dump = crate::backup::Dump::read(self.state.sm.mvcc().engine(), self.state.member_id)
             .await
-            .map_err(|e| Status::internal(format!("snapshot build: {e}")))?;
-        // Stream the body from its file a chunk at a time; it is never
-        // read into memory whole (fastetcd#30).
-        let mut body = snap.snapshot;
-        let total = body
-            .seek(std::io::SeekFrom::End(0))
-            .await
-            .and_then(|end| usize::try_from(end).map_err(std::io::Error::other))
+            .map_err(|e| Status::internal(format!("snapshot read: {e}")))?;
+        let total = dump
+            .encoded_len()
             .map_err(|e| Status::internal(format!("snapshot size: {e}")))?;
-        body.seek(std::io::SeekFrom::Start(0))
-            .await
-            .map_err(|e| Status::internal(format!("snapshot seek: {e}")))?;
-        let revision = self.state.sm.mvcc().current_revision().await;
-        let header = response_header(&self.state, revision).await;
+        let header = response_header(&self.state, dump.header.revision).await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<pb::SnapshotResponse, Status>>(4);
-        tokio::spawn(async move {
-            const CHUNK: usize = 64 * 1024;
-            let mut sent = 0usize;
-            while sent < total {
-                let mut blob = vec![0u8; CHUNK.min(total - sent)];
-                if let Err(e) = body.read_exact(&mut blob).await {
-                    let _ = tx
-                        .send(Err(Status::internal(format!("snapshot read: {e}"))))
-                        .await;
-                    return;
-                }
-                sent += blob.len();
-                let resp = pb::SnapshotResponse {
-                    header: Some(header),
-                    remaining_bytes: (total - sent) as u64,
-                    blob,
-                    version: ETCD_COMPAT_VERSION.to_string(),
-                };
-                if tx.send(Ok(resp)).await.is_err() {
-                    return;
+        tokio::task::spawn_blocking(move || {
+            let w = SnapshotChunks { tx: tx.clone(), header, total, sent: 0, buf: Vec::new() };
+            let result = dump.write_to(w).and_then(|mut w| w.send_buf());
+            // A closed stream (the client went away) is not an error to
+            // report; anything else is, in place of the missing bytes.
+            if let Err(e) = result {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    let _ = tx.blocking_send(Err(Status::internal(format!("snapshot write: {e}"))));
                 }
             }
-            // etcd ends the stream with a final empty message that
-            // confirms `remaining_bytes == 0`. We've already sent
-            // that as the last chunk above; the channel close itself
-            // is the EOS signal for tonic.
-            drop(tx);
         });
-
         let stream: Self::SnapshotStream = Box::pin(ReceiverStream::new(rx));
         Ok(Response::new(stream))
     }
@@ -418,4 +390,48 @@ async fn hash_kv_table(
     let folded = u32::from_be_bytes(bytes);
     let current = state.sm.mvcc().current_revision().await;
     Ok((current, folded))
+}
+
+/// Turns the backup encoder's output into `SnapshotResponse` chunks.
+struct SnapshotChunks {
+    tx: tokio::sync::mpsc::Sender<Result<pb::SnapshotResponse, Status>>,
+    header: pb::ResponseHeader,
+    total: u64,
+    sent: u64,
+    buf: Vec<u8>,
+}
+
+impl SnapshotChunks {
+    const CHUNK: usize = 64 * 1024;
+
+    fn send_buf(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let blob = std::mem::take(&mut self.buf);
+        self.sent += blob.len() as u64;
+        let resp = pb::SnapshotResponse {
+            header: Some(self.header.clone()),
+            remaining_bytes: self.total.saturating_sub(self.sent),
+            blob,
+            version: ETCD_COMPAT_VERSION.to_string(),
+        };
+        self.tx
+            .blocking_send(Ok(resp))
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }
+}
+
+impl std::io::Write for SnapshotChunks {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let n = data.len().min(Self::CHUNK - self.buf.len());
+        self.buf.extend_from_slice(&data[..n]);
+        if self.buf.len() == Self::CHUNK {
+            self.send_buf()?;
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

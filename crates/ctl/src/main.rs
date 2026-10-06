@@ -49,7 +49,8 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         prefix: bool,
     },
-    /// Stream `Maintenance.Snapshot` to a local file.
+    /// Stream `Maintenance.Snapshot` to a local file: a backup of the
+    /// whole member that `fastetcd restore` restores (fastetcd#61).
     SnapshotSave {
         path: PathBuf,
     },
@@ -260,7 +261,12 @@ async fn main() -> anyhow::Result<()> {
                 .snapshot(pb::SnapshotRequest {})
                 .await?
                 .into_inner();
-            let mut out = tokio::fs::File::create(&path).await?;
+            // Written beside the destination and renamed into place once
+            // whole and checked, as etcdctl does.
+            let mut part = path.clone().into_os_string();
+            part.push(".part");
+            let part = PathBuf::from(part);
+            let mut out = tokio::fs::File::create(&part).await?;
             let mut total: usize = 0;
             while let Some(msg) = stream.next().await {
                 let chunk = msg?;
@@ -271,7 +277,20 @@ async fn main() -> anyhow::Result<()> {
                 total += chunk.blob.len();
             }
             tokio::io::AsyncWriteExt::flush(&mut out).await?;
-            println!("wrote {} bytes to {}", total, path.display());
+            out.sync_all().await?;
+            drop(out);
+            if let Err(e) = check_backup(&part) {
+                let _ = std::fs::remove_file(&part);
+                anyhow::bail!("the snapshot received is not usable: {e}");
+            }
+            std::fs::rename(&part, &path)?;
+            println!(
+                "wrote {} bytes to {} (checksum ok); restore it with `fastetcd restore {}` \
+                 on a stopped member",
+                total,
+                path.display(),
+                path.display()
+            );
         }
         Cmd::Status => {
             let mut c = MaintenanceClient::connect(args.endpoint).await?;
@@ -365,4 +384,28 @@ fn prefix_range_end(prefix: &[u8]) -> Vec<u8> {
         }
     }
     vec![0u8]
+}
+
+/// Check a `Maintenance.Snapshot` file: fastetcd's backup format (magic
+/// `FEBACKUP`, ..., SHA-256 of everything before it), fastetcd#61. An
+/// upstream etcd's snapshot is a BoltDB file and is not checked here.
+fn check_backup(path: &std::path::Path) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut magic = [0u8; 8];
+    if len < 44 || f.read_exact(&mut magic).is_err() || &magic != b"FEBACKUP" {
+        anyhow::bail!("not a fastetcd backup file ({len} bytes)");
+    }
+    let mut hash = Sha256::new();
+    hash.update(magic);
+    let mut body = (&f).take(len - 32 - 8);
+    std::io::copy(&mut body, &mut hash)?;
+    let mut stored = [0u8; 32];
+    f.read_exact(&mut stored)?;
+    if hash.finalize().as_slice() != stored {
+        anyhow::bail!("checksum mismatch");
+    }
+    Ok(())
 }

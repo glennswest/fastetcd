@@ -40,10 +40,15 @@ metadata such as the cluster id, and a copy of the raft vote and purge
 point. Since 1.12 the raft log itself lives in `wal/`, not in the data
 file (#85), so a backup does not carry it; restoring one starts a new
 WAL from the vote and purge point it does carry. The state is what the
-store had applied at that instant. (The raft snapshot
-that `etcdctl snapshot save` streams holds the MVCC and auth tables but
-not leases or the cluster id, and no fastetcd tool can restore it yet:
-#61. Use these backups, or `fastetcd backup` offline.)
+store had applied at that instant.
+
+**A live backup on demand.** `etcdctl snapshot save <file>` (or
+`fastetcd-ctl snapshot-save <file>`) streams the same format from a
+running member (since 1.15, #61; root only with auth on), built from
+the same point-in-time view and encoded straight into the stream, so it
+needs no room on the data volume. `fastetcd restore <file>` restores it
+like a periodic backup. Before 1.15 that stream was a raft snapshot,
+which nothing can restore.
 
 **File format.** `fastetcd-backup-<unix-ms>-rev<revision>.fbak`: an
 8-byte magic `FEBACKUP`, a format version, a header (version, time,

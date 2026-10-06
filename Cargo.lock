@@ -948,6 +948,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fastetcd-proto",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tonic 0.12.3",

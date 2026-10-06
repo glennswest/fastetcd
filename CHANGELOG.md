@@ -3,6 +3,20 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **fix:** A live snapshot can be restored (#61, P1). `Maintenance.Snapshot`
+  (`etcdctl snapshot save`, `fastetcd-ctl snapshot-save`) streamed the
+  raft snapshot body, which `fastetcd restore`, `fastetcd-migrate` and
+  etcdctl all refuse, and which lacks leases and node metadata anyway.
+  It now streams the `--backup-dir` backup format: every table (through
+  the write-behind layer, so every applied write), one point in time,
+  SHA-256 at the end, encoded straight into the stream (no temp file,
+  no second copy in memory). `fastetcd restore <file>` restores it.
+  `fastetcd-ctl snapshot-save` writes `<file>.part`, checks the
+  checksum, then renames it. `fastetcd restore` on an old raft-snapshot
+  file says what it is. **Changed:** the bytes `Maintenance.Snapshot`
+  streams are a different format (neither was BoltDB).
+
 ## [v1.14.1] — 2026-10-06
 
 ### 2026-10-06 — boolean flags take values; the chart's pods start (#53)

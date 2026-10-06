@@ -156,7 +156,8 @@ exclusively and refuses if it is in use.
 **`fastetcd-ctl`** — a small client. Options: `--endpoint` (default
 `http://127.0.0.1:2379`), `--user name:password`. Plaintext only: it has
 no TLS options (#59). Commands: `put <key> <value>`, `get <key>
-[--prefix]`, `del <key> [--prefix]`, `snapshot-save <path>`, `status`,
+[--prefix]`, `del <key> [--prefix]`, `snapshot-save <path>` (a backup
+`fastetcd restore` restores; checks its checksum), `status`,
 `defrag`, `compact <revision>`, `alarm [--disarm]`, `auth members`,
 `auth adopt <member>`.
 

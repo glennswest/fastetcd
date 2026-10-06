@@ -602,11 +602,21 @@ Backups that restore:
 - **`fastetcd backup --out <file>`** with the server stopped, restored
   with `fastetcd restore <file>`.
 
-`etcdctl snapshot save` (and `fastetcd-ctl snapshot-save`) do work, and
-stream a snapshot from the file on disk in 64 KiB chunks, but the file
-is fastetcd's raft snapshot, not a BoltDB file: neither
-`fastetcd-migrate`, `fastetcd restore` nor `etcdctl snapshot restore`
-can restore it yet (#61). Do not rely on it as a backup.
+- **A live snapshot**, `etcdctl snapshot save <file>` or `fastetcd-ctl
+  snapshot-save <file>` against a running member (root only with auth
+  on), restored with `fastetcd restore <file>` on a stopped member
+  (1.15; #61). It is the same backup format as `--backup-dir` writes:
+  every table, leases and users included, from one point in time, with
+  a SHA-256 that `fastetcd-ctl snapshot-save` and `fastetcd restore`
+  check. It is not a BoltDB file, so `etcdctl snapshot status` and
+  `etcdctl snapshot restore` cannot read it. A snapshot saved by 1.14.1
+  or earlier held a raft snapshot that nothing restores; take a new one.
+
+A restored data dir keeps the identity and raft membership of the
+member the backup came from. To start it as a different member, or as
+the first member of a new cluster, start it once with
+`--force-new-cluster` and add the others with `member add`, as with
+etcd's `snapshot restore`.
 
 ## v3 JSON gateway
 
