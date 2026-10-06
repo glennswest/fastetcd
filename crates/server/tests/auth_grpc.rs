@@ -12,7 +12,7 @@ async fn user_add_get_delete() {
     let mut c = AuthClient::connect(h.endpoint.clone()).await.unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: "alice".to_string(),
-        password: "wonderland".to_string(),
+        password: "wonderland".to_string(), // not a secret: test fixture
         ..Default::default()
     })
     .await
@@ -75,7 +75,7 @@ async fn user_grant_role_then_get_lists_it() {
     let mut c = AuthClient::connect(h.endpoint.clone()).await.unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: "bob".to_string(),
-        password: "p4ss".to_string(),
+        password: "p4ss".to_string(), // not a secret: test fixture
         ..Default::default()
     })
     .await
@@ -107,7 +107,7 @@ async fn authenticate_returns_a_token_for_valid_credentials() {
     let mut c = AuthClient::connect(h.endpoint.clone()).await.unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: "carol".to_string(),
-        password: "open-sesame".to_string(),
+        password: "open-sesame".to_string(), // not a secret: test fixture
         ..Default::default()
     })
     .await
@@ -115,7 +115,7 @@ async fn authenticate_returns_a_token_for_valid_credentials() {
     let resp = c
         .authenticate(pb::AuthenticateRequest {
             name: "carol".to_string(),
-            password: "open-sesame".to_string(),
+            password: "open-sesame".to_string(), // not a secret: test fixture
         })
         .await
         .unwrap()
@@ -130,7 +130,7 @@ async fn authenticate_rejects_wrong_password() {
     let mut c = AuthClient::connect(h.endpoint.clone()).await.unwrap();
     c.user_add(pb::AuthUserAddRequest {
         name: "dan".to_string(),
-        password: "right-pass".to_string(),
+        password: "right-pass".to_string(), // not a secret: test fixture
         ..Default::default()
     })
     .await
@@ -138,7 +138,7 @@ async fn authenticate_rejects_wrong_password() {
     let err = c
         .authenticate(pb::AuthenticateRequest {
             name: "dan".to_string(),
-            password: "wrong-pass".to_string(),
+            password: "wrong-pass".to_string(), // not a secret: test fixture
         })
         .await
         .expect_err("should fail");
@@ -158,7 +158,7 @@ async fn auth_enable_requires_root_user() {
     // Add root and try again — should succeed.
     c.user_add(pb::AuthUserAddRequest {
         name: "root".to_string(),
-        password: "rootpw".to_string(),
+        password: "rootpw".to_string(), // not a secret: test fixture
         ..Default::default()
     })
     .await
@@ -167,7 +167,7 @@ async fn auth_enable_requires_root_user() {
 
     // With auth on, AuthStatus needs root, as in etcd (#31).
     let token = c
-        .authenticate(pb::AuthenticateRequest { name: "root".into(), password: "rootpw".into() })
+        .authenticate(pb::AuthenticateRequest { name: "root".into(), password: "rootpw".into() }) // not a secret: test fixture
         .await
         .unwrap()
         .into_inner()
