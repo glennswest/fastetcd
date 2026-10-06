@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **docs:** The presentation's open-issues slide no longer lists #61.
+
 ## [v1.15.0] — 2026-10-06
 
 ### 2026-10-06 — a live snapshot can be restored (#61)
