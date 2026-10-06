@@ -78,9 +78,10 @@ StormCOS control plane does not use it (it runs the golden above).
   a PVC is a stormblock volume, provisioned by the kubelet's built-in
   stormblock driver (class `stormblock`, the default class), so leave
   `persistence.storageClass` empty.
-- **Known break (#53):** the template passes `--auto-defrag=true`, which
-  the binary rejects at argument parsing, so no pod starts until that is
-  fixed. Workaround: delete that line from `templates/statefulset.yaml`.
+- **Before 1.15** the template's `--auto-defrag=true` was refused at
+  argument parsing and no pod started (#53); from 1.15 boolean flags
+  take `=true`/`=false`. `tests/chart_args.sh` renders the chart and
+  starts the rendered command.
 
 ## Linux packages (rpm / deb)
 

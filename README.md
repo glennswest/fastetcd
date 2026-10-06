@@ -299,9 +299,8 @@ See `docs/03-deploy.md` for the full guide. Quick paths:
 - **Container**: no image is published (GHCR is not used); `docker build
   -t fastetcd:dev .` and run or push that.
 - **Kubernetes**: `helm install fastetcd ./deploy/charts/fastetcd`
-  with your own image. The chart currently passes `--auto-defrag=true`,
-  which the binary rejects, so its pods do not start until #53 is fixed
-  (workaround: remove that line from the template).
+  with your own image (1.15 or later: older binaries refuse the chart's
+  `--auto-defrag=true`, #53).
 - **Fedora/RHEL**, **Debian/Ubuntu**: `dnf install` the `.rpm` or
   `dpkg -i` the `.deb` that `deploy/packaging/build-release.sh` builds
   (on GitHub Releases up to v1.2.0)

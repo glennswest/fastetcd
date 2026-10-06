@@ -3,6 +3,23 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **fix:** Boolean flags take values as etcd's do (#53, P1). They were
+  clap switches, so `--auto-defrag=false` and `--upgrade-backup=false`
+  were parse errors (only the env var set to exactly `false` turned
+  them off), and the Helm chart's `--auto-defrag=true` stopped every pod
+  at argument parsing; `--client-cert-auth=true` failed the same way.
+  Now `--flag` alone is true, `--flag=true|false|1|0` sets it, and the
+  env vars take true/false, 1/0, yes/no, on/off. For
+  `--auto-defrag`, `--upgrade-backup`, `--enable-grpc-gateway`,
+  `--client-cert-auth`, `--peer-client-cert-auth`,
+  `--force-new-cluster` and `--enable-pprof`. **Changed:** the value
+  must follow `=`; `--enable-grpc-gateway false` (space), accepted
+  since 1.8, is now refused, as etcd refuses it.
+- **test:** `tests/chart_args.sh` renders the Helm chart and starts the
+  rendered pod command (defaults, `space.autoDefrag=false`, bool flags
+  in `extraArgs`), checking it serves.
+
 ## [v1.14.0] — 2026-10-06
 
 ### 2026-10-06 — a request that cannot apply stops no member (#49)

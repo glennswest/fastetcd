@@ -36,6 +36,11 @@ use fastetcd_storage::redb_engine::RedbEngine;
 /// With no subcommand, runs the server. `backup`, `restore`, `fsck` and
 /// `defrag` operate on the data directory offline (the server must be
 /// stopped); `sizing` needs no data directory.
+///
+/// Boolean flags take values as etcd's (Go's flag package) do (#53):
+/// `--flag` alone is true, `--flag=true` / `--flag=false` set it, and
+/// a value must follow `=` (`--flag false` is not a value). Their env
+/// vars take true/false, 1/0, yes/no, on/off.
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd", version, about)]
 struct Args {
@@ -115,14 +120,32 @@ struct Args {
     /// The etcd-parity escape hatch for a data directory whose
     /// membership is lost or wrong (e.g. fastetcd#11). Use on exactly
     /// one surviving member, then re-add the others with `member add`.
-    #[arg(long, env = "FASTETCD_FORCE_NEW_CLUSTER", default_value = "false")]
+    #[arg(
+        long,
+        env = "FASTETCD_FORCE_NEW_CLUSTER",
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     force_new_cluster: bool,
 
     /// Take a safety backup of the data directory before starting a
     /// newer fastetcd version against it (and before any in-place
     /// format conversion). On by default; disable if you manage your
     /// own backups.
-    #[arg(long, env = "FASTETCD_UPGRADE_BACKUP", default_value_t = true)]
+    #[arg(
+        long,
+        env = "FASTETCD_UPGRADE_BACKUP",
+        default_value_t = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     upgrade_backup: bool,
 
     /// Where startup safety backups are written. Defaults to
@@ -159,7 +182,16 @@ struct Args {
 
     /// Require clients to present a TLS certificate signed by
     /// `--trusted-ca-file`.
-    #[arg(long, env = "FASTETCD_CLIENT_CERT_AUTH", default_value_t = false)]
+    #[arg(
+        long,
+        env = "FASTETCD_CLIENT_CERT_AUTH",
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     client_cert_auth: bool,
 
     /// PEM-encoded certificate for the raft peer port. Independent of
@@ -183,7 +215,16 @@ struct Args {
 
     /// Refuse any caller on the peer port that does not present a
     /// certificate signed by `--peer-trusted-ca-file`.
-    #[arg(long, env = "FASTETCD_PEER_CLIENT_CERT_AUTH", default_value_t = false)]
+    #[arg(
+        long,
+        env = "FASTETCD_PEER_CLIENT_CERT_AUTH",
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     peer_client_cert_auth: bool,
 
     /// Serve etcd's v3 JSON gateway (`POST /v3/...`) on the client
@@ -193,6 +234,10 @@ struct Args {
         long,
         env = "FASTETCD_ENABLE_GRPC_GATEWAY",
         default_value_t = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::Set
     )]
     enable_grpc_gateway: bool,
@@ -296,7 +341,16 @@ struct Args {
     /// Let the reclaim path defragment the engine. Defragment pauses
     /// reads and writes while it runs, but it is the only step that
     /// returns freed pages to the filesystem.
-    #[arg(long, env = "FASTETCD_AUTO_DEFRAG", default_value_t = true)]
+    #[arg(
+        long,
+        env = "FASTETCD_AUTO_DEFRAG",
+        default_value_t = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     auto_defrag: bool,
 
     /// Nodes this cluster is expected to run. Used to size the store:
@@ -457,7 +511,15 @@ struct Args {
     metrics: Option<String>,
 
     /// (etcd compat) Enable Go pprof. Ignored.
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        default_value_t = false,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::Set
+    )]
     enable_pprof: bool,
 }
 
@@ -1440,4 +1502,65 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("fastetcd").chain(args.iter().copied()))
+    }
+
+    // fastetcd#53: default-on flags could not be turned off, and
+    // `--auto-defrag=true` (the Helm chart's) was a parse error.
+    #[test]
+    fn bool_flags_take_etcd_style_values() {
+        type Get = fn(&Args) -> bool;
+        let flags: [(&str, Get, bool); 7] = [
+            ("auto-defrag", |a| a.auto_defrag, true),
+            ("upgrade-backup", |a| a.upgrade_backup, true),
+            ("enable-grpc-gateway", |a| a.enable_grpc_gateway, true),
+            ("client-cert-auth", |a| a.client_cert_auth, false),
+            ("peer-client-cert-auth", |a| a.peer_client_cert_auth, false),
+            ("force-new-cluster", |a| a.force_new_cluster, false),
+            ("enable-pprof", |a| a.enable_pprof, false),
+        ];
+        for (name, get, default) in flags {
+            assert_eq!(get(&parse(&[]).unwrap()), default, "--{name} default");
+            assert!(get(&parse(&[&format!("--{name}")]).unwrap()), "bare --{name}");
+            for (v, want) in [("true", true), ("false", false), ("1", true), ("0", false)] {
+                let a = parse(&[&format!("--{name}={v}")]).unwrap_or_else(|e| panic!("--{name}={v}: {e}"));
+                assert_eq!(get(&a), want, "--{name}={v}");
+            }
+            assert!(parse(&[&format!("--{name}=maybe")]).is_err(), "--{name}=maybe");
+        }
+        // A bare flag before a subcommand does not swallow it.
+        let a = parse(&["--auto-defrag", "sizing", "--nodes", "3"]).unwrap();
+        assert!(a.auto_defrag && matches!(a.command, Some(Command::Sizing { .. })));
+    }
+
+    #[test]
+    fn bool_env_vars_take_boolish_values() {
+        use clap::{CommandFactory, FromArgMatches};
+        // The real `--auto-defrag` and `--client-cert-auth`, each case
+        // reading a variable of its own, so parallel tests cannot see it.
+        for (id, v, want) in [
+            ("auto_defrag", "false", false),
+            ("auto_defrag", "0", false),
+            ("auto_defrag", "off", false),
+            ("client_cert_auth", "true", true),
+            ("client_cert_auth", "1", true),
+        ] {
+            let var = format!("FASTETCD_TEST_{}_{}", id.to_uppercase(), v.to_uppercase());
+            std::env::set_var(&var, v);
+            let m = Args::command()
+                .mut_arg(id, |a| a.env(var.clone()))
+                .try_get_matches_from(["fastetcd"])
+                .unwrap_or_else(|e| panic!("{var}={v}: {e}"));
+            let a = Args::from_arg_matches(&m).unwrap();
+            let got = if id == "auto_defrag" { a.auto_defrag } else { a.client_cert_auth };
+            assert_eq!(got, want, "{var}={v}");
+        }
+    }
 }

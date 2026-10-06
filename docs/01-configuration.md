@@ -5,10 +5,13 @@ Every setting of the `fastetcd` server, taken from the binary's own
 A variable named `ETCD_*` in the last column is also read, as a drop-in
 for an existing etcd configuration, when the `FASTETCD_*` one is unset.
 
-Booleans marked *switch* take no value on the command line (see #53):
-`--client-cert-auth` turns it on; the env var takes `true`/`false`.
-`--auto-defrag` and `--upgrade-backup` are on by default and can only be
-turned off with the env var set to `false` (`FASTETCD_AUTO_DEFRAG=false`).
+Boolean flags take values as etcd's do (#53): the flag alone is true,
+`--flag=true` / `--flag=false` set it (also `=1` / `=0`), and the value
+must follow `=`: `--auto-defrag false` is not a value, as in etcd. Their
+env vars take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. So
+`--auto-defrag=false` or `FASTETCD_AUTO_DEFRAG=0` turns reclaim's
+defragment off. The subcommands' `--force`, `--repair` and the like are
+plain switches.
 
 ## Ports and endpoints
 
@@ -38,7 +41,7 @@ list is bound; the rest are accepted for compatibility.
 | `--initial-cluster-state` | `new` | `FASTETCD_INITIAL_CLUSTER_STATE` | `ETCD_INITIAL_CLUSTER_STATE` | `new` bootstraps; `existing` joins without initializing. |
 | `--initial-cluster-token` | none | `FASTETCD_INITIAL_CLUSTER_TOKEN` | `ETCD_INITIAL_CLUSTER_TOKEN` | Derives the cluster id on a new store (FNV-1a-64, 63 bits). |
 | `--cluster-id` | derived | `FASTETCD_CLUSTER_ID` | | Id in every response header; persisted on first start; never 0. Without it or a token: `1`, with a warning. |
-| `--force-new-cluster` | off (*switch*) | `FASTETCD_FORCE_NEW_CLUSTER` | | Recovery: rebuild membership as a cluster of this member, keeping the data. One surviving member only. |
+| `--force-new-cluster` | `false` | `FASTETCD_FORCE_NEW_CLUSTER` | | Recovery: rebuild membership as a cluster of this member, keeping the data. One surviving member only. |
 
 ## TLS
 
@@ -46,10 +49,10 @@ list is bound; the rest are accepted for compatibility.
 |---|---|---|---|
 | `--cert-file`, `--key-file` | `FASTETCD_CERT_FILE`, `FASTETCD_KEY_FILE` | `ETCD_CERT_FILE`, `ETCD_KEY_FILE` | Client port identity (gRPC, `/health`, `/v3`). |
 | `--trusted-ca-file` | `FASTETCD_TRUSTED_CA_FILE` | `ETCD_TRUSTED_CA_FILE` | CA client certificates are verified against. |
-| `--client-cert-auth` (*switch*) | `FASTETCD_CLIENT_CERT_AUTH` | `ETCD_CLIENT_CERT_AUTH` | Require a client certificate; with auth on, its CN is the user (#20). |
+| `--client-cert-auth` (default `false`) | `FASTETCD_CLIENT_CERT_AUTH` | `ETCD_CLIENT_CERT_AUTH` | Require a client certificate; with auth on, its CN is the user (#20). |
 | `--peer-cert-file`, `--peer-key-file` | `FASTETCD_PEER_CERT_FILE`, `FASTETCD_PEER_KEY_FILE` | `ETCD_PEER_CERT_FILE`, `ETCD_PEER_KEY_FILE` | Peer port identity, also presented when dialling members. Needs `--peer-trusted-ca-file` and `https://` peer URLs. |
 | `--peer-trusted-ca-file` | `FASTETCD_PEER_TRUSTED_CA_FILE` | `ETCD_PEER_TRUSTED_CA_FILE` | CA members' peer certificates are verified against. |
-| `--peer-client-cert-auth` (*switch*) | `FASTETCD_PEER_CLIENT_CERT_AUTH` | `ETCD_PEER_CLIENT_CERT_AUTH` | Refuse peer callers without a peer-CA certificate. |
+| `--peer-client-cert-auth` (default `false`) | `FASTETCD_PEER_CLIENT_CERT_AUTH` | `ETCD_PEER_CLIENT_CERT_AUTH` | Refuse peer callers without a peer-CA certificate. |
 
 Details: [03-deploy § TLS](03-deploy.md#tls).
 
@@ -57,7 +60,7 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 
 | Flag | Default | Env | etcd env | Meaning |
 |---|---|---|---|---|
-| `--enable-grpc-gateway` | `true` | `FASTETCD_ENABLE_GRPC_GATEWAY` | `ETCD_ENABLE_GRPC_GATEWAY` | The v3 JSON gateway on the client port ([03-deploy](03-deploy.md#v3-json-gateway)). Takes `=true`/`=false`. |
+| `--enable-grpc-gateway` | `true` | `FASTETCD_ENABLE_GRPC_GATEWAY` | `ETCD_ENABLE_GRPC_GATEWAY` | The v3 JSON gateway on the client port ([03-deploy](03-deploy.md#v3-json-gateway)). |
 | `--listen-metrics-url` | `127.0.0.1:2381` | `FASTETCD_LISTEN_METRICS_URL` | `ETCD_LISTEN_METRICS_URLS` | `/metrics` address (host:port, no scheme); empty disables. |
 
 ## Raft log and snapshots
@@ -104,7 +107,7 @@ made durable in the background ([03-deploy](03-deploy.md#storage-engine), #85).
 | `--space-clear-percent` | `70` | `FASTETCD_SPACE_CLEAR_PERCENT` | | NOSPACE clears itself below this. |
 | `--space-check-interval-secs` | `30` | `FASTETCD_SPACE_CHECK_INTERVAL_SECS` | | Occupancy sampling; `0` disables the monitor. |
 | `--space-reclaim-retention` | `1000` | `FASTETCD_SPACE_RECLAIM_RETENTION` | | Revisions kept when compacting under pressure (even with auto-compaction off). |
-| `--auto-defrag` | on | `FASTETCD_AUTO_DEFRAG` | | Let reclaim defragment. Off only with `FASTETCD_AUTO_DEFRAG=false` (#53). |
+| `--auto-defrag` | `true` | `FASTETCD_AUTO_DEFRAG` | | Let reclaim defragment. `--auto-defrag=false` turns it off. |
 | `--expected-nodes` | `0` (off) | `FASTETCD_EXPECTED_NODES` | | Check the volume against the sizing model at startup (warn only); enables auto-compaction if it was left at 0. |
 | `--expected-pods-per-node` | `30` | `FASTETCD_EXPECTED_PODS_PER_NODE` | | Pod density for `--expected-nodes`. |
 
@@ -119,7 +122,7 @@ Details: [04-disk-space](04-disk-space.md).
 | `--backup-every-revisions` | `10000` | `FASTETCD_BACKUP_EVERY_REVISIONS` | Also after this many revisions; `0` disables the trigger. |
 | `--backup-retain` | `4` | `FASTETCD_BACKUP_RETAIN` | Backups kept. |
 | `--on-corruption` | `restore` | `FASTETCD_ON_CORRUPTION` | `restore` (lone member only) or `refuse`. |
-| `--upgrade-backup` | on | `FASTETCD_UPGRADE_BACKUP` | Copy the data file before a different version opens it. Off only with `FASTETCD_UPGRADE_BACKUP=false` (#53). |
+| `--upgrade-backup` | `true` | `FASTETCD_UPGRADE_BACKUP` | Copy the data file before a different version opens it. `--upgrade-backup=false` turns it off. |
 | `--upgrade-backup-dir` | `<data-dir>/backups` | `FASTETCD_UPGRADE_BACKUP_DIR` | Where those copies go. |
 | `--upgrade-backup-retain` | `2` | `FASTETCD_UPGRADE_BACKUP_RETAIN` | How many are kept. |
 
