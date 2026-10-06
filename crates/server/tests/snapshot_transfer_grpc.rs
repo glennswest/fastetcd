@@ -35,6 +35,7 @@ struct Node {
     client_endpoint: String,
     peers: PeerEndpoints,
     raft: Raft<TypeConfig>,
+    mvcc: MvccStore,
 }
 
 async fn start_node(id: NodeId) -> Node {
@@ -43,7 +44,7 @@ async fn start_node(id: NodeId) -> Node {
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(dir.path().join("data.redb")).unwrap());
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
-    let sm = FastetcdStateMachine::open(mvcc, &snap_dir).await.unwrap();
+    let sm = FastetcdStateMachine::open(mvcc.clone(), &snap_dir).await.unwrap();
     // The raft log in a WAL, as the server runs it (#85).
     let log = WalLogStore::open(&wal_dir(dir.path()), engine, WalLogOptions::default())
         .await
@@ -112,6 +113,7 @@ async fn start_node(id: NodeId) -> Node {
         client_endpoint,
         peers,
         raft,
+        mvcc,
     }
 }
 
@@ -145,7 +147,18 @@ async fn a_late_learner_is_caught_up_by_a_file_backed_snapshot() {
     leader.raft.initialize(members).await.unwrap();
     wait_for("leader", || leader.raft.metrics().borrow().current_leader == Some(1)).await;
 
+    // A lease with a key on it, granted before the snapshot: it must
+    // reach the learner with the snapshot (fastetcd#41).
+    let now = 1_700_000_000;
+    leader
+        .raft
+        .client_write(fastetcd_raft::FastetcdLogEntry::LeaseGrant { id: 4242, ttl_secs: 600, now_unix: now })
+        .await
+        .unwrap();
     let mut kv = KvClient::connect(leader.client_endpoint.clone()).await.unwrap();
+    kv.put(pb::PutRequest { key: b"leased".to_vec(), value: b"l".to_vec(), lease: 4242, ..Default::default() })
+        .await
+        .unwrap();
     for i in 0..KEYS {
         kv.put(pb::PutRequest {
             key: format!("key/{i:05}").into_bytes(),
@@ -203,6 +216,13 @@ async fn a_late_learner_is_caught_up_by_a_file_backed_snapshot() {
         .unwrap()
         .into_inner();
     assert_eq!(all.count, KEYS as i64);
+    let ttl = learner
+        .mvcc
+        .lease_ttl(4242, true, now)
+        .await
+        .unwrap()
+        .expect("the lease reached the learner with the snapshot");
+    assert_eq!((ttl.remaining_ttl_secs, ttl.keys), (600, vec![b"leased".to_vec()]));
 
     // The learner kept the received file as its retained snapshot and
     // left no temp file behind.
