@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex};
 
 use fastetcd_storage::mvcc::auth::AuthTables;
+use fastetcd_storage::mvcc::LeaseTables;
 use fastetcd_storage::mvcc::MvccStore;
 
 use crate::snapshot_data::{Content, SnapshotFile};
@@ -125,19 +126,35 @@ struct SnapshotTrailer {
     auth: Option<AuthTables>,
 }
 
-/// A decoded snapshot body: the payload and, if present, the trailer's
+/// Marks the second trailer, after [`SnapshotTrailer`] (fastetcd#41).
+const LEASE_TRAILER_MAGIC: [u8; 8] = *b"FETCDTR2";
+
+/// The lease tables, in a trailer of their own after the auth trailer
+/// (fastetcd#41). A member from 1.5 on reads the payload and the auth
+/// trailer and ignores this, as before; a body without it (from an
+/// older member) leaves the lease tables as they are, as before.
+#[derive(Debug, Serialize, Deserialize)]
+struct LeaseTrailer {
+    magic: [u8; 8],
+    leases: Option<LeaseTables>,
+}
+
+/// A decoded snapshot body: the payload and, if present, the trailers'
 /// tables.
 #[derive(Debug)]
 struct SnapshotBody {
     payload: SnapshotPayload,
     auth: Option<AuthTables>,
+    leases: Option<LeaseTables>,
 }
 
 impl SnapshotBody {
     fn write_to(&self, w: &mut impl Write) -> std::io::Result<()> {
         bincode::serialize_into(&mut *w, &self.payload).map_err(bincode_io)?;
         let trailer = SnapshotTrailer { magic: TRAILER_MAGIC, auth: self.auth.clone() };
-        bincode::serialize_into(&mut *w, &trailer).map_err(bincode_io)
+        bincode::serialize_into(&mut *w, &trailer).map_err(bincode_io)?;
+        let leases = LeaseTrailer { magic: LEASE_TRAILER_MAGIC, leases: self.leases.clone() };
+        bincode::serialize_into(&mut *w, &leases).map_err(bincode_io)
     }
 
     fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
@@ -148,22 +165,36 @@ impl SnapshotBody {
 
     fn read_from(r: &mut impl Read) -> std::io::Result<Self> {
         let payload: SnapshotPayload = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
-        let auth = match bincode::deserialize_from::<_, SnapshotTrailer>(&mut *r) {
-            Ok(t) if t.magic == TRAILER_MAGIC => t.auth,
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "snapshot trailer has an unknown magic",
-                ))
-            }
-            // No trailer: a body from a member older than it.
-            Err(e) if matches!(&*e, bincode::ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof) => {
-                None
-            }
-            Err(e) => return Err(bincode_io(e)),
+        // Each trailer is optional: a body from a member older than it
+        // ends before it.
+        let Some(t) = read_trailer::<SnapshotTrailer>(r)? else {
+            return Ok(Self { payload, auth: None, leases: None });
         };
-        Ok(Self { payload, auth })
+        if t.magic != TRAILER_MAGIC {
+            return Err(unknown_magic("snapshot trailer"));
+        }
+        let leases = match read_trailer::<LeaseTrailer>(r)? {
+            Some(l) if l.magic == LEASE_TRAILER_MAGIC => l.leases,
+            Some(_) => return Err(unknown_magic("snapshot lease trailer")),
+            None => None,
+        };
+        Ok(Self { payload, auth: t.auth, leases })
     }
+}
+
+/// The next trailer, or `None` if the body ends here.
+fn read_trailer<T: serde::de::DeserializeOwned>(r: &mut impl Read) -> std::io::Result<Option<T>> {
+    match bincode::deserialize_from::<_, T>(&mut *r) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if matches!(&*e, bincode::ErrorKind::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof) => {
+            Ok(None)
+        }
+        Err(e) => Err(bincode_io(e)),
+    }
+}
+
+fn unknown_magic(what: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{what} has an unknown magic"))
 }
 
 impl FastetcdStateMachine {
@@ -923,8 +954,10 @@ async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotBody, anyhow
         .range("mvcc_meta", Bound::Unbounded, Bound::Unbounded, 0)
         .await?;
 
-    // The auth tables from the same engine snapshot (fastetcd#32).
+    // The auth tables (fastetcd#32) and the lease tables (#41), from
+    // the same engine snapshot.
     let auth = AuthTables::read(&*snap).await?;
+    let leases = LeaseTables::read(&*snap).await?;
 
     Ok(SnapshotBody {
         payload: SnapshotPayload {
@@ -935,6 +968,7 @@ async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotBody, anyhow
             meta_table,
         },
         auth: Some(auth),
+        leases: Some(leases),
     })
 }
 
@@ -981,6 +1015,13 @@ async fn rebuild_mvcc(
     if let Some(auth) = &body.auth {
         auth.replace_into(&mut batch);
     }
+    // The lease tables likewise (fastetcd#41): every row this member
+    // holds is replaced, so a lease the cluster revoked does not linger
+    // here and one granted before the snapshot is not missing.
+    if let Some(leases) = &body.leases {
+        let current = LeaseTables::read(&*mvcc.engine().snapshot().await?).await?;
+        leases.replace_into(&current, &mut batch);
+    }
     // The MvccStore handle keeps the revision counters and every key's
     // index in RAM (fastetcd#8, #82). `install_tables` commits the batch
     // and reloads them under its write lock, so no read sees the new
@@ -1012,12 +1053,19 @@ mod tests {
         }
     }
 
+    fn leases() -> LeaseTables {
+        LeaseTables {
+            leases: vec![(7i64.to_be_bytes().to_vec(), b"rec".to_vec())],
+            keys: vec![([&7i64.to_be_bytes()[..], b"k"].concat(), Vec::new())],
+        }
+    }
+
     /// A member older than the trailer decodes a new body's payload,
     /// through both paths it has (file: `deserialize_from`, memory:
     /// `deserialize`), ignoring the trailer.
     #[test]
     fn an_old_member_decodes_a_body_with_a_trailer() {
-        let body = SnapshotBody { payload: payload(), auth: Some(auth()) };
+        let body = SnapshotBody { payload: payload(), auth: Some(auth()), leases: Some(leases()) };
         let bytes = body.to_bytes().unwrap();
         let from_mem: SnapshotPayload = bincode::deserialize(&bytes).unwrap();
         assert_eq!(from_mem.kv_table, payload().kv_table);
@@ -1033,13 +1081,41 @@ mod tests {
         let body = SnapshotBody::read_from(&mut old.as_slice()).unwrap();
         assert_eq!(body.payload.kv_table, payload().kv_table);
         assert!(body.auth.is_none());
+        assert!(body.leases.is_none());
     }
 
     #[test]
     fn a_body_with_a_trailer_round_trips() {
-        let bytes = SnapshotBody { payload: payload(), auth: Some(auth()) }.to_bytes().unwrap();
+        let bytes = SnapshotBody { payload: payload(), auth: Some(auth()), leases: Some(leases()) }.to_bytes().unwrap();
         let body = SnapshotBody::read_from(&mut bytes.as_slice()).unwrap();
         assert_eq!(body.auth, Some(auth()));
+        assert_eq!(body.leases, Some(leases()));
+    }
+
+    /// A member from 1.5 to 1.15 reads the payload and the auth trailer
+    /// of a new body, as it did, and stops there (fastetcd#41).
+    #[test]
+    fn a_member_with_only_the_auth_trailer_decodes_a_new_body() {
+        let bytes = SnapshotBody { payload: payload(), auth: Some(auth()), leases: Some(leases()) }
+            .to_bytes()
+            .unwrap();
+        let mut r = bytes.as_slice();
+        let p: SnapshotPayload = bincode::deserialize_from(&mut r).unwrap();
+        assert_eq!(p.kv_table, payload().kv_table);
+        let t: SnapshotTrailer = bincode::deserialize_from(&mut r).unwrap();
+        assert_eq!((t.magic, t.auth), (TRAILER_MAGIC, Some(auth())));
+    }
+
+    /// A body from a 1.5–1.15 member (payload + auth trailer) decodes
+    /// with no lease tables, which leaves them alone on install.
+    #[test]
+    fn a_body_with_only_the_auth_trailer_decodes_with_no_leases() {
+        let mut old = bincode::serialize(&payload()).unwrap();
+        bincode::serialize_into(&mut old, &SnapshotTrailer { magic: TRAILER_MAGIC, auth: Some(auth()) })
+            .unwrap();
+        let body = SnapshotBody::read_from(&mut old.as_slice()).unwrap();
+        assert_eq!(body.auth, Some(auth()));
+        assert!(body.leases.is_none());
     }
 
     #[test]

@@ -19,9 +19,47 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 
 use super::store::{MvccError, MvccResult};
+use crate::{Snapshot, StorageError, WriteBatch};
 
 pub const TABLE_LEASE: &str = "lease";
 pub const TABLE_LEASE_KEYS: &str = "lease_keys";
+
+/// The raw contents of the two lease tables, in key order. Raft
+/// snapshots carry them (fastetcd#41): without them a member caught up
+/// by a snapshot has no record of leases granted before it, so their
+/// keys never expire there and a revoke leaves them behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseTables {
+    pub leases: Vec<(Vec<u8>, Vec<u8>)>,
+    pub keys: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl LeaseTables {
+    /// Read both tables from one engine snapshot.
+    pub async fn read(snap: &dyn Snapshot) -> Result<Self, StorageError> {
+        let all = |t| snap.range(t, Bound::Unbounded, Bound::Unbounded, 0);
+        Ok(Self { leases: all(TABLE_LEASE).await?, keys: all(TABLE_LEASE_KEYS).await? })
+    }
+
+    /// Replace both tables with these contents, in `batch`: every row
+    /// `current` holds is deleted first. Rows, not a key range, since a
+    /// `lease_keys` key is the lease id followed by a user key of any
+    /// length.
+    pub fn replace_into(&self, current: &LeaseTables, batch: &mut WriteBatch) {
+        for (k, _) in &current.leases {
+            batch.delete(TABLE_LEASE, k);
+        }
+        for (k, _) in &current.keys {
+            batch.delete(TABLE_LEASE_KEYS, k);
+        }
+        for (k, v) in &self.leases {
+            batch.put(TABLE_LEASE, k, v);
+        }
+        for (k, v) in &self.keys {
+            batch.put(TABLE_LEASE_KEYS, k, v);
+        }
+    }
+}
 
 /// Lease IDs are arbitrary i64; etcd allows clients to pick them. We
 /// follow the same shape so existing client logic works unchanged.

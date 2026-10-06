@@ -28,7 +28,7 @@ pub mod store;
 
 pub use cache::{CacheConfig, CacheStats};
 pub use event::{EventBatch, EventKind, MvccEvent};
-pub use lease::{LeaseId, LeaseRecord};
+pub use lease::{LeaseId, LeaseRecord, LeaseTables};
 pub use record::{Generation, KeyIndex, KvRecord};
 pub use revision::Revision;
 pub use store::{

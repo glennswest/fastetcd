@@ -363,3 +363,77 @@ async fn a_snapshot_that_cannot_be_written_does_not_fail_the_node() {
     assert_eq!(mvcc.current_revision().await, 3);
     assert_eq!(visible_keys(&mvcc).await, 3);
 }
+
+fn entry(index: u64, data: FastetcdLogEntry) -> Entry<TypeConfig> {
+    Entry { log_id: log_id(1, index), payload: EntryPayload::Normal(data) }
+}
+
+fn leased_put(index: u64, key: &str, lease: i64) -> Entry<TypeConfig> {
+    entry(
+        index,
+        FastetcdLogEntry::Apply {
+            mutations: vec![Mutation::Put {
+                key: key.as_bytes().to_vec(),
+                value: b"v".to_vec(),
+                lease,
+                prev_kv: false,
+                ignore_value: false,
+                ignore_lease: false,
+            }],
+        },
+    )
+}
+
+fn grant(index: u64, id: i64, ttl_secs: i64, now_unix: i64) -> Entry<TypeConfig> {
+    entry(index, FastetcdLogEntry::LeaseGrant { id, ttl_secs, now_unix })
+}
+
+/// fastetcd#41: a snapshot carries the lease tables. A learner caught up
+/// by one has the leader's leases with their keys and deadlines, and none
+/// of its own stale ones; a revoke there (what expiry proposes once it
+/// leads) deletes the keys, as on every other member.
+#[tokio::test]
+async fn an_installed_snapshot_carries_the_leases_and_their_keys() {
+    use fastetcd_raft::types::FastetcdLogResponse;
+    use fastetcd_storage::mvcc::lease::{TABLE_LEASE, TABLE_LEASE_KEYS};
+    use std::ops::Bound;
+    let dir = tempdir().unwrap();
+    let now = 1_700_000_000;
+
+    // Leader: lease 100 (TTL 600) with two keys, then a key with no lease.
+    let (mut leader, _) = open_sm(&dir.path().join("leader.redb")).await;
+    leader.apply(vec![grant(1, 100, 600, now)]).await.unwrap();
+    leader.apply(vec![leased_put(2, "a", 100), leased_put(3, "b", 100)]).await.unwrap();
+    leader.apply(vec![put_entry(4, "plain", "v")]).await.unwrap();
+    let snapshot = leader.get_snapshot_builder().await.build_snapshot().await.unwrap();
+
+    // Learner: a stale lease 999 of its own, with a key on it. A
+    // snapshot that did not carry leases left it there (and left 100
+    // missing).
+    let (mut learner, mvcc) = open_sm(&dir.path().join("learner.redb")).await;
+    learner.apply(vec![grant(1, 999, 60, now), leased_put(2, "stale", 999)]).await.unwrap();
+    learner.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+
+    assert_eq!(mvcc.lease_list().await.unwrap(), vec![100], "the leader's leases, and only those");
+    let ttl = mvcc.lease_ttl(100, true, now).await.unwrap().expect("lease 100 on the learner");
+    assert_eq!((ttl.granted_ttl_secs, ttl.remaining_ttl_secs), (600, 600), "same deadline");
+    assert_eq!(ttl.keys, vec![b"a".to_vec(), b"b".to_vec()]);
+    let snap = mvcc.engine().snapshot().await.unwrap();
+    let rows = |t| snap.range(t, Bound::Unbounded, Bound::Unbounded, 0);
+    assert_eq!(rows(TABLE_LEASE).await.unwrap().len(), 1);
+    assert_eq!(rows(TABLE_LEASE_KEYS).await.unwrap().len(), 2, "no stale lease_keys rows");
+    drop(snap);
+
+    // Once it leads, expiry revokes lease 100: the keys go, as on the
+    // other members.
+    let out = learner.apply(vec![entry(5, FastetcdLogEntry::LeaseRevoke { id: 100 })]).await.unwrap();
+    let FastetcdLogResponse::LeaseRevoke(r) = &out[0] else { panic!("{out:?}") };
+    assert_eq!(r.deleted_keys, 2);
+    assert_eq!(visible_keys(&mvcc).await, 1, "only the key with no lease is left");
+    assert!(mvcc.lease_list().await.unwrap().is_empty());
+
+    // The next lease id it allocates follows the leader's, not its own.
+    let out = learner.apply(vec![grant(6, 0, 30, now)]).await.unwrap();
+    let FastetcdLogResponse::LeaseGrant(g) = &out[0] else { panic!("{out:?}") };
+    assert!(g.id > 100 && g.id != 999, "allocated {}", g.id);
+}

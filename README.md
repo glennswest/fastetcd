@@ -179,8 +179,8 @@ Differences from etcd:
   `etcdserver: requested lease not found`, but the check runs on the
   leader just before the write is proposed, not when it is applied as
   in etcd. So a lease that expires in that instant still gets the key
-  attached. Moving the check to apply waits on the lease tables
-  travelling in raft snapshots (#41).
+  attached. Moving the check to apply is #115: members caught up by a
+  raft snapshot before 1.16 can hold different lease tables (#41).
 - A `LeaseGrant` with a TTL of 0 or less gets 2 s, etcd's minimum with
   its default timing; a positive TTL below that is granted as asked,
   where etcd raises it to the minimum.

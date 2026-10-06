@@ -528,6 +528,23 @@ the last member is upgraded. After that:
 
 The same holds for replicated auth entries since 1.5.0.
 
+**Leases in raft snapshots (1.16, #41).** Before 1.16 a raft snapshot
+carried the MVCC and auth tables but not the lease tables, so a member
+caught up by one (a new member or learner, or one that fell behind the
+purged log) had no record of leases granted before that snapshot, and
+kept any stale ones of its own. Its keys on those leases never expire
+there, and when the leader revokes such a lease the other members delete
+its keys and that member does not. From 1.16 a snapshot carries both
+lease tables and an install replaces them, so this cannot start again.
+A member that was caught up by a snapshot before 1.16 keeps whatever it
+has until its next snapshot install: once every member runs 1.16,
+remove that member and add it back empty (`member remove`, wipe its
+data dir, `member add`), so it is caught up by a new snapshot. If you
+cannot tell which members were, do it for each in turn. A 1.16 leader's
+snapshots install on 1.5–1.15 members as before (the lease tables are
+ignored there); a snapshot from an older leader leaves a 1.16 member's
+lease tables as they are.
+
 **A request that cannot apply (1.14, #49).** A put with `ignore_value`
 or `ignore_lease` on a missing key, a `Compact` outside the store's
 revisions, a keep-alive of a lease that is gone: from 1.14 the state

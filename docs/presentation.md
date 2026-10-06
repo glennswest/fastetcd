@@ -201,7 +201,7 @@ ahead, #94).
 
 | | Issue |
 |---|---|
-| P1 | #41 raft snapshots omit the lease tables · #47 lease RPCs bypass authorization · #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
+| P1 | #47 lease RPCs bypass authorization · #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
 | P2 | #69 `/health` always healthy · #97 3 members: a lone write pays two fsyncs in series · #103 leadership lost under heavy load (fixed election timeouts) · #92 keepalive through Raft · #105 unknown-token error text breaks clientv3 re-auth · #84 #89 #101 verify on an X9 spinning disk |
 
 Auth is enforced but **not yet a security boundary**: #47.
@@ -213,8 +213,8 @@ Auth is enforced but **not yet a security boundary**: #47.
 
 ## Planned (not in the code)
 
-- **Correctness first**: lease tables in snapshots (#41),
-  then the lease-not-found check at apply as etcd does it.
+- **Correctness first**: the lease-not-found check at apply as etcd
+  does it, once members' lease tables are known to agree (#115).
 - **etcd parity gaps**: nested Txn (#56), MoveLeader / Downgrade (#57),
   watch fragmentation (#58), token TTL (#46), Lock / Election services
   (#64), WebSocket gateway streams (#66), a real `/health` (#69),

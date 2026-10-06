@@ -3,6 +3,21 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06 — leases in raft snapshots (#41)
+- **fix:** Raft snapshots carry the lease tables (#41, P1). A snapshot
+  held the MVCC and auth tables only, so a member caught up by one had
+  no record of leases granted before it and kept stale ones of its own:
+  its keys on those leases never expired there, and a revoke deleted
+  them on every other member but not on it. A snapshot now carries
+  `lease` and `lease_keys` (`LeaseTables`) in a second trailer after the
+  auth trailer, and an install replaces every lease row the member had.
+  Compatible both ways: a 1.5–1.15 member reads the payload and the auth
+  trailer and ignores the new one; a snapshot from an older leader
+  leaves the lease tables alone, as before. Members caught up by a
+  snapshot before this keep wrong lease tables until re-added
+  (03-deploy § Leases in raft snapshots). Moving #19's lease check to
+  apply is #115.
+
 ### 2026-10-06
 - **docs:** The presentation's open-issues slide no longer lists #61.
 
