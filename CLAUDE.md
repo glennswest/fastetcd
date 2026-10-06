@@ -1655,3 +1655,31 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 2580a61, 352 tests pass (the 1 failure #45);
       `snapshot_restore.rs` 2/2. With v1.14.1's maintenance.rs put back
       on dev, the restore test fails (the stream is not a backup).
+
+47. **Raft snapshots carry the lease tables (#41, P1).** A snapshot held
+    only `mvcc_kv`/`mvcc_idx`/`mvcc_meta` (+ auth since #32), so a member
+    caught up by one had no `lease`/`lease_keys` rows for leases granted
+    before it, or stale ones. Its keys on those leases then never expire
+    there, and a revoke deletes them on the other members but not on it
+    (the revoke finds no `lease_keys` rows): MVCC divergence. Leases have
+    no RAM state (expiry walks the `lease` table; `next_lease_id` is in
+    `mvcc_meta`, already carried and reloaded). Plan:
+    - `LeaseTables` (storage, like `AuthTables`): read both tables from
+      the build's engine snapshot; replace both in the install batch.
+    - A second trailer after the auth trailer (`FETCDTR2`, leases).
+      bincode reads one value and ignores what follows, so a 1.5–1.15
+      member decodes payload + auth trailer as before; a body with no
+      second trailer (older leader) leaves the lease tables alone, as
+      today.
+    - Not done here: moving #19's lease check to apply. A member caught
+      up by a pre-fix snapshot keeps wrong lease tables until its next
+      snapshot install, which no version gate can see, so an apply-time
+      check would make members disagree. Follow-up issue.
+    Work items:
+    - [ ] storage LeaseTables; raft trailer + build + install; unit tests
+      (both directions of compat).
+    - [ ] Tests: install on an empty learner and on one with stale leases
+      (lease + keys there, stale gone); expiry/revoke after install
+      deletes the keys; a snapshot from an older leader leaves them.
+    - [ ] Docs (03 upgrade note: members caught up before 1.16 may hold
+      wrong lease tables; remedy), changelog; release; close #41.
