@@ -10,7 +10,21 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.13.0`** — Group commit on a slow disk (#95). openraft 0.9.24's
+**`1.14.0`** — A request that cannot apply no longer stops every
+member (#49, P0). A put with `ignore_value`/`ignore_lease` on a missing
+key, `Compact` out of range, a keep-alive of a missing lease, a grant of
+TTL <= 0 and a Txn `Range` at a compacted/future revision failed inside
+raft apply, which openraft turns into a storage error that stops
+RaftCore on every member (and again on replay); since #75 one bad
+proposal took its whole batch with it. Now a `Refusal`
+(`MvccError::Refused`, raised before anything is written) answered as
+`FastetcdLogResponse::Refused`; the state machine keeps applying. The
+leader also refuses them before proposing (`precheck.rs`). Clients get
+etcd's codes and texts (plain Range errors too); a keep-alive of a
+missing lease answers TTL 0; a grant of TTL <= 0 gets 2 s. A member
+older than 1.14 still stops on such an entry (03-deploy).
+
+Previous: **`1.13.0`** — Group commit on a slow disk (#95). openraft 0.9.24's
 RaftCore appends one entry at a time and awaits its fsync
 (`append_to_log` awaits `LogFlushed`), so writes are grouped only by
 the proposer's batches: one batch in RaftCore at a time (was three),
@@ -1530,12 +1544,25 @@ Tracked live in the Claude task system. Snapshot of the order:
       revision has been compacted` / `is a future revision` OutOfRange);
       KeepAlive of an unknown lease answers TTL 0, as etcd's does.
     Work items:
-    - [ ] storage Refusal + raise sites; raft Refused response, apply,
+    - [x] storage Refusal + raise sites; raft Refused response, apply,
       precheck, ForwardWrite; server mapping, lease keepalive, compaction.
-    - [ ] Tests: apply-level (raft, refused entry + batch neighbours
+    - [x] Tests: apply-level (raft, refused entry + batch neighbours
       applied, replay), gRPC single node (put/txn/compact/keepalive),
       3-member (cluster keeps serving after each).
-    - [ ] Docs, changelog; release; close #49.
+    - [x] Docs, changelog; release; close #49.
+    - Changed while doing it: etcd grants a TTL <= 0 at its minimum
+      (2 s) rather than refusing it, so the handler raises it before
+      proposing; 0 < TTL < 2 is still granted as asked (#108, P3).
+      Local Range errors now carry etcd's text (clientv3 matches
+      ErrCompacted by message).
+    - Verified: sc-build of 44c90f7, 348 tests pass; the only failure
+      was a load-timing flake in `wal_log_store` (#109/#110, deadlines
+      widened). New tests: `refused_apply.rs` (raft), `refused_requests.rs`
+      (gRPC), `multinode_grpc::a_refused_request_stops_no_member`. With
+      the state machine's refusal handling patched out on dev, both raft
+      tests, the 3-member test and 2 of 5 gRPC tests fail, the 3-member
+      one with the issue's `apply failed: etcdserver: key not found`
+      (Unavailable); the other gRPC cases are caught by the precheck.
 
 44. **3 members: multi-second write maxima under read_latency (#83, P2).**
     Worked while #49 is paused (its WIP is on branch

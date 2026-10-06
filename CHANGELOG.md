@@ -3,7 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-10-06
+## [v1.14.0] — 2026-10-06
+
+### 2026-10-06 — a request that cannot apply stops no member (#49)
 - **fix:** A request that cannot apply no longer stops every member
   (#49, P0). A put with `ignore_value`/`ignore_lease` on a missing key
   (alone, in a Txn, or in a batch with other clients' writes), `Compact`
