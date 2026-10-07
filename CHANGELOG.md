@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.17.1] — 2026-10-07
+
 ### 2026-10-07 — online defragment after a non-durable commit (#119)
 - **fix:** `Maintenance.Defragment` (and the space monitor's reclaim)
   failed with "A transaction is still in progress" whenever the newest

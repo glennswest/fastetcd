@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.17.0`** — A batch takes what queued (#94, P1): `MAX_BATCH` 256 →
+**`1.17.1`** — Online `Defragment` works on a member taking writes
+(#119): redb refuses to compact while its newest commit is non-durable
+(every apply since #71), so it failed always on 1.9–1.11 and until the
+next checkpoint since 1.12; it now makes one empty durable commit under
+its exclusive lock first. Found by the new test container (#36:
+`test/`, `/test short|medium|long`, `tests/test_container.sh`).
+
+Previous: **`1.17.0`** — A batch takes what queued (#94, P1): `MAX_BATCH` 256 →
 4096 (bytes stay 512 KiB), so 1000 waiting clients share fsyncs by the
 hundreds (test: 500 per 200 ms fsync, was 222). Replication reads are
 bounded to 1 MiB of entries per AppendEntries (`REPLICATION_BYTES`):
@@ -1791,10 +1798,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       RSS, fds, db size after defrag; a slower wave or growing residue
       fails.
     Work items:
-    - [ ] `test/` crate (workspace member, not a default member, so the
+    - [x] `test/` crate (workspace member, not a default member, so the
       golden's `cargo build` is unchanged), build.sh, Containerfile,
       requires.toml, README.
-    - [ ] sc-build: build.sh stages static binaries; run `medium` and a
-      short-against-a-local-member in the job.
-    - [ ] `stormcentral test run fastetcd short` on a test machine.
-    - [ ] Docs (02-testing), changelog; close #36.
+    - [x] sc-build: build.sh stages static binaries; run `medium` and a
+      short-against-a-local-member in the job (`tests/test_container.sh`:
+      short 7/7, medium 7/7, long 2 waves + trend, at c2ef8cb).
+    - [ ] `stormcentral test run fastetcd short` on a test machine: run
+      61d20de68e queued on pvetest1 (2026-10-07; fleet backed up).
+    - [x] Docs (02-testing), changelog.
+    - Found: online defragment broken after any non-durable commit
+      (#119, fixed in 1.17.1).
