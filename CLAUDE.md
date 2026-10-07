@@ -1723,3 +1723,27 @@ Tracked live in the Claude task system. Snapshot of the order:
       checks stubbed (all 5 fail).
     - [x] Docs (auth section), changelog; release; close #47.
     - Verified: sc-build of 45d8c4b, 360 pass, 1 = #45's flake.
+
+49. **A batch takes what queued, bounded by bytes (#94, P1).** Since #95
+    one batch is in RaftCore at a time and the next forms from all that
+    queued, but `MAX_BATCH = 256` proposals (512 KiB) caps one fsync at
+    1000 clients (etcd ~350–450 per fsync there). The cap was a guard for
+    replication: a batch is one log entry, an entry cannot be split
+    across AppendEntries, the peer port decodes at most tonic's default
+    4 MiB per message, and nothing bounded an AppendEntries' size
+    (openraft sends up to 300 entries: 8 full batches already exceed
+    4 MiB, which a follower refuses and openraft resends forever, as a
+    Network error). Plan:
+    - WAL log reader: `limited_get_log_entries` (used only by openraft's
+      replication) returns entries up to `REPLICATION_BYTES` (3 MiB of
+      encoded entries, always at least one), so an AppendEntries stays
+      under 4 MiB, which 1.10–1.16 followers accept too.
+    - Proposer: `MAX_BATCH` 256 → 4096, `MAX_BATCH_BYTES` 512 KiB → 2 MiB
+      (under `REPLICATION_BYTES`, so one batch always fits in one RPC).
+    - Peer port decodes up to 16 MiB (a single client write near 4 MiB
+      plus the RPC's framing could exceed 4 MiB).
+    Work items:
+    - [ ] Code; tests: limited read bound (many entries; one entry over
+      the bound); 1000 writers on a 200 ms fsync share fsyncs beyond 256;
+      3 members replicate full batches to a lagging follower.
+    - [ ] Docs (00, 03 group commit), changelog; release; close #94.
