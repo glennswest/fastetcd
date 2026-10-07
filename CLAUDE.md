@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.16.0`** — Raft snapshots carry the lease tables (#41, P1).
+**`1.16.1`** — Lease RPCs are authorized (#47, P1), with etcd's
+release-3.5 rules over the keys attached to the lease, root exempt:
+revoke and keep-alive need write on each, time-to-live with keys and
+lease-leases read, a put (or txn put) naming a lease write on its keys.
+
+Previous: **`1.16.0`** — Raft snapshots carry the lease tables (#41, P1).
 A member caught up by a snapshot had no record of leases granted before
 it (and kept stale ones): their keys never expired there, and a revoke
 left them behind on it alone. `LeaseTables` travel in a second trailer
@@ -1711,9 +1716,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `LeaseGrant`: a login (the interceptor).
     Checked at the API layer against the serving member's applied auth
     state, as #22/#31; etcd checks put and revoke at apply. Work items:
-    - [ ] storage: keys attached to a lease, and to all leases.
-    - [ ] server: lease.rs checks; kv.rs put/txn lease accesses.
-    - [ ] Tests `authz_lease.rs`: each denied for a user lacking the
-      permission, allowed with it and for root, open with auth off;
-      negative check with the checks stubbed.
-    - [ ] Docs (auth section), changelog; release; close #47.
+    - [x] storage: keys attached to a lease, and to all leases.
+    - [x] server: lease.rs checks; kv.rs put/txn lease accesses.
+    - [x] Tests `authz_lease.rs`: each denied for a user lacking the
+      permission, allowed with it and for root; negative check with the
+      checks stubbed (all 5 fail).
+    - [x] Docs (auth section), changelog; release; close #47.
+    - Verified: sc-build of 45d8c4b, 360 pass, 1 = #45's flake.

@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.16.1] — 2026-10-06
+
 ### 2026-10-06 — lease RPCs are authorized (#47)
 - **fix:** With auth on, the lease RPCs are checked against the keys
   attached to the lease, as etcd's are (#47, P1). Any logged-in user
