@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.16.1`** — Lease RPCs are authorized (#47, P1), with etcd's
+**`1.17.0`** — A batch takes what queued (#94, P1): `MAX_BATCH` 256 →
+4096 (bytes stay 512 KiB), so 1000 waiting clients share fsyncs by the
+hundreds (test: 500 per 200 ms fsync, was 222). Replication reads are
+bounded to 1 MiB of entries per AppendEntries (`REPLICATION_BYTES`):
+openraft 0.9.24 sent up to 300 entries in one message and gives it one
+heartbeat interval, so a member far behind on large entries never
+caught up. Peer port decodes up to 16 MiB.
+
+Previous: **`1.16.1`** — Lease RPCs are authorized (#47, P1), with etcd's
 release-3.5 rules over the keys attached to the lease, root exempt:
 revoke and keep-alive need write on each, time-to-live with keys and
 lease-leases read, a put (or txn put) naming a lease write on its keys.
@@ -1747,7 +1755,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Peer port decodes up to 16 MiB (a single client write near 4 MiB
       plus the RPC's framing could exceed 4 MiB).
     Work items:
-    - [ ] Code; tests: limited read bound (many entries; one entry over
+    - [x] Code; tests: limited read bound (many entries; one entry over
       the bound); 1000 writers on a 200 ms fsync share fsyncs beyond 256;
-      3 members replicate full batches to a lagging follower.
-    - [ ] Docs (00, 03 group commit), changelog; release; close #94.
+      a learner added after ~24 MiB of batches catches up from the log.
+    - [x] Docs (00, 03 group commit), changelog; release; close #94.
+    - Verified: sc-build of fc11ea3, whole workspace green (364). 1000
+      writers: 500 per fsync (cap 256 put back: 222, fails). Learner:
+      caught up 2/2 (~47 s); replication bound disabled: never.
+    - Not verified: the issue's slow-VM bench (benchslow is gone).

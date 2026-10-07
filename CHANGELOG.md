@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.17.0] — 2026-10-07
+
 ### 2026-10-06 — a batch takes what queued, bounded by bytes (#94)
 - **perf:** A batch of proposals takes everything that queued, up to
   4096 (was 256) or 512 KiB (unchanged), so with 1000 clients waiting
