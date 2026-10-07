@@ -78,7 +78,7 @@ start() { # start <name> <extra flags...>
     local name=$1; shift
     CP=$(port)
     EP=https://127.0.0.1:$CP
-    "$BIN" --name "$name" --data-dir "$WORK/$name" --listen-client-urls "$EP" \
+    "$BIN" --data-dir "$WORK/$name" --listen-client-urls "$EP" \
         --advertise-client-urls "$EP" --listen-peer-urls "http://127.0.0.1:$(port)" \
         --listen-metrics-url "" --cert-file "$P/server.pem" --key-file "$P/server.key" "$@" \
         >"$WORK/$name.log" 2>&1 &
