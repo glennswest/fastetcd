@@ -2027,3 +2027,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of cce91ae, whole workspace green (387 tests);
       with the gate forced open the older-member test fails. Filed #134
       (MemberAdd does not refuse a member older than 1.22 afterwards).
+
+58. **#95 measured on an X9 blade (#101, P2) — done (docs; no release).**
+    server3 (one 7200 rpm disk, release 11.91 = fastetcd v1.18.0), leased;
+    `tests/bench/blade_pods.py`, 6 runs x 5 pods 3 s apart, metrics off
+    :2381. Report p50 39.5 ms (target < 30 not met; v1.12 236–1,040),
+    p90 660 ms; slow reports = WAL fsyncs of 300–550 ms (disk stalls,
+    checkpoints of 1.1–1.6 s in most of those windows, not all); 1.0–1.4
+    proposals per fsync, so no queueing. `docs/benchmarks/blade-server3.md`.
+    Follow-up #135 (checkpoint vs WAL on a spindle; a disk mode for the
+    test container to measure it there).

@@ -565,6 +565,9 @@ put. Its lease keepalive was cut off at 300 s (~1.8/s).
   slower than its one-put txn on dev-ssd.
 - **#89**: the X9 acceptance and stormcentral's power-cut stage for v1.12.
 
+On a real X9 blade (server3, fastetcd v1.18.0), the kubelet's status
+report: [blade-server3.md](blade-server3.md) (#101).
+
 ## Reproducing
 
 ```
