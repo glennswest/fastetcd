@@ -238,6 +238,23 @@ impl KvStore for RedbEngine {
         .map_err(|e| StorageError::Io(Box::new(e)))?
     }
 
+    /// redb's non-durable commit writes its pages into the file
+    /// (`non_durable_commit` → `write_barrier` → `flush_write_buffer`,
+    /// redb 2.6.3) without an fsync, so an fdatasync of the file through
+    /// another descriptor writes them to the device, outside redb's writer
+    /// lock. The durable commit that follows then writes only its header
+    /// and what came since (fastetcd#93).
+    async fn presync(&self) -> StorageResult<()> {
+        let path = self.inner.path.clone();
+        task::spawn_blocking(move || -> StorageResult<()> {
+            std::fs::File::open(&path)
+                .and_then(|f| f.sync_data())
+                .map_err(StorageError::io)
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?
+    }
+
     async fn size_on_disk(&self) -> StorageResult<u64> {
         let path = self.inner.path.clone();
         let sz = task::spawn_blocking(move || -> StorageResult<u64> {

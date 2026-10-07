@@ -21,7 +21,15 @@
 //!
 //! A commit with `sync = true` flushes first and then commits to the
 //! engine, so order is kept. If the layers hold more than the byte
-//! budget, a commit flushes before returning (back-pressure).
+//! budget, or more than [`MAX_LAYERS`] layers, a commit flushes before
+//! returning (back-pressure).
+//!
+//! The checkpoint's [`sync`] does not hold the flush lock through the
+//! data file's fsync (fastetcd#93): it flushes the layers under the lock,
+//! fsyncs the file with no lock held ([`KvStore::presync`]), then takes
+//! the lock again to flush what came meanwhile and commit durably, which
+//! has little left to write. So a commit that has to flush (back-pressure)
+//! waits for a flush, not for an fsync of everything the checkpoint wrote.
 //!
 //! [`sync`]: KvStore::sync
 
@@ -40,6 +48,11 @@ use crate::kvstore::{
 
 /// Default byte budget of the layers before a commit has to flush.
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Most layers before a commit has to flush: every commit copies the
+/// layer list and every read walks it, so a checkpoint that cannot keep up
+/// must not let thousands pile up (fastetcd#93).
+pub const MAX_LAYERS: usize = 1024;
 
 /// One committed batch, normalized: within a table, the point results
 /// (`Some` = put, `None` = deleted) win over the range deletes, which
@@ -136,6 +149,10 @@ pub struct WriteBehindStats {
     /// Commits that had to flush first because the layers were over
     /// their budget.
     pub backpressure: AtomicU64,
+    /// How long those commits waited for their flush.
+    pub backpressure_nanos: AtomicU64,
+    /// The checkpoints' fsyncs of the data file outside the flush lock.
+    pub presync_nanos: AtomicU64,
 }
 
 struct Inner {
@@ -235,19 +252,36 @@ impl KvStore for WriteBehind {
             list.push(layer);
             layers.list = Arc::new(list);
             self.publish(&layers);
-            layers.bytes > self.inner.max_bytes
+            layers.bytes > self.inner.max_bytes || layers.list.len() > MAX_LAYERS
         };
         if over {
+            let t = Instant::now();
             self.inner.stats.backpressure.fetch_add(1, Ordering::Relaxed);
-            self.flush().await?;
+            let r = self.flush().await;
+            self.inner
+                .stats
+                .backpressure_nanos
+                .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            r?;
         }
         Ok(())
     }
 
     async fn sync(&self) -> StorageResult<()> {
+        // The layers into the engine (non-durable), then the file's fsync
+        // with the flush lock free, then the durable commit of whatever is
+        // left: commits that must flush meanwhile wait for a flush only.
+        self.flush().await?;
+        let t = Instant::now();
+        self.inner.base.presync().await?;
+        self.inner.stats.presync_nanos.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let _g = self.inner.flush_lock.lock().await;
         self.flush_locked().await?;
         self.inner.base.sync().await
+    }
+
+    async fn presync(&self) -> StorageResult<()> {
+        self.inner.base.presync().await
     }
 
     async fn size_on_disk(&self) -> StorageResult<u64> {
@@ -635,5 +669,108 @@ mod tests {
         assert!(s.stats().layer_bytes.load(Ordering::Relaxed) <= 4096 + 200);
         let snap = s.snapshot().await.unwrap();
         assert_eq!(snap.count("t", Bound::Unbounded, Bound::Unbounded).await.unwrap(), 100);
+    }
+
+    #[tokio::test]
+    async fn too_many_layers_flush_too() {
+        let (_d, s) = open();
+        for i in 0..(MAX_LAYERS as u32 + 10) {
+            let mut b = WriteBatch::new();
+            b.put("t", &i.to_be_bytes(), b"v");
+            s.commit(b, WriteOptions { sync: false }).await.unwrap();
+        }
+        assert!(s.stats().backpressure.load(Ordering::Relaxed) > 0);
+        assert!(s.stats().layers.load(Ordering::Relaxed) as usize <= MAX_LAYERS);
+    }
+
+    /// An engine whose fsync takes 1 ms per KiB written since the last
+    /// one, as a slow disk's does: what makes a checkpoint slow.
+    struct DirtyDisk {
+        base: RedbEngine,
+        dirty: AtomicU64,
+    }
+
+    impl DirtyDisk {
+        async fn fsync(&self) {
+            let kib = self.dirty.swap(0, Ordering::Relaxed) / 1024;
+            tokio::time::sleep(std::time::Duration::from_millis(kib)).await;
+        }
+    }
+
+    #[async_trait]
+    impl KvStore for DirtyDisk {
+        async fn snapshot(&self) -> StorageResult<Arc<dyn Snapshot>> {
+            self.base.snapshot().await
+        }
+        async fn commit(&self, batch: WriteBatch, opts: WriteOptions) -> StorageResult<()> {
+            let bytes: usize = batch
+                .ops()
+                .iter()
+                .map(|op| match op {
+                    BatchOp::Put { key, value, .. } => key.len() + value.len(),
+                    _ => 16,
+                })
+                .sum();
+            self.dirty.fetch_add(bytes as u64, Ordering::Relaxed);
+            self.base.commit(batch, opts).await
+        }
+        async fn sync(&self) -> StorageResult<()> {
+            self.fsync().await;
+            self.base.sync().await
+        }
+        async fn presync(&self) -> StorageResult<()> {
+            self.fsync().await;
+            Ok(())
+        }
+        async fn size_on_disk(&self) -> StorageResult<u64> {
+            self.base.size_on_disk().await
+        }
+        fn engine_name(&self) -> &'static str {
+            "dirty-disk"
+        }
+    }
+
+    /// fastetcd#93: while a checkpoint fsyncs 2 MiB (2 s here), a commit
+    /// over the budget flushes and goes on; it used to wait for that whole
+    /// fsync under the flush lock.
+    #[tokio::test]
+    async fn back_pressure_does_not_wait_for_the_checkpoints_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DirtyDisk { base: RedbEngine::open(dir.path().join("db")).unwrap(), dirty: AtomicU64::new(0) };
+        let s = WriteBehind::new(Arc::new(disk), 64 * 1024);
+        for i in 0..64u32 {
+            let mut b = WriteBatch::new();
+            b.put("t", &i.to_be_bytes(), &[1u8; 32 * 1024]);
+            s.commit(b, WriteOptions { sync: false }).await.unwrap();
+        }
+        s.flush().await.unwrap();
+        let checkpoint = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                let t = std::time::Instant::now();
+                s.sync().await.unwrap();
+                t.elapsed()
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let before = s.stats().backpressure.load(Ordering::Relaxed);
+        let mut slowest = std::time::Duration::ZERO;
+        for i in 0..20u32 {
+            let mut b = WriteBatch::new();
+            b.put("u", &i.to_be_bytes(), &[2u8; 40 * 1024]);
+            let t = std::time::Instant::now();
+            s.commit(b, WriteOptions { sync: false }).await.unwrap();
+            slowest = slowest.max(t.elapsed());
+        }
+        let pressured = s.stats().backpressure.load(Ordering::Relaxed) - before;
+        let took = checkpoint.await.unwrap();
+        assert!(pressured >= 10, "the commits went over the budget: {pressured}");
+        assert!(
+            slowest < std::time::Duration::from_millis(500),
+            "an over-budget commit waited {slowest:?} during a {took:?} checkpoint"
+        );
+        assert!(took >= std::time::Duration::from_millis(1500), "the checkpoint's fsync ran: {took:?}");
+        let snap = s.snapshot().await.unwrap();
+        assert_eq!(snap.count("u", Bound::Unbounded, Bound::Unbounded).await.unwrap(), 20);
     }
 }

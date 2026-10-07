@@ -91,7 +91,7 @@ run() {
         for i in $(seq "$MEMBERS"); do
             echo "-- metrics of member $i"
             curl -sf "http://127.0.0.1:$((23810 + i))/metrics" |
-                grep -E '^(fastetcd_wal|fastetcd_checkpoint|fastetcd_proposal|etcd_server_(is_leader|leader_changes|proposals_pending))' || true
+                grep -E '^(fastetcd_wal|fastetcd_checkpoint|fastetcd_write_behind|fastetcd_proposal|etcd_server_(is_leader|leader_changes|proposals_pending))' || true
         done
         echo "-- members' elections and slow fsyncs:"
         grep -hE "slow raft WAL|vote|elect|leader" "$dir"/log* | grep -E "WARN|INFO" | tail -n 40 || true

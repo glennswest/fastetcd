@@ -282,6 +282,14 @@ pub trait KvStore: Send + Sync + 'static {
     /// Durably flush every batch committed with `sync = false` so far.
     async fn sync(&self) -> StorageResult<()>;
 
+    /// Write what non-durable commits have left in the OS's cache to the
+    /// device, taking no lock a commit needs, so a [`sync`](Self::sync)
+    /// right after has little left to flush (fastetcd#93). Does not make
+    /// anything durable by itself. Default: nothing.
+    async fn presync(&self) -> StorageResult<()> {
+        Ok(())
+    }
+
     /// Best-effort estimate of the on-disk size in bytes. Used for
     /// `Maintenance.Status.dbSize`. May be approximate.
     async fn size_on_disk(&self) -> StorageResult<u64>;

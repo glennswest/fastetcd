@@ -71,7 +71,11 @@
 //!     write-behind layer: `fastetcd_write_behind_bytes` / `_batches`
 //!     (gauges), `fastetcd_write_behind_flushes_total`,
 //!     `fastetcd_write_behind_flush_seconds_total`,
-//!     `fastetcd_write_behind_backpressure_total` (counters)
+//!     `fastetcd_write_behind_backpressure_total`,
+//!     `fastetcd_write_behind_backpressure_seconds_total` (time those
+//!     applies waited), `fastetcd_write_behind_presync_seconds_total` (the
+//!     checkpoints' fsyncs of the data file outside the flush lock, #93)
+//!     (counters)
 //!
 //! Registered from the server's live [`Traffic`](crate::traffic::Traffic)
 //! when the endpoint starts (fastetcd#29; see that module):
@@ -704,6 +708,8 @@ pub struct WalMetrics {
     wb_flushes: Counter,
     wb_flush_seconds: Counter<f64, AtomicU64>,
     wb_backpressure: Counter,
+    wb_backpressure_seconds: Counter<f64, AtomicU64>,
+    wb_presync_seconds: Counter<f64, AtomicU64>,
 }
 
 impl WalMetrics {
@@ -730,6 +736,8 @@ impl WalMetrics {
             wb_flushes: Counter::default(),
             wb_flush_seconds: Counter::default(),
             wb_backpressure: Counter::default(),
+            wb_backpressure_seconds: Counter::default(),
+            wb_presync_seconds: Counter::default(),
         }
     }
 
@@ -831,6 +839,16 @@ impl WalMetrics {
             self.wb_backpressure.clone(),
         );
         reg.register(
+            "fastetcd_write_behind_backpressure_seconds",
+            "Time those applies waited for their write-out",
+            self.wb_backpressure_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_write_behind_presync_seconds",
+            "Checkpoints' fsyncs of the data file, run outside the flush lock (fastetcd#93)",
+            self.wb_presync_seconds.clone(),
+        );
+        reg.register(
             "fastetcd_checkpoint_durable_applied_index",
             "Applied raft index (+1) the last checkpoint made durable in the data file",
             self.durable_applied.clone(),
@@ -867,6 +885,8 @@ impl WalMetrics {
         catch_up(&self.wb_flushes, load(&s.flushes));
         catch_up_seconds(&self.wb_flush_seconds, load(&s.flush_nanos));
         catch_up(&self.wb_backpressure, load(&s.backpressure));
+        catch_up_seconds(&self.wb_backpressure_seconds, load(&s.backpressure_nanos));
+        catch_up_seconds(&self.wb_presync_seconds, load(&s.presync_nanos));
     }
 }
 
