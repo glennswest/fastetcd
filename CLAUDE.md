@@ -1961,3 +1961,24 @@ Tracked live in the Claude task system. Snapshot of the order:
       the fix 0 of 40.
     - [x] Full workspace green (sc-build of fdc26a2, 376 tests); docs
       (04), changelog; release 1.20.1; close #45.
+
+56. **fastetcd-ctl talks to a TLS client port (#59, P2).** It took only
+    `--endpoint` and `--user`, so `status`, `defrag`, `alarm` and
+    `auth members/adopt` (no etcdctl equivalent) were unreachable on a
+    member with `--cert-file`. Plan (etcdctl's options):
+    - `--cacert`, `--cert`, `--key` (`ETCDCTL_CACERT`/`_CERT`/`_KEY`).
+      `--cacert` is required for `https://`: the ctl has no system trust
+      roots (tonic `tls` only; platform CAs are private anyway). `--cert`
+      and `--key` go together. TLS options with an `http://` endpoint,
+      or `https://` without `--cacert`, are errors naming the flag:
+      never a silent plaintext dial.
+    - An endpoint without a scheme (etcdctl's `127.0.0.1:2379`) is
+      `https://` with TLS options, else `http://`.
+    - One channel for every command; `--user`'s token goes on every
+      command (it went only on `auth`), as etcdctl's `--user` does.
+    Work items:
+    - [ ] ctl: options, one connect, token everywhere; unit tests.
+    - [ ] `tests/ctl_tls.sh` (real binaries, openssl CA): server TLS
+      only and `--client-cert-auth`; every command over TLS; the
+      refusals.
+    - [ ] Docs (01, 03), changelog; release; close #59.
