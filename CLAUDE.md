@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.25.0`** — Health routes check what etcd's do (#69,
+**`1.25.1`** — `tests/rolling_upgrade.sh` (#65): real rolling upgrades
+and a downgrade of three member processes. Fixed what it found: a lagging
+member's auth digest taken for divergence (`AuthGate::check` re-surveys
+for 3 s); the pre-version safety backup taken after the WAL migration.
+
+Previous: **`1.25.0`** — Health routes check what etcd's do (#69,
 `crates/server/src/health.rs`): /health (alarms, leader, read),
 /livez (serializable read), /readyz (CORRUPT, reads, non-learner);
 grpc.health.v1 follows /readyz; chart probes /livez + /readyz.
@@ -2226,7 +2231,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       now follows /readyz and would restart members on quorum loss).
     - [x] Docs (README, 01, 03), changelog; release 1.25.0; close #69.
 
-66. **A real rolling upgrade, process restarts included (#65, P2).** Every
+66. **A real rolling upgrade, process restarts included (#65, P2) — done, shipped in v1.25.1.** Every
     mixed-version rule (#32 AuthSync, #50 ForwardRead, #75/#77 batching,
     #85 WAL migration, #41 lease trailer, #56/#92 version gates) was
     tested in process with a simulated older peer. Plan:
@@ -2240,5 +2245,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     member is >= 1.10 and on after, no member behind at the end.
     Scenarios: A v1.9.0 → tree, B v1.24.1 → tree, C tree → v1.24.1.
     Work items:
-    - [ ] Script; A, B, C on sc-build; fix what they find.
-    - [ ] Docs (02-testing, 03 upgrades), changelog; close #65.
+    - [x] Script; A, B, C on sc-build; fix what they find.
+    - [x] Docs (02-testing, 03 upgrades), changelog; release 1.25.1;
+      close #65.
+    - Found and fixed: (1) an auth change through a second member right
+      after one through the first refused as divergence while a member
+      had not applied the first (`AuthGate::check` now re-surveys up to
+      3 s; `a_member_behind_by_an_entry_is_not_divergence`, a member that
+      answers two surveys late; the control without it is refused);
+      (2) the pre-version safety backup ran after the raft log's move
+      into the WAL (1.12+), so it lacked the data file's log; it now runs
+      first, and the script checks the order. Old versions' own #105 bug
+      (a token not yet applied on another member: own text, no
+      re-authentication) means the script sets up through one member.
