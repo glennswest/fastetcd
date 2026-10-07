@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.20.1`** — An abandoned snapshot transfer keeps the retained
+**`1.21.0`** — `fastetcd-ctl` reaches a TLS client port (#59):
+etcdctl's `--cacert`/`--cert`/`--key` (`ETCDCTL_*`), required CA for
+`https://`, mismatches refused; one channel, `--user`'s token on every
+command. `tests/ctl_tls.sh`.
+
+Previous: **`1.20.1`** — An abandoned snapshot transfer keeps the retained
 snapshot (#45): beginning a receive no longer rolls it off (openraft
 resends a timed-out InstallSnapshot and drops the duplicate, which left
 a member with none); `adopt` enforces retention, ENOSPC on receive still
@@ -1962,7 +1967,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Full workspace green (sc-build of fdc26a2, 376 tests); docs
       (04), changelog; release 1.20.1; close #45.
 
-56. **fastetcd-ctl talks to a TLS client port (#59, P2).** It took only
+56. **fastetcd-ctl talks to a TLS client port (#59, P2) — done, shipped in v1.21.0.** It took only
     `--endpoint` and `--user`, so `status`, `defrag`, `alarm` and
     `auth members/adopt` (no etcdctl equivalent) were unreachable on a
     member with `--cert-file`. Plan (etcdctl's options):
@@ -1977,8 +1982,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     - One channel for every command; `--user`'s token goes on every
       command (it went only on `auth`), as etcdctl's `--user` does.
     Work items:
-    - [ ] ctl: options, one connect, token everywhere; unit tests.
-    - [ ] `tests/ctl_tls.sh` (real binaries, openssl CA): server TLS
+    - [x] ctl: options, one connect, token everywhere; unit tests.
+    - [x] `tests/ctl_tls.sh` (real binaries, openssl CA): server TLS
       only and `--client-cert-auth`; every command over TLS; the
-      refusals.
-    - [ ] Docs (01, 03), changelog; release; close #59.
+      refusals. 31/31 at d8885f8.
+    - [x] Docs (01, 02, 03), changelog; release 1.21.0; close #59.
