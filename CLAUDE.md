@@ -2045,7 +2045,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     Follow-up #135 (checkpoint vs WAL on a spindle; a disk mode for the
     test container to measure it there).
 
-59. **LeaseKeepAlive renews in the leader's RAM, as etcd's lessor (#92, P2).**
+59. **LeaseKeepAlive renews in the leader's RAM, as etcd's lessor (#92, P2) — done, shipped in v1.23.0.**
     Every keep-alive was a `FastetcdLogEntry::LeaseKeepAlive` proposal:
     a WAL fsync and an apply each (etcd 126k/s, v1.12 12k/s on dev).
     etcd (release-3.5 `lessor.go`, `v3_server.go`): the leader renews in
@@ -2073,13 +2073,19 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Behaviour change, as etcd without lease checkpointing: a restart
       or leader change gives every lease a full TTL again.
     Work items:
-    - [ ] raft: shared version gate; lessor; ForwardWrite intercept;
+    - [x] raft: shared version gate; lessor; ForwardWrite intercept;
       LeaseTimeToLive RPC + forwarder; server wiring (lease.rs,
-      lease_expiry.rs, main, harnesses).
-    - [ ] Tests: renewals add no log entries and keep a lease past its
+      lease_expiry.rs, main, harnesses); metrics.
+    - [x] Tests: renewals add no log entries and keep a lease past its
       persisted deadline; expiry once they stop; follower keep-alive;
       leader change keeps a renewed lease, then expires it; an older
       member → renewals through Raft.
-    - [ ] fastetcd-bench `--mode keepalive`; v1.22.0 vs this on dev.
-    - [ ] Docs (03 leases, mixed versions), changelog; release 1.23.0;
-      close #92.
+    - [x] fastetcd-bench `--mode keepalive`; v1.22.0 vs this on dev.
+    - [x] Docs (00, 01, 03 leases, mixed versions, metrics), changelog;
+      release 1.23.0; close #92.
+    - Verified: sc-build of f519c65, 390 tests pass, 1 failure
+      (`membership_changes_forward_from_a_follower`, under a concurrent
+      bench; 5/5 alone; #136). `tests/keepalive_bench.sh v1.22.0` (100
+      clients, 50k): 1 member 4 526 → 239 358/s, p99 105 → 0.96 ms; 3
+      members via a follower 1 694 → 27 256/s, via the leader 2 488 →
+      99 820/s; WAL fsyncs in the run ~2 000 → 10–105.
