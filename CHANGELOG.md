@@ -17,7 +17,7 @@
   a follower of an older leader answers itself, as before); expiry uses
   the later of the persisted deadline and the RAM renewal, and is still a
   `LeaseRevoke` through Raft.
-- a new leader, or a restarted single
+- A new leader, or a restarted single
   member, gives every lease a full TTL from when it leads (etcd's
   `Promote`), since renewals live only in the old leader's RAM. A lease
   can outlive its TTL by up to one TTL across a leader change, which
