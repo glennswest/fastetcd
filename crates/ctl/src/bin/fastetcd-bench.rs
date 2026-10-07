@@ -1,7 +1,8 @@
 //! Minimal concurrent load generator for fastetcd — throughput and
 //! latency for put / linearizable-get / serializable-get, and the read
 //! latency under write load of fastetcd#71 (`read-under-load`), and a
-//! crash test (`durability-write` / `durability-check`, fastetcd#90).
+//! crash test (`durability-write` / `durability-check`, fastetcd#90), and
+//! lease keep-alive throughput (`keepalive`, fastetcd#92).
 //! Not a full benchmark suite; enough to characterize a cluster. Speaks
 //! the plain etcd v3 API, so it runs against upstream etcd as well.
 
@@ -19,7 +20,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:2379")]
     endpoint: String,
     /// put | get-lin | get-ser | read-under-load | durability-write |
-    /// durability-check
+    /// durability-check | keepalive
     #[arg(long, default_value = "put")]
     mode: String,
     /// durability-check: the `acked <client> <count>` lines
@@ -197,6 +198,46 @@ fn dur_key(client: usize, i: u64) -> Vec<u8> {
 /// put fails (the server was killed) or `duration_secs` pass. Prints, per
 /// client, how many puts were acknowledged: `acked <client> <count>`. A
 /// put counts only once its response arrived.
+/// `conns` clients, each with its own lease (TTL 60 s) and keep-alive
+/// stream, sending a keep-alive and awaiting its answer, `total` in all:
+/// etcd's `benchmark lease-keepalive` (fastetcd#92).
+async fn keepalive(args: &Args) -> anyhow::Result<()> {
+    use fastetcd_proto::etcdserverpb::lease_client::LeaseClient;
+    let per = args.total / args.conns;
+    let mut handles = Vec::new();
+    let start = Instant::now();
+    for _ in 0..args.conns {
+        let endpoint = args.endpoint.clone();
+        handles.push(tokio::spawn(async move {
+            let mut lc = LeaseClient::connect(endpoint).await?;
+            let id = lc.lease_grant(pb::LeaseGrantRequest { ttl: 60, id: 0 }).await?.into_inner().id;
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let mut answers =
+                lc.lease_keep_alive(tokio_stream::wrappers::ReceiverStream::new(rx)).await?.into_inner();
+            let mut local = Vec::with_capacity(per);
+            for _ in 0..per {
+                let t = Instant::now();
+                tx.send(pb::LeaseKeepAliveRequest { id }).await?;
+                let a = tokio_stream::StreamExt::next(&mut answers)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("keep-alive stream ended"))??;
+                anyhow::ensure!(a.ttl > 0, "lease {id} answered TTL {}", a.ttl);
+                local.push(t.elapsed().as_micros() as u64);
+            }
+            anyhow::Ok(local)
+        }));
+    }
+    let mut lat = Vec::with_capacity(args.total);
+    for h in handles {
+        lat.extend(h.await??);
+    }
+    let elapsed = start.elapsed();
+    println!("mode=keepalive conns={} ops={}", args.conns, lat.len());
+    println!("  throughput: {:.0} ops/sec", lat.len() as f64 / elapsed.as_secs_f64());
+    println!("  latency: {}", summary(lat));
+    Ok(())
+}
+
 async fn durability_write(args: &Args) -> anyhow::Result<()> {
     let value = vec![b'x'; args.val_bytes];
     let deadline = Instant::now() + std::time::Duration::from_secs(args.duration_secs);
@@ -283,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
         "read-under-load" => return read_under_load(&args).await,
         "durability-write" => return durability_write(&args).await,
         "durability-check" => return durability_check(&args).await,
+        "keepalive" => return keepalive(&args).await,
         _ => {}
     }
     let value = vec![b'x'; args.val_bytes];

@@ -17,6 +17,7 @@
 # slow-fsync log lines, to match the bench's slowest writes against (#83).
 # DATA_ROOT=/dev/shm puts the data dirs on tmpfs instead: no fsync can
 # stall there, so a stall that remains is fastetcd's, not the disk's.
+# BENCH_ARGS replaces the bench's arguments (tests/keepalive_bench.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -76,8 +77,10 @@ run() {
     # leader may be either, so both a leader and a follower get measured.
     for i in $(seq "$((MEMBERS > 1 ? 2 : 1))"); do
         echo "-- client port of member $i"
-        if ! "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" --mode read-under-load \
-            --conns 40 --duration-secs 20 --probes 200 2>"$dir/bench.err"; then
+        # shellcheck disable=SC2086
+        if ! "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" \
+            ${BENCH_ARGS:---mode read-under-load --conns 40 --duration-secs 20 --probes 200} \
+            2>"$dir/bench.err"; then
             echo "BENCH FAILED: $(grep -m1 -o 'message: "[^"]*"' "$dir/bench.err" || tail -n 2 "$dir/bench.err")"
             echo "-- members' elections, warnings and errors:"
             grep -hiE "vote|elect|leader|WARN|ERROR|panic" "$dir"/log* | tail -n 60 || true
