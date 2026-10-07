@@ -119,7 +119,7 @@ goal is a drop-in replacement, not a fork of behavior.
 | Auth | Token / per-key RBAC | Token / per-key RBAC |
 | TLS | Yes | Yes |
 | Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
-| Health | grpc.health.v1, `/health` | grpc.health.v1, `/health`, `/livez`, `/readyz` |
+| Health | grpc.health.v1, `/health` | grpc.health.v1, `/health`, `/livez`, `/readyz`, with etcd's checks (leader, alarms, reads; #69) |
 | JSON gateway | `/v3/...` (grpc-gateway) | `/v3/...`, same routes and JSON ([docs](docs/03-deploy.md#v3-json-gateway)) |
 | Data import | n/a | `fastetcd-migrate` reads etcd BoltDB snapshots |
 

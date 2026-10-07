@@ -6,6 +6,35 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.25.0] — 2026-10-07
+
+### Changed
+- `/health`, `/livez` and `/readyz` check what etcd's check (#69,
+  `crates/server/src/health.rs`; etcd release-3.5 `etcdhttp/health.go`).
+  They always answered healthy. `/health`: an alarm on this member
+  (`ALARM NOSPACE` / `ALARM CORRUPT`, `?exclude=` to skip), no leader
+  (`RAFT NO LEADER`, unless `?serializable=true`), then a keys-only read,
+  linearizable unless serializable, within 5 s + 2x the election timeout
+  (`RANGE ERROR:…`): 503 `{"health":"false","reason":…}`, else 200
+  `{"health":"true","reason":""}`. `/livez`: `serializable_read`.
+  `/readyz`: `data_corruption`, `serializable_read`, `linearizable_read`,
+  `non_learner`; per-check routes, `?exclude=`, `?verbose`; 503 with
+  `[-]<check> failed: …` lines. A member restored from a backup (CORRUPT,
+  #37) is unhealthy and not ready until disarmed, as etcd's.
+- `grpc.health.v1` follows `/readyz` (every service and `""`, checked
+  every second); it was SERVING from start to end.
+- Helm chart: liveness `GET /livez`, readiness `GET /readyz` (were gRPC
+  health probes, which would now restart members on quorum loss).
+
+### Added
+- `etcd_server_health_success_total` / `etcd_server_health_failures_total`.
+- Tests `health_checks.rs` (healthy, NOSPACE, CORRUPT, no leader,
+  excludes, verbose, per-check routes); `health_http.rs` checks the
+  binary's bodies and grpc.health.v1.
+
+### Documentation
+- 03 § Health checks; 01, README.
+
 ## [v1.24.1] — 2026-10-07
 
 ### Fixed

@@ -16,7 +16,7 @@ plain switches.
 
 | Port (default) | Flag | Serves |
 |---|---|---|
-| 2379, `127.0.0.1` | `--listen-client-urls` | etcd v3 gRPC (KV, Watch, Lease, Cluster, Maintenance, Auth), `grpc.health.v1`, fastetcd's `FastetcdAdmin` (`auth members`, `auth adopt`); HTTP `GET /health`, `/livez`, `/readyz`; the v3 JSON gateway `POST /v3/...` |
+| 2379, `127.0.0.1` | `--listen-client-urls` | etcd v3 gRPC (KV, Watch, Lease, Cluster, Maintenance, Auth), `grpc.health.v1`, fastetcd's `FastetcdAdmin` (`auth members`, `auth adopt`); HTTP `GET /health`, `/livez`, `/readyz` (etcd's checks: leader, alarms, reads; 03 § Health checks); the v3 JSON gateway `POST /v3/...` |
 | 2380, `127.0.0.1` | `--listen-peer-urls` | raft between members (`fastetcd.raft.RaftPeer`: AppendEntries, Vote, InstallSnapshot, write/read/membership forwarding, AuthSync) |
 | 2381, `127.0.0.1` | `--listen-metrics-url` | Prometheus `GET /metrics` (plain HTTP; empty disables) |
 

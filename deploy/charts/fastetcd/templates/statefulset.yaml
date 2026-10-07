@@ -98,13 +98,24 @@ spec:
               containerPort: {{ .Values.ports.peer }}
             - name: metrics
               containerPort: {{ .Values.ports.metrics }}
+          # etcd's split (#69): ready means leader, quorum read and no
+          # CORRUPT alarm; live means this member can serve a local read,
+          # so a partition does not get members restarted.
           readinessProbe:
-            grpc:
+            httpGet:
+              path: /readyz
               port: {{ .Values.ports.client }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             periodSeconds: 5
           livenessProbe:
-            grpc:
+            httpGet:
+              path: /livez
               port: {{ .Values.ports.client }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             periodSeconds: 10
             failureThreshold: 6
           volumeMounts:

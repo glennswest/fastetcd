@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.24.1`** — Write-behind back-pressure does not wait behind the
+**`1.25.0`** — Health routes check what etcd's do (#69,
+`crates/server/src/health.rs`): /health (alarms, leader, read),
+/livez (serializable read), /readyz (CORRUPT, reads, non-learner);
+grpc.health.v1 follows /readyz; chart probes /livez + /readyz.
+
+Previous: **`1.24.1`** — Write-behind back-pressure does not wait behind the
 checkpoint's fsync (#93): `WriteBehind::sync` flushes under the lock,
 fsyncs the data file with no lock (`KvStore::presync`), then commits
 durably; back-pressure also past `MAX_LAYERS` (1024) layers.
@@ -2197,7 +2202,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       (0.35–0.46 s in all). Not reproducible without a slow disk: the
       issue's 1–1.7 s fsyncs (dev, retired) and its put-vs-txn-put gap.
 
-65. **/health, /livez, /readyz check what etcd's check (#69, P2).** They
+65. **/health, /livez, /readyz check what etcd's check (#69, P2) — done, shipped in v1.25.0.** They
     always answered healthy. etcd release-3.5 `etcdhttp/health.go`:
     - `/health[?serializable=true][&exclude=NOSPACE|CORRUPT]`: an alarm →
       503 `{"health":"false","reason":"ALARM NOSPACE"}`; unless
@@ -2214,6 +2219,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `grpc.health.v1` follows /readyz (checked every second).
     - `etcd_server_health_success_total` / `_failures_total`.
     Work items:
-    - [ ] `health.rs`, routes, gRPC status task, metrics; tests of each
-      state (no leader, NOSPACE, CORRUPT, learner, excludes, timeout).
-    - [ ] Docs (README, 01, 03), changelog; release; close #69.
+    - [x] `health.rs`, routes, gRPC status task, metrics; tests of each
+      state (no leader, NOSPACE, CORRUPT, excludes, verbose, per-check).
+      Learner and timeout: by code, not tested.
+    - [x] Chart probes: liveness /livez, readiness /readyz (gRPC health
+      now follows /readyz and would restart members on quorum loss).
+    - [x] Docs (README, 01, 03), changelog; release 1.25.0; close #69.

@@ -802,6 +802,34 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
 - `--enable-grpc-gateway=false` (or `ETCD_ENABLE_GRPC_GATEWAY=false`)
   turns it off. gRPC and `/health` are unaffected.
 
+## Health checks
+
+On the client port, as etcd's (since 1.25, #69; before that they always
+answered healthy):
+
+| Route | Healthy | Not (503) |
+|---|---|---|
+| `GET /health` | `{"health":"true","reason":""}` | `{"health":"false","reason":…}`: `ALARM NOSPACE` / `ALARM CORRUPT` (this member's alarm), `RAFT NO LEADER`, `RANGE ERROR:…` (a linearizable keys-only read failed or took longer than 5 s + 2x the election timeout) |
+| `GET /health?serializable=true` | as above, without the leader check and with a local read: is this process serving | |
+| `GET /livez` | `ok` | `serializable_read` failed |
+| `GET /readyz` | `ok` | `data_corruption` (CORRUPT alarm), `serializable_read`, `linearizable_read`, `non_learner` |
+
+`?exclude=NOSPACE` / `?exclude=CORRUPT` on `/health`, and
+`?exclude=<check>` on `/livez` / `/readyz`, skip one; `?verbose` lists
+every check's `[+]name ok` / `[-]name failed: …` line, which a failure
+always shows. Each check also has its own route (`/readyz/linearizable_read`).
+`grpc.health.v1` follows `/readyz`: every service, and `""`, is SERVING
+while it passes (checked every second). Counters
+`etcd_server_health_success_total` / `etcd_server_health_failures_total`.
+
+Point a **liveness** probe at `/livez` (it never fails on quorum loss,
+so a partition does not get members restarted) and **readiness** at
+`/readyz`; the Helm chart does. Alarms are this member's: fastetcd raises
+NOSPACE and CORRUPT per member rather than cluster-wide. CORRUPT means
+the store restored itself from a backup (#37): the member serves, but
+`/health` and `/readyz` say false until `etcdctl alarm disarm`, as
+etcd's do. A probe that should keep routing to it excludes the alarm.
+
 ## Metrics
 
 Prometheus text on `GET /metrics` at `--listen-metrics-url`, refreshed
