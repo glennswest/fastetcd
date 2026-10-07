@@ -1,0 +1,13 @@
+== r4 on server3 at 18:19:40Z
+== idle 30 s before: 30.0 s, 57 WAL fsyncs (1.90/s), avg fsync 8.0 ms, proposals/fsync 1.04, entries/fsync 1.00, puts 54, txns 51, checkpoints 36 using 0.72 s of disk (2%), pace 112 ms; max fsync since start 84.717 s
+create r4-t1: 201
+create r4-t2: 201
+create r4-t3: 201
+create r4-t4: 201
+create r4-t5: 201
+r4-t1 scheduled=379ms wait=5.5ms image=0.1ms volumes=20ms sandbox=240ms init=0.0ms containers=22ms report=21ms total=308ms attempts=1 workers=1/192 pending=1 sandbox/acquire=4.3ms sandbox/cni=235ms sandbox/status=0.0ms sandbox/other=0.4ms volume/kube-api-access-p5wg7=20ms container/c=22ms
+r4-t2 scheduled=477ms wait=7.1ms image=0.1ms volumes=24ms sandbox=257ms init=0.0ms containers=22ms report=52ms total=362ms attempts=1 workers=1/192 pending=1 sandbox/acquire=4.3ms sandbox/cni=252ms sandbox/status=0.0ms sandbox/other=0.4ms volume/kube-api-access-2qr96=24ms container/c=22ms
+r4-t3 scheduled=715ms wait=6.9ms image=0.1ms volumes=23ms sandbox=287ms init=0.0ms containers=24ms report=818ms total=1160ms attempts=1 workers=1/192 pending=1 sandbox/acquire=4.3ms sandbox/cni=282ms sandbox/status=0.0ms sandbox/other=0.4ms volume/kube-api-access-l4dmr=23ms container/c=24ms
+r4-t4 scheduled=1901ms wait=7.6ms image=0.9ms volumes=32ms sandbox=273ms init=0.0ms containers=21ms report=6.5ms total=342ms attempts=1 workers=1/192 pending=1 sandbox/acquire=4.3ms sandbox/cni=269ms sandbox/status=0.0ms sandbox/other=0.3ms volume/kube-api-access-hg8m5=29ms container/c=21ms
+r4-t5 scheduled=765ms wait=8.8ms image=0.1ms volumes=16ms sandbox=280ms init=0.0ms containers=26ms report=30ms total=362ms attempts=1 workers=1/192 pending=1 sandbox/acquire=4.3ms sandbox/cni=275ms sandbox/status=0.0ms sandbox/other=0.5ms volume/kube-api-access-nbhr2=16ms container/c=26ms
+== 5-pod run: 18.4 s, 70 WAL fsyncs (3.80/s), avg fsync 127.9 ms, proposals/fsync 1.16, entries/fsync 1.00, puts 80, txns 79, checkpoints 16 using 2.82 s of disk (15%), pace 197 ms; max fsync since start 84.717 s
