@@ -69,7 +69,8 @@ async fn put_without_token_rejected_when_auth_enabled() {
         })
         .await
         .expect_err("should be rejected without a token");
-    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    // etcd's ErrUserEmpty (#105).
+    assert_eq!((err.code(), err.message()), (tonic::Code::InvalidArgument, "etcdserver: user name is empty"));
 }
 
 #[tokio::test]

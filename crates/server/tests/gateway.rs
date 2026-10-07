@@ -275,9 +275,11 @@ async fn auth_applies_to_the_gateway() {
     let root = login("root", "rootpw").await;
     let alice = login("alice", "pw").await;
 
-    // No token, or a bad one: 401, code 16.
+    // No token: etcd's ErrUserEmpty, 400 code 3; a bad one:
+    // ErrInvalidAuthToken, 401 code 16 (#105).
     let (code, err) = env.post("/v3/kv/range", json!({"key": b64("config/a")}), None).await;
-    assert_eq!((code, &err["code"]), (401, &json!(16)), "{err}");
+    assert_eq!((code, &err["code"]), (400, &json!(3)), "{err}");
+    assert_eq!(err["message"], json!("etcdserver: user name is empty"));
     let (code, _) = env.post("/v3/maintenance/status", json!({}), Some("not-a-token")).await;
     assert_eq!(code, 401);
 

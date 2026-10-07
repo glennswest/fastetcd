@@ -279,10 +279,11 @@ async fn a_cn_with_no_matching_user_is_refused() {
     let mut kv = KvClient::new(s.as_cn("mallory").await);
     let err = kv.range(get("config/a")).await.unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
-    // A certificate with no Common Name identifies no one.
+    // A certificate with no Common Name identifies no one: etcd's
+    // ErrUserEmpty (#105).
     let mut kv = KvClient::new(s.as_cn("").await);
     let err = kv.range(get("config/a")).await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!((err.code(), err.message()), (Code::InvalidArgument, "etcdserver: user name is empty"), "{err:?}");
 }
 
 #[tokio::test]
@@ -305,7 +306,11 @@ async fn a_token_wins_over_the_certificate() {
     let mut req = Request::new(get("config/a"));
     req.metadata_mut().insert("token", MetadataValue::from_static("not-a-token"));
     let err = kv.range(req).await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(
+        (err.code(), err.message()),
+        (Code::Unauthenticated, "etcdserver: invalid auth token"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -314,5 +319,5 @@ async fn without_client_cert_auth_the_certificate_names_no_one() {
     configure(&s).await;
     let mut kv = KvClient::new(s.as_cn("root").await);
     let err = kv.range(get("config/a")).await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!((err.code(), err.message()), (Code::InvalidArgument, "etcdserver: user name is empty"), "{err:?}");
 }

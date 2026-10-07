@@ -343,7 +343,7 @@ async fn a_change_made_on_one_member_is_enforced_on_every_member() {
 
     for n in &nodes {
         let err = get(n, None, "config/a").await.unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated, "member {}: {err:?}", n.id);
+        assert_eq!(err.code(), Code::InvalidArgument, "member {}: {err:?}", n.id);
         let mut u = users(n).await;
         u.sort();
         assert_eq!(u, vec!["alice", "root"], "member {}", n.id);
@@ -437,7 +437,7 @@ async fn a_learner_caught_up_by_a_snapshot_gets_the_auth_state() {
     u.sort();
     assert_eq!(u, vec!["alice", "root"]);
     let err = get(&learner, None, "config/000").await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated);
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
 
     // Tokens are not in snapshots (as in etcd), but one issued now
     // replicates to the learner.
@@ -550,7 +550,7 @@ async fn adopt_needs_root_while_auth_is_on() {
         .unwrap_err();
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
     let err = admin.auth_members(apb::AuthMembersRequest {}).await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
     let root = login(&nodes[0], "root", "rootpw").await.unwrap();
     admin
         .auth_members(with_token(apb::AuthMembersRequest {}, &root))

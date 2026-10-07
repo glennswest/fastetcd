@@ -101,6 +101,18 @@ async fn user_grant_role_then_get_lists_it() {
     assert_eq!(got.roles, vec!["ops".to_string()]);
 }
 
+/// Authenticate needs auth on, as in etcd: add root and enable it.
+async fn enable_with_root(c: &mut AuthClient<tonic::transport::Channel>) {
+    c.user_add(pb::AuthUserAddRequest {
+        name: "root".to_string(),
+        password: "rootpw".to_string(), // not a secret: test fixture
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    c.auth_enable(pb::AuthEnableRequest {}).await.unwrap();
+}
+
 #[tokio::test]
 async fn authenticate_returns_a_token_for_valid_credentials() {
     let h = start_test_server_full().await;
@@ -112,6 +124,7 @@ async fn authenticate_returns_a_token_for_valid_credentials() {
     })
     .await
     .unwrap();
+    enable_with_root(&mut c).await;
     let resp = c
         .authenticate(pb::AuthenticateRequest {
             name: "carol".to_string(),
@@ -124,8 +137,9 @@ async fn authenticate_returns_a_token_for_valid_credentials() {
     assert_eq!(resp.token.len(), 64); // hex of 32 random bytes
 }
 
+/// etcd's answers, which clientv3 recognises by their text (#105).
 #[tokio::test]
-async fn authenticate_rejects_wrong_password() {
+async fn authenticate_answers_as_etcd_does() {
     let h = start_test_server_full().await;
     let mut c = AuthClient::connect(h.endpoint.clone()).await.unwrap();
     c.user_add(pb::AuthUserAddRequest {
@@ -135,14 +149,24 @@ async fn authenticate_rejects_wrong_password() {
     })
     .await
     .unwrap();
-    let err = c
-        .authenticate(pb::AuthenticateRequest {
-            name: "dan".to_string(),
-            password: "wrong-pass".to_string(), // not a secret: test fixture
-        })
-        .await
-        .expect_err("should fail");
-    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    let login = |name: &str, password: &str| pb::AuthenticateRequest {
+        name: name.to_string(),
+        password: password.to_string(),
+    };
+    let err = c.authenticate(login("dan", "right-pass")).await.expect_err("auth is off"); // not a secret: test fixture
+    assert_eq!(
+        (err.code(), err.message()),
+        (tonic::Code::FailedPrecondition, "etcdserver: authentication is not enabled")
+    );
+    enable_with_root(&mut c).await;
+    let failed = (
+        tonic::Code::InvalidArgument,
+        "etcdserver: authentication failed, invalid user ID or password",
+    );
+    let err = c.authenticate(login("dan", "wrong-pass")).await.expect_err("wrong password"); // not a secret: test fixture
+    assert_eq!((err.code(), err.message()), failed);
+    let err = c.authenticate(login("nobody", "x")).await.expect_err("no such user"); // not a secret: test fixture
+    assert_eq!((err.code(), err.message()), failed);
 }
 
 #[tokio::test]

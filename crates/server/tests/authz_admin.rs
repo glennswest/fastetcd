@@ -246,8 +246,10 @@ async fn root_and_the_root_role_may_do_everything() {
 async fn without_a_token_admin_calls_are_unauthenticated() {
     let e = setup().await;
     let mut a = e.auth().await;
+    // etcd: no token is ErrUserEmpty, a token naming no one
+    // ErrInvalidAuthToken (#105).
     let err = a.auth_disable(pb::AuthDisableRequest {}).await.unwrap_err();
-    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!((err.code(), err.message()), (Code::InvalidArgument, "etcdserver: user name is empty"), "{err:?}");
     let err = a
         .user_grant_role(as_user(
             pb::AuthUserGrantRoleRequest { user: "alice".into(), role: "root".into() },
