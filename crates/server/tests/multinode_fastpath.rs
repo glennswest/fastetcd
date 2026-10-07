@@ -463,7 +463,7 @@ fn max_term(nodes: &[Node]) -> u64 {
     nodes.iter().map(|n| n.raft.metrics().borrow().current_term).max().unwrap_or(0)
 }
 
-/// fastetcd#103: every WAL fsync takes `stall`, and two writes go through
+/// fastetcd#103: every WAL fsync takes `stall`, and four writes go through
 /// the leader. openraft 0.9 sends heartbeats from RaftCore, which waits
 /// for each append's fsync, so the leader is silent for each stall.
 /// Returns (term before, highest term after, leader before, leader after).
@@ -485,7 +485,7 @@ async fn writes_through_stalls(timing: Timing, stall: Duration, everyone: bool) 
         n.log.set_sync_delay(stall);
     }
     let mut kv = KvClient::connect(nodes[(leader - 1) as usize].client.clone()).await.unwrap();
-    for i in 0..2 {
+    for i in 0..4 {
         // A put may fail while leadership moves; the term says what happened.
         let put = kv.put(pb::PutRequest { key: format!("stall{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() });
         let _ = tokio::time::timeout(Duration::from_secs(60), put).await;
@@ -508,6 +508,7 @@ async fn an_fsync_stall_longer_than_the_election_timeout_elects_again() {
     let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
     let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
     eprintln!("1 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
+    assert!(after > before, "no election during 6 s fsync stalls at a 1 s election timeout (term {before})");
 }
 
 /// With `--election-timeout` above the stall (10 s: 30-40 s with the
@@ -526,4 +527,5 @@ async fn a_stall_on_the_leader_alone_at_a_1s_election_timeout() {
     let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
     let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), false).await;
     eprintln!("1 s election timeout, 6 s fsyncs on the leader only: term {before} -> {after}, leader {l0} -> {l1}");
+    assert!(after > before, "no election while the leader alone stalled 6 s (term {before})");
 }
