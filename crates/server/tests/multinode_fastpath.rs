@@ -94,6 +94,12 @@ impl RaftPeer for Peer {
         }
         self.inner.confirm_leader(r).await
     }
+    async fn lease_time_to_live(&self, r: Request<rpb::RaftPayload>) -> R {
+        if self.older {
+            return Err(Status::unimplemented("LeaseTimeToLive"));
+        }
+        self.inner.lease_time_to_live(r).await
+    }
 }
 
 async fn start_node(id: NodeId, older: bool) -> Node {

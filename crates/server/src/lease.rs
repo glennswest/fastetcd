@@ -1,21 +1,19 @@
 //! Implementation of the etcd `Lease` gRPC service.
 //!
-//! Phase 1: Grant / Revoke / KeepAlive / TimeToLive / Leases all
-//! route through Raft via `FastetcdLogEntry::Lease*` (mutations) or
-//! direct `MvccStore` reads (TimeToLive / Leases).
-//!
-//! **Known gap:** there is no background ticker that auto-revokes
-//! expired leases. The TTL machinery is correct (deadline is
-//! persisted; TimeToLive reports remaining seconds) but expired
-//! leases stay attached until a client explicitly revokes them. A
-//! follow-up commit will add a leader-side ticker that proposes
-//! `LeaseRevoke` entries for any lease whose deadline is past.
+//! Grant and Revoke go through Raft (`FastetcdLogEntry::Lease*`). A
+//! keep-alive is renewed in the leader's RAM by its lessor
+//! (`fastetcd_raft::lessor`, fastetcd#92): a follower forwards it, and
+//! while any member is older than 1.23 it is proposed through Raft as
+//! before. TimeToLive is answered by the leader. Expiry is the leader's
+//! sweeper (`lease_expiry`), which proposes the revoke.
 
 use std::pin::Pin;
 use std::sync::Arc;
 
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::lease_server::Lease;
+use fastetcd_raft::lessor::Renewal;
+use fastetcd_raft::network::TtlForwardError;
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use fastetcd_storage::mvcc::Refusal;
 use tokio::sync::mpsc;
@@ -76,6 +74,30 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// TimeToLive as the leader knows it (#92): keep-alives live in the
+/// leader's RAM, so a follower asks the leader. A leader older than 1.23
+/// logs every keep-alive, so then the follower's own table is right.
+async fn time_to_live(
+    state: &ServerState,
+    id: i64,
+    keys: bool,
+) -> Result<Option<fastetcd_storage::mvcc::LeaseTtlResult>, Status> {
+    let internal = |e: fastetcd_storage::mvcc::MvccError| Status::internal(format!("lease_ttl: {e}"));
+    let m = state.raft.metrics().borrow().clone();
+    match m.current_leader {
+        Some(leader) if leader != m.id => {
+            match state.forwarder.lease_time_to_live(leader, id, keys).await {
+                Ok(t) => Ok(t),
+                Err(TtlForwardError::Older) => state.lessor.time_to_live(id, keys).await.map_err(internal),
+                Err(TtlForwardError::Failed(e)) => Err(Status::unavailable(format!(
+                    "lease TimeToLive from leader {leader:x}: {e}"
+                ))),
+            }
+        }
+        _ => state.lessor.time_to_live(id, keys).await.map_err(internal),
+    }
 }
 
 #[tonic::async_trait]
@@ -160,13 +182,23 @@ impl Lease for LeaseService {
                     let _ = tx.send(Err(status)).await;
                     break;
                 }
-                let res = match state
-                    .propose(FastetcdLogEntry::LeaseKeepAlive {
-                        id: req.id,
-                        now_unix: now_unix(),
-                    })
-                    .await
-                {
+                // The leader renews in RAM (#92); a follower forwards, and
+                // the leader renews it there.
+                let renewed = match state.lessor.renew(req.id).await {
+                    Renewal::Renewed(t) => Ok(FastetcdLogResponse::LeaseKeepAlive(t)),
+                    Renewal::NotFound => {
+                        Err(Status::not_found(Refusal::LeaseNotFound.message()))
+                    }
+                    Renewal::Propose => {
+                        state
+                            .propose(FastetcdLogEntry::LeaseKeepAlive {
+                                id: req.id,
+                                now_unix: now_unix(),
+                            })
+                            .await
+                    }
+                };
+                let res = match renewed {
                     Ok(data) => data,
                     // etcd answers a keep-alive of a lease that does not
                     // exist (expired, revoked) with TTL 0, not an error;
@@ -223,13 +255,7 @@ impl Lease for LeaseService {
         if req.keys {
             authorize_lease(&self.state, user.as_ref(), RequiredPerm::Read, req.id).await?;
         }
-        let ttl = self
-            .state
-            .sm
-            .mvcc()
-            .lease_ttl(req.id, req.keys, now_unix())
-            .await
-            .map_err(|e| Status::internal(format!("lease_ttl: {e}")))?;
+        let ttl = time_to_live(&self.state, req.id, req.keys).await?;
 
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;

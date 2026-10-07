@@ -49,6 +49,12 @@ service RaftPeer {
     // member can decode batched log entries. A member older than this
     // RPC answers Unimplemented.
     rpc ConfirmLeader(RaftPayload) returns (RaftPayload);
+
+    // TimeToLive answered by the leader (#92): keep-alives are renewed
+    // in the leader's RAM, so a follower's own lease table does not know
+    // a lease's deadline. A member older than this answers Unimplemented
+    // (and still logs every keep-alive, so the follower's table is right).
+    rpc LeaseTimeToLive(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

@@ -5,8 +5,9 @@
 //!
 //!  1. Reads `raft.metrics().current_leader` — bails this tick if
 //!     we're not the leader.
-//!  2. Walks the persisted lease set via `MvccStore::lease_list`.
-//!  3. For each lease whose `deadline_unix_secs < now`, proposes a
+//!  2. Asks the lessor for the leases whose effective deadline (the
+//!     persisted one, or the leader's RAM renewal, #92) has passed.
+//!  3. For each, proposes a
 //!     `FastetcdLogEntry::LeaseRevoke` through `Raft::client_write`.
 //!     Revoke replicates and cascades attached-key deletes through
 //!     the same path explicit revokes use.
@@ -55,19 +56,9 @@ async fn sweep_once(state: &ServerState) -> anyhow::Result<()> {
     if metrics.current_leader != Some(state.member_id) {
         return Ok(());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let ids = state.sm.mvcc().lease_list().await?;
-    for id in ids {
-        let Some(ttl) = state.sm.mvcc().lease_ttl(id, false, now).await? else {
-            continue; // raced with a manual revoke
-        };
-        if ttl.remaining_ttl_secs > 0 {
-            continue;
-        }
+    // Effective deadlines: the later of the persisted one and the
+    // leader's RAM renewal (#92).
+    for id in state.lessor.expired().await? {
         tracing::info!(
             target: "fastetcd::lease_expiry",
             lease_id = id,

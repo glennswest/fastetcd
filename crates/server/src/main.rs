@@ -1385,6 +1385,7 @@ async fn main() -> anyhow::Result<()> {
     let traffic = server_state.traffic.clone();
     let peer_read_index = server_state.read_index.clone();
     let peer_proposer = server_state.proposer.clone();
+    let peer_lessor = server_state.lessor.clone();
     let auth = AuthService::new(server_state);
 
     // Answers other members' ConfirmLeader, serves forwarded reads behind
@@ -1397,6 +1398,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(p) = peer_proposer {
         peer_service = peer_service.with_proposer(p);
     }
+    // Renews forwarded keep-alives in RAM and answers LeaseTimeToLive (#92).
+    peer_service = peer_service.with_lessor(peer_lessor);
 
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;

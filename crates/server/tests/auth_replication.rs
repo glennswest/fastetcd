@@ -89,6 +89,9 @@ impl RaftPeer for OlderPeer {
     async fn confirm_leader(&self, _: Request<rpb::RaftPayload>) -> R {
         Err(Status::unimplemented("ConfirmLeader"))
     }
+    async fn lease_time_to_live(&self, _: Request<rpb::RaftPayload>) -> R {
+        Err(Status::unimplemented("LeaseTimeToLive"))
+    }
 }
 
 #[derive(Clone, Copy, Default)]

@@ -1222,6 +1222,20 @@ impl MvccStore {
             .collect()
     }
 
+    /// Every lease's record (id, granted TTL, persisted deadline), from
+    /// one snapshot: what a new leader's lessor promotes (fastetcd#92).
+    pub async fn lease_records(&self) -> MvccResult<Vec<LeaseRecord>> {
+        let snap = self.inner.engine.snapshot().await?;
+        snap.range(TABLE_LEASE, Bound::Unbounded, Bound::Unbounded, 0)
+            .await?
+            .iter()
+            .map(|(_, v)| {
+                bincode::deserialize(v)
+                    .map_err(|e| MvccError::Internal(format!("deserialize LeaseRecord: {e}")))
+            })
+            .collect()
+    }
+
     /// List all lease IDs.
     pub async fn lease_list(&self) -> MvccResult<Vec<LeaseId>> {
         let snap = self.inner.engine.snapshot().await?;

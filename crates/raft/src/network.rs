@@ -249,6 +249,14 @@ pub enum AuthSyncError {
     Unreachable(String),
 }
 
+/// Why a leader's `LeaseTimeToLive` answer could not be had (#92).
+#[derive(Debug, Clone)]
+pub enum TtlForwardError {
+    /// The leader answered `Unimplemented`: older than 1.23.
+    Older,
+    Failed(String),
+}
+
 /// Why a member's `ConfirmLeader` answer could not be had (#75).
 #[derive(Debug, Clone)]
 pub enum ConfirmError {
@@ -329,6 +337,30 @@ impl WriteForwarder {
         let result: Result<crate::types::FastetcdLogResponse, String> =
             bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
         result
+    }
+
+    /// Ask the leader `target` for lease `id`'s TimeToLive (#92).
+    /// `Ok(None)`: no such lease. [`TtlForwardError::Older`]: `target`
+    /// predates the RPC (it logs keep-alives, so a local answer is right).
+    pub async fn lease_time_to_live(
+        &self,
+        target: NodeId,
+        id: i64,
+        keys: bool,
+    ) -> Result<Option<fastetcd_storage::mvcc::LeaseTtlResult>, TtlForwardError> {
+        let data = bincode::serialize(&(id, keys)).map_err(|e| TtlForwardError::Failed(e.to_string()))?;
+        let mut cli = self.client(target).await.map_err(TtlForwardError::Failed)?;
+        let resp = match cli.lease_time_to_live(Request::new(pb::RaftPayload { data })).await {
+            Ok(r) => r.into_inner(),
+            Err(s) if s.code() == tonic::Code::Unimplemented => return Err(TtlForwardError::Older),
+            Err(s) => {
+                self.clients.write().await.remove(&target);
+                return Err(TtlForwardError::Failed(s.message().to_string()));
+            }
+        };
+        let result: Result<Option<fastetcd_storage::mvcc::LeaseTtlResult>, String> =
+            bincode::deserialize(&resp.data).map_err(|e| TtlForwardError::Failed(e.to_string()))?;
+        result.map_err(TtlForwardError::Failed)
     }
 
     /// Ask `target` for its auth status or tables (fastetcd#32).
@@ -456,11 +488,14 @@ pub struct RaftPeerService {
     proposer: Option<crate::proposer::Proposer>,
     /// The read barrier for forwarded reads and the lease precheck.
     read_index: Option<crate::read_index::LocalReadIndex>,
+    /// Forwarded keep-alives are renewed in RAM, and TimeToLive answered,
+    /// by the leader's lessor (#92).
+    lessor: Option<crate::lessor::Lessor>,
 }
 
 impl RaftPeerService {
     pub fn new(raft: Raft<TypeConfig>, mvcc: fastetcd_storage::mvcc::MvccStore) -> Self {
-        Self { raft, mvcc, progress: None, proposer: None, read_index: None }
+        Self { raft, mvcc, progress: None, proposer: None, read_index: None, lessor: None }
     }
 
     /// Answer `ConfirmLeader` from this node's log store (#75).
@@ -478,6 +513,13 @@ impl RaftPeerService {
     /// Propose forwarded writes through `proposer` (#75).
     pub fn with_proposer(mut self, proposer: crate::proposer::Proposer) -> Self {
         self.proposer = Some(proposer);
+        self
+    }
+
+    /// Renew forwarded keep-alives and answer `LeaseTimeToLive` with
+    /// `lessor` (#92).
+    pub fn with_lessor(mut self, lessor: crate::lessor::Lessor) -> Self {
+        self.lessor = Some(lessor);
         self
     }
 }
@@ -541,6 +583,30 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         let entry: crate::types::FastetcdLogEntry =
             bincode::deserialize(&request.into_inner().data)
                 .map_err(|e| Status::invalid_argument(format!("decode ForwardWrite: {e}")))?;
+        // A keep-alive is renewed in the leader's RAM, not logged (#92).
+        if let (Some(lessor), crate::types::FastetcdLogEntry::LeaseKeepAlive { id, .. }) =
+            (&self.lessor, &entry)
+        {
+            let answer: Option<Result<crate::types::FastetcdLogResponse, String>> =
+                match lessor.renew(*id).await {
+                    crate::lessor::Renewal::Renewed(t) => {
+                        Some(Ok(crate::types::FastetcdLogResponse::LeaseKeepAlive(t)))
+                    }
+                    crate::lessor::Renewal::NotFound => {
+                        let revision = self.mvcc.current_revision().await;
+                        Some(Ok(crate::types::FastetcdLogResponse::Refused {
+                            revision,
+                            refusal: fastetcd_storage::mvcc::Refusal::LeaseNotFound,
+                        }))
+                    }
+                    crate::lessor::Renewal::Propose => None,
+                };
+            if let Some(result) = answer {
+                let data = bincode::serialize(&result)
+                    .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+                return Ok(Response::new(pb::RaftPayload { data }));
+            }
+        }
         // The leader refuses a put naming a lease that does not exist
         // (#19), and a request the state machine would refuse (#49),
         // before proposing it. A node that is not the leader skips the
@@ -575,6 +641,26 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 Err(e) => Err(e.to_string()),
             },
         };
+        let data = bincode::serialize(&result)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn lease_time_to_live(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let Some(lessor) = &self.lessor else {
+            return Err(Status::unimplemented("LeaseTimeToLive is not served by this node"));
+        };
+        let (id, keys): (i64, bool) = bincode::deserialize(&request.into_inner().data)
+            .map_err(|e| Status::invalid_argument(format!("decode LeaseTimeToLive: {e}")))?;
+        let result: Result<Option<fastetcd_storage::mvcc::LeaseTtlResult>, String> =
+            if crate::precheck::is_leader(&self.raft) {
+                lessor.time_to_live(id, keys).await.map_err(|e| e.to_string())
+            } else {
+                Err("not the leader".to_string())
+            };
         let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))

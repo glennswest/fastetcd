@@ -19,6 +19,7 @@
 //! - [`proposer`] — batched proposals (group commit).
 
 pub mod kv_log_store;
+pub mod lessor;
 pub mod log_store;
 pub mod network;
 pub mod precheck;
@@ -29,6 +30,7 @@ pub mod snapshot_policy;
 pub mod snapshot_store;
 pub mod state_machine;
 pub mod types;
+pub mod version_gate;
 pub mod wal_log_store;
 
 pub use network::{

@@ -57,9 +57,8 @@ pub struct ServerState {
     /// Members the leader last found older than 1.10 while the log holds
     /// batched entries they cannot read (`batch_guard`, fastetcd#77).
     pub older_members: Arc<AtomicU64>,
-    /// The membership key (+1) for which every member was found to read
-    /// nested txns (`version_gate`, fastetcd#56); 0 = not yet.
-    pub nested_txn_checked: Arc<AtomicU64>,
+    /// Every member reads nested txns (`version_gate`, fastetcd#56).
+    pub nested_txn_gate: Arc<crate::version_gate::MembersAtLeast>,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -68,6 +67,9 @@ pub struct ServerState {
     /// Batches proposals (group commit, fastetcd#75). `None`: each
     /// proposal is its own `client_write`.
     pub proposer: Option<Proposer>,
+    /// The leader's lease deadlines: keep-alives renewed in RAM
+    /// (fastetcd#92). The peer service shares it.
+    pub lessor: fastetcd_raft::lessor::Lessor,
 }
 
 impl ServerState {
@@ -79,7 +81,10 @@ impl ServerState {
         forwarder: WriteForwarder,
     ) -> Self {
         let auth = sm.mvcc().auth_memory().clone();
+        let lessor =
+            fastetcd_raft::lessor::Lessor::new(raft.clone(), sm.mvcc().clone(), forwarder.clone(), None);
         Self {
+            lessor,
             raft,
             sm,
             cluster_id,
@@ -94,7 +99,9 @@ impl ServerState {
             committed_index: None,
             wal: None,
             older_members: Arc::default(),
-            nested_txn_checked: Arc::default(),
+            nested_txn_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
+                crate::version_gate::NESTED_TXN_SINCE,
+            )),
             write_behind: None,
             read_index: None,
             proposer: None,
@@ -131,7 +138,19 @@ impl ServerState {
             progress,
             self.sm.applied_index(),
         ));
+        self.renew_lessor();
         self
+    }
+
+    /// The lessor confirms leadership through the read index, once there
+    /// is one.
+    fn renew_lessor(&mut self) {
+        self.lessor = fastetcd_raft::lessor::Lessor::new(
+            self.raft.clone(),
+            self.sm.mvcc().clone(),
+            self.forwarder.clone(),
+            self.read_index.clone(),
+        );
     }
 
     /// Serve linearizable reads and batch writes without RaftCore's
@@ -152,6 +171,7 @@ impl ServerState {
             progress,
             self.forwarder.clone(),
         ));
+        self.renew_lessor();
         self
     }
 
