@@ -29,7 +29,10 @@ use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
 use fastetcd_raft::network::{GrpcNetworkFactory, PeerEndpoints, RaftPeerService};
 use fastetcd_raft::types::{NodeId, TypeConfig};
 use fastetcd_raft::FastetcdStateMachine;
+use fastetcd_proto::etcdserverpb::lease_client::LeaseClient;
+use fastetcd_proto::etcdserverpb::lease_server::LeaseServer;
 use fastetcd_server::kv::KvService;
+use fastetcd_server::lease::LeaseService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
@@ -155,7 +158,8 @@ async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
     let peer_service = RaftPeerService::new(raft.clone(), mvcc)
         .with_log_progress(progress)
         .with_read_index(state.read_index.clone().unwrap())
-        .with_proposer(state.proposer.clone().unwrap());
+        .with_proposer(state.proposer.clone().unwrap())
+        .with_lessor(state.lessor.clone());
     let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_url = format!("http://{}", peer_listener.local_addr().unwrap());
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(peer_listener);
@@ -172,11 +176,14 @@ async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
     });
 
     let kv = KvService::new(state.clone());
+    let lease = LeaseService::new(state.clone());
+    fastetcd_server::lease_expiry::spawn_with_tick(state.clone(), Duration::from_millis(200));
     let client_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = format!("http://{}", client_listener.local_addr().unwrap());
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(KvServer::new(kv))
+            .add_service(LeaseServer::new(lease))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(client_listener))
             .await
             .unwrap();
@@ -689,4 +696,121 @@ async fn a_nested_txn_waits_for_every_member_to_read_it() {
         .applied_index_at_least(applied.map(|l| l.index), "the older member applies on")
         .await
         .unwrap();
+}
+
+async fn key_exists(url: &str, key: &[u8]) -> bool {
+    let mut kv = KvClient::connect(url.to_string()).await.unwrap();
+    !kv.range(pb::RangeRequest { key: key.to_vec(), ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner()
+        .kvs
+        .is_empty()
+}
+
+/// `n` keep-alives of `id` through `url`, one a second; each answered
+/// with the lease's TTL.
+async fn keep_alive(url: &str, id: i64, ttl: i64, n: usize) {
+    let mut lc = LeaseClient::connect(url.to_string()).await.unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let mut answers = lc
+        .lease_keep_alive(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    for _ in 0..n {
+        tx.send(pb::LeaseKeepAliveRequest { id }).await.unwrap();
+        let a = tokio_stream::StreamExt::next(&mut answers).await.unwrap().expect("keep-alive");
+        assert_eq!((a.id, a.ttl), (id, ttl));
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Grant a lease of `ttl` through `url` and put `key` on it.
+async fn lease_with_key(url: &str, ttl: i64, key: &[u8]) -> i64 {
+    let mut lc = LeaseClient::connect(url.to_string()).await.unwrap();
+    let id = lc.lease_grant(pb::LeaseGrantRequest { ttl, id: 0 }).await.unwrap().into_inner().id;
+    let mut kv = KvClient::connect(url.to_string()).await.unwrap();
+    kv.put(pb::PutRequest { key: key.to_vec(), value: b"v".to_vec(), lease: id, ..Default::default() })
+        .await
+        .unwrap();
+    id
+}
+
+/// Keep-alives sent to a follower are renewed in the leader's RAM: no
+/// log entry, TimeToLive through the follower sees them, and after a
+/// leader change the new leader gives the lease a full TTL (etcd's
+/// Promote), then expires it once renewals stop (fastetcd#92).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keep_alives_through_a_follower_renew_in_the_leaders_ram() {
+    let nodes = cluster(0).await;
+    let follower = a_follower_of(&nodes);
+    let id = lease_with_key(&follower.client, 4, b"ka/k").await;
+    let leader = leader_of(&nodes);
+    // The gate (every member 1.23+) is asked in the background on the
+    // first keep-alive; let it answer.
+    keep_alive(&follower.client, id, 4, 1).await;
+    sleep(Duration::from_secs(4)).await;
+    keep_alive(&follower.client, id, 4, 1).await;
+    let before = leader.raft.metrics().borrow().last_log_index;
+    let renewed = leader.state.lessor.stats().renewed_in_ram.load(Ordering::Relaxed);
+
+    keep_alive(&follower.client, id, 4, 6).await;
+    assert_eq!(leader.raft.metrics().borrow().last_log_index, before, "a keep-alive was logged");
+    assert_eq!(leader.state.lessor.stats().renewed_in_ram.load(Ordering::Relaxed), renewed + 6);
+    let mut lc = LeaseClient::connect(follower.client.clone()).await.unwrap();
+    let ttl = lc
+        .lease_time_to_live(pb::LeaseTimeToLiveRequest { id, keys: true })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(ttl.ttl >= 2, "the follower's TimeToLive is the leader's: {ttl:?}");
+    assert_eq!(ttl.keys, vec![b"ka/k".to_vec()]);
+
+    // A new leader: the old leader's RAM renewals are gone with it, and
+    // the lease's persisted deadline passed long ago.
+    let old = leader.id;
+    follower.raft.trigger().elect().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while nodes[0].raft.metrics().borrow().current_leader.is_none_or(|l| l == old) {
+        assert!(Instant::now() < deadline, "no new leader");
+        sleep(Duration::from_millis(100)).await;
+    }
+    let changed = Instant::now();
+    let leader = leader_of(&nodes);
+    sleep(Duration::from_secs(2)).await;
+    assert!(key_exists(&leader.client, b"ka/k").await, "the new leader expired a renewed lease");
+    assert!(leader.state.lessor.stats().promotions.load(Ordering::Relaxed) >= 1);
+    // No more renewals: gone within TTL (4 s) after the change, plus the
+    // sweep and the revoke.
+    while key_exists(&leader.client, b"ka/k").await {
+        assert!(changed.elapsed() < Duration::from_secs(12), "the lease never expired");
+        sleep(Duration::from_millis(200)).await;
+    }
+    eprintln!("expired {:?} after the leader change", changed.elapsed());
+}
+
+/// With a member that does not answer as 1.23+, keep-alives go through
+/// raft as before: an older leader would read only persisted deadlines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_member_means_keep_alives_go_through_raft() {
+    let nodes = cluster(1).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while leader_of(&nodes).id == 3 {
+        assert!(Instant::now() < deadline, "node 3 kept the leadership");
+        nodes[0].raft.trigger().elect().await.unwrap();
+        sleep(Duration::from_secs(4)).await;
+    }
+    let leader = leader_of(&nodes);
+    let id = lease_with_key(&leader.client, 3, b"old/k").await;
+    keep_alive(&leader.client, id, 3, 1).await;
+    sleep(Duration::from_secs(4)).await;
+    let before = leader.raft.metrics().borrow().last_log_index.unwrap_or(0);
+    keep_alive(&leader.client, id, 3, 4).await;
+    let after = leader.raft.metrics().borrow().last_log_index.unwrap_or(0);
+    let stats = leader.state.lessor.stats();
+    assert_eq!(stats.renewed_in_ram.load(Ordering::Relaxed), 0);
+    assert!(stats.proposed.load(Ordering::Relaxed) >= 5);
+    assert!(after >= before + 4, "keep-alives were not logged: {before} -> {after}");
+    assert!(key_exists(&leader.client, b"old/k").await);
 }
