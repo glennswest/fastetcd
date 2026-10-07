@@ -146,8 +146,8 @@ gw /v3/auth/enable '{}' >/dev/null
 echo "== auth enabled: users root, alice (no roles)"
 expect_ok "CN root runs auth members (root only)" "${R[@]}" auth members
 expect_ok "CN root runs defrag (root only)" "${R[@]}" defrag
-expect_err "CN alice may not run auth members" "permission denied" "${A[@]}" auth members
-expect_err "CN alice may not put" "permission denied" "${A[@]}" put /app/x 2
+expect_err "CN alice may not run auth members" "PermissionDenied" "${A[@]}" auth members
+expect_err "CN alice may not put" "PermissionDenied" "${A[@]}" put /app/x 2
 expect_ok "--user root's token wins over CN alice, on put" "${A[@]}" --user root:rootpw put /app/x 3
 expect_ok "--user root's token wins over CN alice, on status" "${A[@]}" --user root:rootpw alarm
 expect_err "a wrong --user password is refused" "authentication failed|invalid" \
