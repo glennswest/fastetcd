@@ -1811,3 +1811,44 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (02-testing), changelog.
     - Found: online defragment broken after any non-durable commit
       (#119, fixed in 1.17.1).
+
+51. **Election timeouts are settable; a slow fsync no longer has to cost
+    the leader (#103, P2).** Read in openraft 0.9.24: heartbeats are sent
+    only from RaftCore's `Notify::Tick` handler, and `append_to_log`
+    awaits the append's fsync inside RaftCore, so a leader whose WAL
+    fsync stalls sends no heartbeat until it returns; a stall longer than
+    the followers' election timeout (1–2 s, fixed) elects a new leader.
+    etcd has the same exposure and its remedy: `--heartbeat-interval` /
+    `--election-timeout`. Plan:
+    - Flags `--heartbeat-interval` (ms, 250) and `--election-timeout` (ms,
+      1000), `ETCD_HEARTBEAT_INTERVAL` / `ETCD_ELECTION_TIMEOUT`; election
+      range [t, 2t); etcd's checks (election >= 5x heartbeat, <= 50 s).
+      Defaults unchanged. The heartbeat is also openraft's AppendEntries
+      timeout (#94): documented.
+    - WAL warns when an fsync outlasts the election timeout, naming it.
+    - Test: 3 members, every fsync 2.5 s: the default timeout loses the
+      leader (term rises); `--election-timeout` 10 s keeps it.
+    Work items:
+    - [ ] Flags + validation (unit tests), WAL warning, harness test.
+    - [ ] Docs (01, 03), changelog; close #103 (released with #80).
+
+52. **`--snapshot-count` counts writes again, as etcd's does (#80, P2).**
+    Since #75 a log entry can be a batch of hundreds of proposals, and
+    openraft's `LogsSinceLast` and `max_in_snapshot_log_to_keep` count
+    entries, so the log between snapshots (and kept after a purge) held
+    up to 256x what sizing assumes. Plan (the issue's option 1, extended
+    to the kept log):
+    - The state machine counts proposals per applied entry (a batch's
+      length, else 1; blank/membership 0) in a small (index, cumulative)
+      log.
+    - A task per member: once `--snapshot-count` proposals are applied
+      since the last snapshot, `trigger().snapshot()`; after a snapshot
+      at S, `trigger().purge_log(upto)` with upto the newest index leaving
+      `--max-in-snapshot-log-to-keep` proposals after it. openraft's
+      entry-counted policy stays as the backstop (unbatched, the two
+      agree).
+    - Test: proposals batched into few entries: snapshot after N
+      proposals, log purged to about K proposals.
+    Work items:
+    - [ ] SM proposal log; policy task; main wiring; test.
+    - [ ] Docs (01, 04, sizing text), changelog; release 1.18.0; close #80.
