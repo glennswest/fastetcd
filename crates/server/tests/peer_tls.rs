@@ -148,7 +148,8 @@ async fn start_node(
         tonic::transport::Server::builder()
             .tls_config(server_tls)
             .unwrap()
-            .add_service(RaftPeerServer::new(peer_service))
+            .add_service(RaftPeerServer::new(peer_service)
+                .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
             .serve_with_incoming(incoming)
             .await
             .unwrap();

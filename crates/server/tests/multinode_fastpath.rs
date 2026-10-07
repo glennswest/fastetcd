@@ -10,7 +10,7 @@
 //! than the RPC, nothing is batched, and reads still work.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,38 +42,56 @@ struct Node {
     peers: PeerEndpoints,
     raft: Raft<TypeConfig>,
     state: Arc<ServerState>,
+    lagging: Arc<AtomicBool>,
 }
 
-/// A member older than #75: no `ConfirmLeader`, everything else real.
-struct OlderPeer(RaftPeerService);
+/// A member's peer service, wrapped: `older` makes it a member older
+/// than #75 (no `ConfirmLeader`), and while `lagging` is set it refuses
+/// every AppendEntries that carries entries but still answers heartbeats,
+/// so it stays a follower and falls behind (#94).
+struct Peer {
+    inner: RaftPeerService,
+    older: bool,
+    lagging: Arc<AtomicBool>,
+}
 
 type R = Result<Response<rpb::RaftPayload>, Status>;
 
 #[tonic::async_trait]
-impl RaftPeer for OlderPeer {
+impl RaftPeer for Peer {
     async fn append_entries(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.append_entries(r).await
+        if self.lagging.load(Ordering::Relaxed) {
+            let req: openraft::raft::AppendEntriesRequest<TypeConfig> =
+                bincode::deserialize(&r.get_ref().data).unwrap();
+            if !req.entries.is_empty() {
+                return Err(Status::unavailable("lagging (test)"));
+            }
+        }
+        self.inner.append_entries(r).await
     }
     async fn vote(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.vote(r).await
+        self.inner.vote(r).await
     }
     async fn install_snapshot(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.install_snapshot(r).await
+        self.inner.install_snapshot(r).await
     }
     async fn forward_write(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.forward_write(r).await
+        self.inner.forward_write(r).await
     }
     async fn forward_membership(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.forward_membership(r).await
+        self.inner.forward_membership(r).await
     }
     async fn forward_read(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.forward_read(r).await
+        self.inner.forward_read(r).await
     }
     async fn auth_sync(&self, r: Request<rpb::RaftPayload>) -> R {
-        self.0.auth_sync(r).await
+        self.inner.auth_sync(r).await
     }
-    async fn confirm_leader(&self, _: Request<rpb::RaftPayload>) -> R {
-        Err(Status::unimplemented("ConfirmLeader"))
+    async fn confirm_leader(&self, r: Request<rpb::RaftPayload>) -> R {
+        if self.older {
+            return Err(Status::unimplemented("ConfirmLeader"));
+        }
+        self.inner.confirm_leader(r).await
     }
 }
 
@@ -130,21 +148,17 @@ async fn start_node(id: NodeId, older: bool) -> Node {
     let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer_url = format!("http://{}", peer_listener.local_addr().unwrap());
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(peer_listener);
+    let lagging = Arc::new(AtomicBool::new(false));
+    let peer = Peer { inner: peer_service, older, lagging: lagging.clone() };
     tokio::spawn(async move {
-        let server = tonic::transport::Server::builder();
-        if older {
-            let mut s = server;
-            s.add_service(RaftPeerServer::new(OlderPeer(peer_service)))
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        } else {
-            let mut s = server;
-            s.add_service(RaftPeerServer::new(peer_service))
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        }
+        tonic::transport::Server::builder()
+            .add_service(
+                RaftPeerServer::new(peer)
+                    .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES),
+            )
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
     });
 
     let kv = KvService::new(state.clone());
@@ -158,7 +172,7 @@ async fn start_node(id: NodeId, older: bool) -> Node {
             .unwrap();
     });
 
-    Node { _dir: dir, id, peer_url, client, peers, raft, state }
+    Node { _dir: dir, id, peer_url, client, peers, raft, state, lagging }
 }
 
 async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
@@ -339,4 +353,97 @@ async fn an_older_member_means_no_batches() {
     assert_eq!(p.batches.load(Ordering::Relaxed), 0, "batched with an older member present");
     // The current follower and the leader are a quorum: reads stay local.
     assert!(r.quorum.load(Ordering::Relaxed) > 0);
+}
+
+/// fastetcd#94: a follower behind by more batched log than the peer port
+/// takes in one message still catches up. A batch is one log entry, up to
+/// 2 MiB since #94, and openraft sends as many entries as the log reader
+/// hands it (up to 300) in one AppendEntries. Without the WAL reader's
+/// byte bound the leader sends the whole backlog (~24 MiB here, past
+/// even the 16 MiB the peer port now decodes) in one message, the
+/// follower refuses it, and the leader sends it again, forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_far_behind_on_big_batches_catches_up() {
+    const ROUNDS: usize = 12;
+    const WRITERS: usize = 500;
+    let nodes = cluster(0).await;
+    let leader = leader_of(&nodes);
+    let follower = a_follower_of(&nodes);
+    let proposer = leader.state.proposer.as_ref().unwrap();
+
+    // Until batching is on (every member has answered ConfirmLeader).
+    let kv = KvClient::connect(leader.client.clone()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while proposer.stats().batches.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline, "batching never started");
+        let puts: Vec<_> = (0..50)
+            .map(|i| {
+                let mut kv = kv.clone();
+                tokio::spawn(async move {
+                    kv.put(pb::PutRequest { key: format!("warm{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() })
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        for p in puts {
+            p.await.unwrap();
+        }
+    }
+
+    // The follower stops taking entries; ~24 MiB of 4 KiB puts land in
+    // batches meanwhile, committed by the leader and the other member.
+    follower.lagging.store(true, Ordering::Relaxed);
+    let batches_before = proposer.stats().batches.load(Ordering::Relaxed);
+    for round in 0..ROUNDS {
+        let puts: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let mut kv = kv.clone();
+                tokio::spawn(async move {
+                    kv.put(pb::PutRequest {
+                        key: format!("big/{round:02}/{i:04}").into_bytes(),
+                        value: vec![b'x'; 4096],
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                })
+            })
+            .collect();
+        for p in puts {
+            p.await.unwrap();
+        }
+    }
+    let batches = proposer.stats().batches.load(Ordering::Relaxed) - batches_before;
+    let last = leader.raft.metrics().borrow().last_log_index.unwrap();
+    let behind = follower.raft.metrics().borrow().last_log_index.unwrap_or(0);
+    eprintln!("{} puts in {batches} batches; follower at {behind}, leader at {last}", ROUNDS * WRITERS);
+    assert!(batches > 0, "the writes were not batched");
+
+    follower.lagging.store(false, Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let applied = follower.raft.metrics().borrow().last_applied.map(|l| l.index);
+        if applied >= Some(last) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the follower never caught up: applied {applied:?}, leader at {last}"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+    let mut fkv = KvClient::connect(follower.client.clone()).await.unwrap();
+    let got = fkv
+        .range(pb::RangeRequest {
+            key: b"big/".to_vec(),
+            range_end: b"big0".to_vec(),
+            count_only: true,
+            serializable: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.count, (ROUNDS * WRITERS) as i64);
 }

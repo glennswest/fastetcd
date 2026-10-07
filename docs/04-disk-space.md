@@ -136,7 +136,7 @@ itself once occupancy falls back below `--space-clear-percent` (70).
 | `--auto-defrag` | `true` | Let the reclaim path defragment. |
 | `--max-snapshots` | `1` | Snapshots retained on disk. |
 | `--auto-compaction-retention` | `0` | Steady-state compaction (off; Kubernetes drives its own). |
-| `--snapshot-count` | `5000` | Applied log entries between raft snapshots (an entry may be a batch of up to 256 writes, #80). |
+| `--snapshot-count` | `5000` | Applied log entries between raft snapshots (an entry may be a batch of up to 4096 writes / 2 MiB, #80). |
 | `--max-in-snapshot-log-to-keep` | `1000` | Log entries kept after a purge. |
 
 Each has an `ETCD_*` environment fallback where etcd has the same flag,
@@ -246,7 +246,7 @@ The raft-log term assumes 2 KiB per log entry (`--snapshot-count` x
 1.12 the log is in segments in `wal/` written full size up front (#85):
 the one being written, a zero-filled spare ready behind it, and a purged
 segment that stays until a checkpoint covers it. Since 1.10 a leader under concurrent
-writes batches up to 256 proposals (512 KiB) into one entry (#75), and
+writes batches up to 4096 proposals (2 MiB) into one entry (#75, #94), and
 snapshots still come every `--snapshot-count` *entries*, so a busy
 cluster can carry more log between snapshots than the estimate shows.
 The high-water reclaim snapshots and purges it before the volume fills;

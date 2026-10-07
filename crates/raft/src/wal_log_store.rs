@@ -620,7 +620,45 @@ impl WalLogStore {
     }
 }
 
+/// Most encoded entry bytes [`WalLogStore`] hands openraft for one
+/// AppendEntries (fastetcd#94). openraft sends as many entries as the
+/// reader returns (up to 300), and a follower's peer port refused any
+/// message over 4 MiB until 1.17, so a lagging follower sent several
+/// full batches was refused, and sent the same again, forever. 3 MiB
+/// leaves room for the RPC's own framing under the 4 MiB that older
+/// members accept. One entry larger than this still goes, alone.
+pub const REPLICATION_BYTES: u64 = 3 * 1024 * 1024;
+
 impl RaftLogReader<TypeConfig> for WalLogStore {
+    /// Only replication calls this: the entries from `start`, stopping
+    /// before the one that would take their encoded size past
+    /// [`REPLICATION_BYTES`]. Never empty for a non-empty range.
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<Entry<TypeConfig>>, StorageError<NodeId>> {
+        let stop = {
+            let st = self.state.lock().unwrap();
+            let mut bytes = 0u64;
+            let mut stop = end;
+            for (index, slot) in st.entries.range(start..end) {
+                let len = match (&slot.bytes, slot.loc) {
+                    (Some(b), _) => b.len() as u64,
+                    (None, Some(loc)) => u64::from(loc.len),
+                    (None, None) => 0,
+                };
+                if bytes > 0 && bytes + len > REPLICATION_BYTES {
+                    stop = *index;
+                    break;
+                }
+                bytes += len;
+            }
+            stop
+        };
+        self.try_get_log_entries(start..stop).await
+    }
+
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + std::fmt::Debug + Send>(
         &mut self,
         range: RB,

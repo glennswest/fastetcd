@@ -368,10 +368,9 @@ async fn slow_node(
 
 /// Proposals per WAL fsync for `clients` writers that each wait for
 /// their write before the next, as the kubelet's status updates do.
-async fn proposals_per_fsync() -> f64 {
+async fn proposals_per_fsync(clients: usize, each: usize) -> f64 {
     use std::sync::atomic::Ordering::Relaxed;
-    const CLIENTS: usize = 20;
-    const EACH: usize = 3;
+    let (clients_n, each_n) = (clients, each);
     let dir = tempfile::tempdir().unwrap();
     let (raft, log, _sm) = slow_node(dir.path(), Duration::from_millis(200), Duration::ZERO).await;
     let proposer = fastetcd_raft::Proposer::spawn(
@@ -385,12 +384,12 @@ async fn proposals_per_fsync() -> f64 {
         stats.proposals_synced.load(Relaxed),
         stats.entries_synced.load(Relaxed),
     );
-    let tasks: Vec<_> = (0..CLIENTS)
+    let tasks: Vec<_> = (0..clients_n)
         .map(|c| {
             let p = proposer.clone();
             tokio::spawn(async move {
-                for i in 0..EACH {
-                    p.propose(put(c * EACH + i)).await.expect("proposal applied");
+                for i in 0..each_n {
+                    p.propose(put(c * each_n + i)).await.expect("proposal applied");
                 }
             })
         })
@@ -403,7 +402,7 @@ async fn proposals_per_fsync() -> f64 {
         stats.proposals_synced.load(Relaxed),
         stats.entries_synced.load(Relaxed),
     );
-    assert_eq!(p1 - p0, (CLIENTS * EACH) as u64, "every proposal counted once");
+    assert_eq!(p1 - p0, (clients_n * each_n) as u64, "every proposal counted once");
     let per = (p1 - p0) as f64 / (f1 - f0) as f64;
     eprintln!(
         "{} proposals in {} log entries, {} fsyncs: {per:.1} per fsync",
@@ -423,8 +422,70 @@ async fn concurrent_writers_share_a_wal_fsync() {
     // batches queued in RaftCore and a writer waited about four fsyncs:
     // 4.6-4.9 per fsync here. Fsyncs of 200 ms keep a loaded debug
     // build's applies small beside them.
-    let per = proposals_per_fsync().await;
+    let per = proposals_per_fsync(20, 3).await;
     assert!(per >= 8.0, "20 writers, {per:.1} proposals per fsync");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_thousand_writers_are_not_capped_at_256_per_fsync() {
+    // fastetcd#94: a batch held at most 256 proposals, so with 1000
+    // clients waiting one fsync carried at most 256 (etcd: ~350-450 at
+    // 1000 clients on the slow disk). Now bytes bound a batch (2 MiB, here
+    // ~1000 x ~250 B), so the writers settle into groups of hundreds.
+    let per = proposals_per_fsync(1000, 2).await;
+    assert!(per > 300.0, "1000 writers, {per:.1} proposals per fsync");
+}
+
+fn big_put(i: usize, bytes: usize) -> FastetcdLogEntry {
+    FastetcdLogEntry::Apply {
+        mutations: vec![Mutation::Put {
+            key: format!("big{i:04}").into_bytes(),
+            value: vec![b'b'; bytes],
+            lease: 0,
+            prev_kv: false,
+            ignore_value: false,
+            ignore_lease: false,
+        }],
+    }
+}
+
+/// fastetcd#94: what the WAL reader hands replication for one
+/// AppendEntries stays under `REPLICATION_BYTES`, so a follower behind by
+/// many large entries is sent them in several RPCs its peer port accepts,
+/// not one it refuses; an entry larger than the bound goes alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replication_reads_are_bounded_by_bytes() {
+    use fastetcd_raft::wal_log_store::REPLICATION_BYTES;
+    use openraft::RaftLogReader;
+    let dir = tempfile::tempdir().unwrap();
+    let (raft, log, _sm) = slow_node(dir.path(), Duration::ZERO, Duration::ZERO).await;
+    let first = raft.metrics().borrow().last_log_index.unwrap() + 1;
+    // 30 entries of ~400 KiB: ~12 MiB, three times an RPC's worth.
+    for i in 0..30 {
+        raft.client_write(big_put(i, 400 * 1024)).await.unwrap();
+    }
+    let end = raft.metrics().borrow().last_log_index.unwrap() + 1;
+    let mut reader = log.clone();
+    let mut start = first;
+    let mut rpcs = 0;
+    while start < end {
+        let got = reader.limited_get_log_entries(start, end).await.unwrap();
+        assert!(!got.is_empty(), "never empty for a non-empty range");
+        let bytes: u64 = got.iter().map(|e| bincode::serialized_size(e).unwrap()).sum();
+        assert!(bytes <= REPLICATION_BYTES, "{} entries, {bytes} bytes in one read", got.len());
+        assert_eq!(got[0].log_id.index, start, "contiguous from start");
+        start = got.last().unwrap().log_id.index + 1;
+        rpcs += 1;
+    }
+    assert!(rpcs >= 4, "~12 MiB took {rpcs} reads of at most 3 MiB");
+    // One entry over the bound is still returned, alone.
+    raft.client_write(big_put(99, (REPLICATION_BYTES + 1024) as usize)).await.unwrap();
+    let last = raft.metrics().borrow().last_log_index.unwrap();
+    let got = reader.limited_get_log_entries(last, last + 1).await.unwrap();
+    assert_eq!(got.len(), 1);
+    let got = reader.limited_get_log_entries(last - 1, last + 1).await.unwrap();
+    assert_eq!(got.len(), 1, "the entry before it, then the big one on its own");
+    raft.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

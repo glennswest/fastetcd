@@ -139,13 +139,15 @@ async fn start_node(id: NodeId, opts: Opts) -> Node {
     tokio::spawn(async move {
         if opts.older {
             tonic::transport::Server::builder()
-                .add_service(RaftPeerServer::new(OlderPeer(peer_service)))
+                .add_service(RaftPeerServer::new(OlderPeer(peer_service))
+                .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
         } else {
             tonic::transport::Server::builder()
-                .add_service(RaftPeerServer::new(peer_service))
+                .add_service(RaftPeerServer::new(peer_service)
+                .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();

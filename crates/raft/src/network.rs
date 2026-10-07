@@ -69,6 +69,14 @@ pub async fn dial_peer(url: &str, tls: &PeerTls) -> Result<Channel, std::io::Err
 }
 
 #[derive(Clone)]
+/// Most bytes the peer port decodes in one message (fastetcd#94).
+/// tonic's default is 4 MiB, and an AppendEntries holding one client
+/// write near the client port's own 4 MiB limit, plus the RPC's framing,
+/// could exceed it, so the follower refused it and was sent it again,
+/// forever. The WAL reader keeps AppendEntries near 3 MiB
+/// (`wal_log_store::REPLICATION_BYTES`); this is the headroom above it.
+pub const PEER_MAX_DECODE_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct GrpcNetworkFactory {
     peers: PeerEndpoints,
     tls: PeerTls,

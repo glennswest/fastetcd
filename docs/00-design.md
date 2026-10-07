@@ -208,12 +208,14 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 3. Leader proposes through openraft; awaits commit. Proposals queue in
    a `Proposer` (`crates/raft/src/proposer.rs`) and go as one
    `FastetcdLogEntry::Batch` — one RaftCore message, one log append, one
-   fsync (up to 256 proposals, 512 KiB), each applied at its own
+   fsync (up to 4096 proposals or 2 MiB, #94), each applied at its own
    revision with its own answer (#75). RaftCore appends one entry at a
    time and waits for its fsync, so group commit happens here (#95):
    one batch is in RaftCore at a time, and the next is formed the
    moment it is answered, from everything that arrived meanwhile (a
-   write waits about two fsyncs under load, one when alone). A second
+   write waits about two fsyncs under load, one when alone). Replication
+   reads the log in AppendEntries of at most ~3 MiB of entries
+   (`wal_log_store::REPLICATION_BYTES`), so a batch always fits in one. A second
    batch in flight would make RaftCore wait on its fsync before it
    could answer the first; #75 had three, and a write waited about four
    fsyncs. Batches are

@@ -116,7 +116,8 @@ async fn start_node(
     let peer_incoming = tokio_stream::wrappers::TcpListenerStream::new(peer_listener);
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(RaftPeerServer::new(peer_service))
+            .add_service(RaftPeerServer::new(peer_service)
+                .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
             .serve_with_incoming(peer_incoming)
             .await
             .unwrap();

@@ -405,7 +405,11 @@ leader, and the moment it is answered they are proposed together as
 one raft entry, written and synced once. A
 burst of writes pays about one fsync, not one each; a lone write pays
 one. (openraft 0.9 appends one entry at a time and waits for its fsync,
-so the batch is where writes are grouped.)
+so the batch is where writes are grouped.) A batch takes everything that
+queued, up to 4096 writes or 2 MiB, so with a thousand clients waiting
+one fsync carries hundreds of writes, not at most 256 as before 1.17
+(#94). A follower behind is sent the log in AppendEntries of at most
+~3 MiB of entries, and the peer port accepts messages up to 16 MiB.
 
 Applying an entry does not touch the data file: its writes are held in
 RAM (the write-behind layer, up to `--write-behind-bytes`, 64 MiB) and

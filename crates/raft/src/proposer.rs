@@ -45,12 +45,15 @@ use crate::types::{FastetcdLogEntry, FastetcdLogResponse, NodeId, TypeConfig};
 
 /// `client_write`s in flight at once (see the module docs).
 pub const IN_FLIGHT: usize = 1;
-/// Most proposals in one batch.
-pub const MAX_BATCH: usize = 256;
-/// Most encoded bytes in one batch. Peer gRPC decodes up to 4 MiB per
-/// message and a log entry cannot be split across AppendEntries, so a
-/// batch stays far below that; a proposal larger than this goes alone.
-pub const MAX_BATCH_BYTES: u64 = 512 * 1024;
+/// Most proposals in one batch. High enough that bytes, not the count,
+/// bound a batch: with 1000 clients waiting, one fsync should carry them
+/// all, as etcd's does (fastetcd#94; it was 256).
+pub const MAX_BATCH: usize = 4096;
+/// Most encoded bytes in one batch. A batch is one log entry, which
+/// cannot be split across AppendEntries, so it stays under the WAL
+/// reader's replication bound (`wal_log_store::REPLICATION_BYTES`, 3 MiB)
+/// and always fits in one RPC; a proposal larger than this goes alone.
+pub const MAX_BATCH_BYTES: u64 = 2 * 1024 * 1024;
 /// How often a closed gate asks the members again.
 const PROBE_EVERY: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
