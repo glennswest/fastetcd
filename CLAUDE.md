@@ -1694,3 +1694,26 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (03 upgrade note: members caught up before 1.16 may hold
       wrong lease tables; remedy), changelog; release; close #41.
     - Verified: sc-build of 686f580, whole workspace green (356 tests).
+
+48. **Lease RPCs are authorized (#47, P1).** `lease.rs` never called
+    authz: with auth on, any user could revoke any lease (deleting keys
+    it cannot write), list any lease's keys, and attach keys to a lease
+    whose other keys it cannot write. Rules read in etcd release-3.5's
+    source (`apply_auth.go`, `v3_server.go`, `v3rpc/lease.go`), root
+    exempt (`IsAdminPermitted`), each over the keys attached now:
+    - `LeaseRevoke`: write on every key (`checkLeasePuts`).
+    - `LeaseKeepAlive`: write on every key (`checkLeaseRenew`; not in
+      the issue's list). Denied → the stream ends with the error.
+    - `LeaseTimeToLive`: with `keys: true` only, read on every key.
+    - `LeaseLeases`: read on every key of every lease (`checkLeaseLeases`).
+    - `Put` with a lease, and every put in both branches of a Txn
+      (`checkPutAuth`): write on every key already on that lease.
+    - `LeaseGrant`: a login (the interceptor).
+    Checked at the API layer against the serving member's applied auth
+    state, as #22/#31; etcd checks put and revoke at apply. Work items:
+    - [ ] storage: keys attached to a lease, and to all leases.
+    - [ ] server: lease.rs checks; kv.rs put/txn lease accesses.
+    - [ ] Tests `authz_lease.rs`: each denied for a user lacking the
+      permission, allowed with it and for root, open with auth off;
+      negative check with the checks stubbed.
+    - [ ] Docs (auth section), changelog; release; close #47.
