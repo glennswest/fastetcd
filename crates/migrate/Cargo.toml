@@ -29,3 +29,5 @@ fastetcd-proto.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"
+bcrypt = "0.15"
+bincode.workspace = true

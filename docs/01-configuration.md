@@ -165,8 +165,9 @@ no TLS options (#59). Commands: `put <key> <value>`, `get <key>
 
 **`fastetcd-migrate --from <etcd snapshot.db> --to <data-dir>
 [--force] [--preserve-revisions]`** — import an etcd v3 BoltDB
-snapshot. Without `--preserve-revisions` only the latest value of each
-key is imported.
+snapshot: keys (without `--preserve-revisions` only the latest value
+of each), leases with their keys, and users, roles and the auth flag;
+users keep their etcd passwords (#60).
 
 **`fastetcd-bench`** — load generator. `--endpoint`, `--mode put |
 get-lin | get-ser | read-under-load` (default `put`), `--conns 64`,

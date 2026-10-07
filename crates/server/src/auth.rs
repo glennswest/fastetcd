@@ -173,6 +173,12 @@ fn hash_password(plain: &str) -> Result<String, Status> {
 }
 
 fn verify_password(plain: &str, hash_phc: &str) -> bool {
+    // etcd's bcrypt hash (`$2a$`/`$2b$`/`$2y$`), carried over as is by
+    // `fastetcd-migrate` (#60): its users keep their passwords. Hashes
+    // fastetcd makes itself are argon2.
+    if hash_phc.starts_with("$2") {
+        return bcrypt::verify(plain, hash_phc).unwrap_or(false);
+    }
     let Ok(parsed) = PasswordHash::new(hash_phc) else {
         return false;
     };
@@ -520,5 +526,20 @@ impl tonic::service::Interceptor for AuthInterceptor {
                 "auth: missing or invalid `token` metadata; call Authenticate first"
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // fastetcd#60: a user migrated from etcd keeps its bcrypt hash.
+    #[test]
+    fn verifies_etcds_bcrypt_hashes_and_its_own_argon2() {
+        let etcd = bcrypt::hash("from-etcd", 4).unwrap(); // not a secret: test fixture
+        assert!(etcd.starts_with("$2"));
+        assert!(super::verify_password("from-etcd", &etcd));
+        assert!(!super::verify_password("wrong", &etcd));
+        let ours = super::hash_password("ours").unwrap(); // not a secret: test fixture
+        assert!(super::verify_password("ours", &ours));
+        assert!(!super::verify_password("from-etcd", &ours));
     }
 }

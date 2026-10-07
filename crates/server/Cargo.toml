@@ -34,6 +34,8 @@ fastetcd-storage.workspace = true
 fastetcd-raft.workspace = true
 
 sha2.workspace = true
+# Verifies the bcrypt password hashes of users migrated from etcd (#60).
+bcrypt = "0.15"
 bincode.workspace = true
 argon2.workspace = true
 rand.workspace = true

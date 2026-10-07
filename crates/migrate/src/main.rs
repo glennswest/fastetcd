@@ -48,9 +48,20 @@ async fn main() -> anyhow::Result<()> {
         tombstones = summary.tombstones,
         imported = summary.imported,
         revision_after = summary.revision_after,
+        leases = summary.leases,
+        users = summary.users,
+        roles = summary.roles,
+        auth_enabled = summary.auth_enabled,
         from = %args.from.display(),
         to = %args.to.display(),
         "migration complete"
     );
+    if summary.keys_lease_dropped > 0 {
+        tracing::warn!(
+            keys = summary.keys_lease_dropped,
+            "keys named a lease the snapshot does not hold (expired or revoked in etcd): \
+             imported without a lease, so they will not expire"
+        );
+    }
     Ok(())
 }

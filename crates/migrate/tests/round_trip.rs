@@ -149,3 +149,128 @@ async fn preserve_revisions_keeps_history_visible_via_range_at_rev() {
         assert_eq!(r.kvs[0].mod_revision, rev);
     }
 }
+
+// ---------- leases and auth (fastetcd#60) ----------
+
+fn kv_leased(key: &[u8], value: &[u8], rev: i64, lease: i64) -> Vec<u8> {
+    mvccpb::KeyValue {
+        key: key.to_vec(),
+        create_revision: rev,
+        mod_revision: rev,
+        version: 1,
+        value: value.to_vec(),
+        lease,
+    }
+    .encode_to_vec()
+}
+
+/// etcd's `leasepb.Lease`: ID = 1, TTL = 2, RemainingTTL = 3.
+#[derive(Clone, PartialEq, prost::Message)]
+struct LeasePb {
+    #[prost(int64, tag = "1")]
+    id: i64,
+    #[prost(int64, tag = "2")]
+    ttl: i64,
+    #[prost(int64, tag = "3")]
+    remaining_ttl: i64,
+}
+
+fn lease_bytes(id: i64, ttl: i64, remaining: i64) -> Vec<u8> {
+    LeasePb { id, ttl, remaining_ttl: remaining }.encode_to_vec()
+}
+
+/// A snapshot holding two leases (one with a remaining TTL), a key on
+/// each, a key on a lease the snapshot no longer has, two roles, two
+/// users (bcrypt passwords, as etcd stores them) and auth on.
+fn build_snapshot_with_leases_and_auth(path: &std::path::Path) {
+    use fastetcd_proto::authpb;
+    let mut db = Bolt::open(path).expect("open rw bolt");
+    db.update(|mut tx| -> bbolt_rs::Result<()> {
+        let mut keys = tx.create_bucket(b"key")?;
+        keys.put(bolt_key(1, 0, false), kv_leased(b"/session/a", b"a", 1, 100))?;
+        keys.put(bolt_key(2, 0, false), kv_leased(b"/session/b", b"b", 2, 200))?;
+        keys.put(bolt_key(3, 0, false), kv_leased(b"/orphan", b"o", 3, 999))?;
+        keys.put(bolt_key(4, 0, false), kv_leased(b"/plain", b"p", 4, 0))?;
+        let mut leases = tx.create_bucket(b"lease")?;
+        leases.put(100i64.to_be_bytes(), lease_bytes(100, 600, 0))?;
+        leases.put(200i64.to_be_bytes(), lease_bytes(200, 600, 30))?;
+        let mut roles = tx.create_bucket(b"authRoles")?;
+        for (name, perms) in [
+            ("root", vec![]),
+            ("app", vec![authpb::Permission { perm_type: 2, key: b"/app/".to_vec(), range_end: b"/app0".to_vec() }]),
+        ] {
+            let r = authpb::Role { name: name.as_bytes().to_vec(), key_permission: perms };
+            roles.put(name.as_bytes(), r.encode_to_vec())?;
+        }
+        let mut users = tx.create_bucket(b"authUsers")?;
+        for (name, role) in [("root", "root"), ("alice", "app")] {
+            let u = authpb::User {
+                name: name.as_bytes().to_vec(),
+                // As etcd stores it. Not a secret: test fixture.
+                password: bcrypt::hash(format!("{name}-pw"), 4).unwrap().into_bytes(),
+                roles: vec![role.to_string()],
+                options: None,
+            };
+            users.put(name.as_bytes(), u.encode_to_vec())?;
+        }
+        let mut auth = tx.create_bucket(b"auth")?;
+        auth.put(b"authEnabled", [1u8])?;
+        Ok(())
+    })
+    .expect("build snapshot");
+}
+
+async fn open_store(dir: &std::path::Path) -> (Arc<dyn fastetcd_storage::KvStore>, MvccStore) {
+    let engine: Arc<dyn fastetcd_storage::KvStore> =
+        Arc::new(RedbEngine::open(dir.join("fastetcd.redb")).unwrap());
+    let mvcc = MvccStore::open(engine.clone()).await.unwrap();
+    (engine, mvcc)
+}
+
+#[tokio::test]
+async fn leases_and_auth_are_imported() {
+    use fastetcd_storage::mvcc::auth::{StoredRole, StoredUser, TABLE_AUTH_ROLES, TABLE_AUTH_STATE, TABLE_AUTH_USERS};
+    for mode in [MigrationMode::LatestOnly, MigrationMode::PreserveRevisions] {
+        let dir = tempdir().unwrap();
+        let snap = dir.path().join("snapshot.db");
+        build_snapshot_with_leases_and_auth(&snap);
+        let to = dir.path().join("data");
+        let s = migrate_snapshot_with_mode(&snap, &to, false, mode).await.unwrap();
+        assert_eq!((s.imported, s.leases, s.keys_lease_dropped), (4, 2, 1), "{mode:?}");
+        assert_eq!((s.users, s.roles, s.auth_enabled), (2, 2, true), "{mode:?}");
+
+        let (engine, mvcc) = open_store(&to).await;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let full = mvcc.lease_ttl(100, true, now).await.unwrap().expect("lease 100");
+        assert_eq!((full.granted_ttl_secs, full.keys), (600, vec![b"/session/a".to_vec()]), "{mode:?}");
+        let partial = mvcc.lease_ttl(200, true, now).await.unwrap().expect("lease 200");
+        assert_eq!(
+            (partial.granted_ttl_secs, partial.keys),
+            (30, vec![b"/session/b".to_vec()]),
+            "{mode:?}: etcd restores a lease with its remaining TTL"
+        );
+        assert!(mvcc.lease_ttl(999, true, now).await.unwrap().is_none());
+        let orphan = mvcc.range(b"/orphan", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(orphan.kvs[0].lease, 0, "{mode:?}: a key on a missing lease is imported without one");
+
+        let snap = engine.snapshot().await.unwrap();
+        let user = |name: &str| {
+            let snap = snap.clone();
+            let name = name.to_string();
+            async move {
+                let b = snap.get(TABLE_AUTH_USERS, name.as_bytes()).await.unwrap().expect("user");
+                bincode::deserialize::<StoredUser>(&b).unwrap()
+            }
+        };
+        let alice = user("alice").await;
+        assert_eq!(alice.roles, vec!["app".to_string()]);
+        assert!(bcrypt::verify("alice-pw", &alice.password_hash).unwrap(), "{mode:?}: etcd's hash kept");
+        assert!(user("root").await.roles.contains(&"root".to_string()));
+        let app: StoredRole =
+            bincode::deserialize(&snap.get(TABLE_AUTH_ROLES, b"app").await.unwrap().unwrap()).unwrap();
+        assert_eq!(app.permissions.len(), 1);
+        assert_eq!(app.permissions[0].key, b"/app/".to_vec());
+        let enabled = snap.get(TABLE_AUTH_STATE, b"enabled").await.unwrap();
+        assert_eq!(enabled.as_deref(), Some(&[1u8][..]), "{mode:?}: auth on, as in etcd");
+    }
+}

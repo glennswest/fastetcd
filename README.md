@@ -188,8 +188,10 @@ Differences from etcd:
 ### Migration
 
 Existing etcd data moves over with `fastetcd-migrate`, which reads an
-etcd BoltDB snapshot and writes it into a fastetcd data directory,
-optionally preserving original revisions:
+etcd BoltDB snapshot and writes it into a fastetcd data directory, with
+its leases (their keys expire as they would have), users, roles and the
+auth flag (users keep their etcd passwords), optionally preserving
+original revisions:
 
 ```
 fastetcd-migrate --from snap.db --to data-dir --preserve-revisions

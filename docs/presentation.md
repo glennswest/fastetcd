@@ -121,7 +121,7 @@ linearizable reads to the leader.
   defrag`; automatic copy of the data file before a version change.
 - **TLS** on client and peer ports, each with its own identity and CA.
 - **Import from etcd**: `fastetcd-migrate` reads a BoltDB snapshot
-  (keys only so far, #60).
+  with its leases, users and roles (#60).
 - **Upgrades are in place**: every on-disk change converts itself at
   start (1.12: raft log moved from redb into the WAL; one-way).
 
@@ -222,8 +222,7 @@ Auth: no known authorization gap; tokens never expire (#46).
 - **Writes on slow disks and 3 members**: more writes per fsync (#94),
   replicate before the leader's own fsync (#97), keepalive off Raft
   (#92), configurable election timeouts (#103).
-- **Operations**: migrate leases and
-  auth (#60), `fastetcd-ctl` over TLS (#59), a rolling-upgrade test
+- **Operations**: `fastetcd-ctl` over TLS (#59), a rolling-upgrade test
   (#65), test containers on the test machines (#36).
 
 ---

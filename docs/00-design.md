@@ -251,16 +251,23 @@ Resyncs and lag cancellations are logged at `warn` on the
 
 `fastetcd-migrate` reads an etcd v3 snapshot (BoltDB file) and writes a
 fresh fastetcd data directory, **without going through Raft** (a
-bulk-load before the cluster starts). It reads the `key` bucket only:
+bulk-load before the cluster starts). Keys, from the `key` bucket:
 
 - default: the latest live value of each key, as puts (every key at
   revision 1);
 - `--preserve-revisions`: every record with its original revisions, so
   `Range(rev)` and `Watch(start_rev)` behave as on the source.
 
-Not imported (#60): the `lease` bucket (keys keep their lease ids, but
-no lease backs them, so they never expire) and auth. No raft snapshot is
-generated: the first server start initializes raft on the migrated store.
+Leases and auth come too (#60). Every lease in the `lease` bucket is
+granted with its id and the TTL etcd itself would give it on a restart
+(its remaining TTL if etcd recorded one, else its full TTL; at least
+2 s), so its keys expire as they would have. A key naming a lease the
+snapshot no longer holds is imported without one (counted and warned).
+Roles and their permissions, users with their roles, and `auth enable`
+are imported through the server's own auth operations; users keep their
+etcd passwords, because fastetcd verifies etcd's bcrypt hashes
+(passwords set later are argon2). No raft snapshot is generated: the
+first server start initializes raft on the migrated store.
 
 ## Open questions
 

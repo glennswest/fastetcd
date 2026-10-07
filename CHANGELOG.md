@@ -6,6 +6,26 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — fastetcd-migrate imports leases and auth (#60)
+- **fix:** `fastetcd-migrate` read only etcd's `key` bucket (#60): keys
+  kept lease ids no lease backed, so they never expired, and users, roles
+  and `auth enable` were lost. It now grants every lease in the `lease`
+  bucket (id kept; the TTL etcd restores with, remaining if recorded,
+  else full; at least 2 s) before the keys, imports a key whose lease the
+  snapshot lacks without one (counted, warned), and imports roles,
+  permissions, users (roles, `no_password`, bcrypt hash as is) and the
+  enabled flag through the server's own auth operations. The summary
+  line gives leases, users, roles and whether auth is on.
+- **feat:** `Authenticate` also verifies bcrypt password hashes (etcd's),
+  so users migrated from etcd keep their passwords; passwords set in
+  fastetcd stay argon2. New dependency `bcrypt` 0.15.
+- **fix:** `--preserve-revisions` attached a key to every lease any of
+  its records named, deleted generations included; `bulk_load_records`
+  now attaches only a live key's latest record.
+- **test:** `tests/migrate_e2e.sh` (real etcd v3.5 → snapshot → migrate →
+  fastetcd, checked with etcdctl); round-trip test with leases, an
+  orphaned lease id and auth, in both modes; bcrypt verify unit test.
+
 ## [v1.18.0] — 2026-10-07
 
 ### 2026-10-07 — `--snapshot-count` counts writes (#80)

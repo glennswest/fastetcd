@@ -859,12 +859,12 @@ impl MvccStore {
                     MvccError::Internal(format!("serialize KvRecord: {e}"))
                 })?;
                 batch.put(TABLE_KV, &kv_key, &bytes);
-                if rec.lease != 0 {
-                    batch.put(
-                        TABLE_LEASE_KEYS,
-                        &lease_key_index(rec.lease, &key),
-                        &[],
-                    );
+            }
+            // A key is on its lease only as it is now: the latest record
+            // of a live key, not a historical or deleted one (#60).
+            if let (None, Some(last)) = (&tombstone, puts.last()) {
+                if last.lease != 0 {
+                    batch.put(TABLE_LEASE_KEYS, &lease_key_index(last.lease, &key), &[]);
                 }
             }
             // Close the current generation if a tombstone is supplied.
