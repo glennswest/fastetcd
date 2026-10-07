@@ -6,6 +6,13 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — blade get-latency rig (#89)
+- **test:** `tests/bench/blade_getlatency.py <node>`: rustkube's
+  get-latency / lease-churn load (40 clients renewing their own Lease and
+  listing) against a test node's apiserver, with GET and renewal
+  percentiles and fastetcd's WAL / checkpoint / write-behind metrics read
+  off the node (:2381). Its first run on server3 found #138.
+
 ## [v1.23.1] — 2026-10-07
 
 ### Fixed
