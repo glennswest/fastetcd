@@ -748,10 +748,8 @@ async fn keep_alives_through_a_follower_renew_in_the_leaders_ram() {
     let id = lease_with_key(&follower.client, 4, b"ka/k").await;
     let leader = leader_of(&nodes);
     // The gate (every member 1.23+) is asked in the background on the
-    // first keep-alive; let it answer.
-    keep_alive(&follower.client, id, 4, 1).await;
-    sleep(Duration::from_secs(4)).await;
-    keep_alive(&follower.client, id, 4, 1).await;
+    // first keep-alive; keep renewing while it answers.
+    keep_alive(&follower.client, id, 4, 5).await;
     let before = leader.raft.metrics().borrow().last_log_index;
     let renewed = leader.state.lessor.stats().renewed_in_ram.load(Ordering::Relaxed);
 
@@ -803,14 +801,13 @@ async fn an_older_member_means_keep_alives_go_through_raft() {
     }
     let leader = leader_of(&nodes);
     let id = lease_with_key(&leader.client, 3, b"old/k").await;
-    keep_alive(&leader.client, id, 3, 1).await;
-    sleep(Duration::from_secs(4)).await;
+    keep_alive(&leader.client, id, 3, 5).await;
     let before = leader.raft.metrics().borrow().last_log_index.unwrap_or(0);
     keep_alive(&leader.client, id, 3, 4).await;
     let after = leader.raft.metrics().borrow().last_log_index.unwrap_or(0);
     let stats = leader.state.lessor.stats();
     assert_eq!(stats.renewed_in_ram.load(Ordering::Relaxed), 0);
-    assert!(stats.proposed.load(Ordering::Relaxed) >= 5);
+    assert!(stats.proposed.load(Ordering::Relaxed) >= 9);
     assert!(after >= before + 4, "keep-alives were not logged: {before} -> {after}");
     assert!(key_exists(&leader.client, b"old/k").await);
 }
