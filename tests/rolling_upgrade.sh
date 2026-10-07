@@ -112,14 +112,18 @@ for _ in $(seq 150); do ctl endpoint health >/dev/null 2>&1 && break; sleep 0.2;
 ctl put /plain p >/dev/null
 
 # ---- auth, lease, data ------------------------------------------------------
-ctl role add root >/dev/null
-ctl user add root:rootpw >/dev/null # not a secret: test fixture
-ctl user grant-role root root >/dev/null
-ctl role add app >/dev/null
-ctl role grant-permission app readwrite /app/ --prefix >/dev/null
-ctl user add alice:alicepw >/dev/null # not a secret: test fixture
-ctl user grant-role alice app >/dev/null
-ctl auth enable >/dev/null
+# Through one member: before 1.26 an auth change through a second member
+# right after one through the first could be refused as divergence while
+# the third had not applied the first yet (found by this test, #65).
+first() { "$CTL" --endpoints "http://127.0.0.1:${CP[1]}" --command-timeout=5s "$@"; }
+first role add root >/dev/null
+first user add root:rootpw >/dev/null # not a secret: test fixture
+first user grant-role root root >/dev/null
+first role add app >/dev/null
+first role grant-permission app readwrite /app/ --prefix >/dev/null
+first user add alice:alicepw >/dev/null # not a secret: test fixture
+first user grant-role alice app >/dev/null
+first auth enable >/dev/null
 root put /app/x appv >/dev/null
 root put /secret/s sv >/dev/null
 LEASE=$(root lease grant 600 | awk '{print $2}')

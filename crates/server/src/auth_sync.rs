@@ -47,6 +47,10 @@ use crate::state::ServerState;
 /// has committed, before answering.
 const APPLY_WAIT: Duration = Duration::from_secs(10);
 
+/// How long members' auth digests may disagree before it is divergence
+/// rather than a member that has not applied the last entry yet.
+const CONVERGE: Duration = Duration::from_secs(3);
+
 #[derive(Default)]
 pub struct AuthGate {
     /// Members confirmed to run replicated auth and to hold the same
@@ -168,14 +172,26 @@ impl AuthGate {
         if ids.is_subset(&confirmed) {
             return Ok(());
         }
-        let surveyed = survey(state, &ids).await;
-        require_all_upgraded(&surveyed)?;
-        let first = surveyed.first().and_then(digest_of);
-        if surveyed.iter().all(|s| digest_of(s) == first) {
-            *confirmed = ids;
-            self.diverged.store(false, Ordering::Relaxed);
-            return Ok(());
-        }
+        // A member that has not applied the last auth entry yet (it learns
+        // of the commit a heartbeat later) answers the digest before it.
+        // That is lag, not divergence: survey again until the digests
+        // agree or `CONVERGE` has passed. Tables that differ because
+        // members kept their own before 1.5 never agree (fastetcd#65).
+        let deadline = tokio::time::Instant::now() + CONVERGE;
+        let surveyed = loop {
+            let surveyed = survey(state, &ids).await;
+            require_all_upgraded(&surveyed)?;
+            let first = surveyed.first().and_then(digest_of);
+            if surveyed.iter().all(|s| digest_of(s) == first) {
+                *confirmed = ids;
+                self.diverged.store(false, Ordering::Relaxed);
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break surveyed;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         self.diverged_at.store(state.auth.adoptions(), Ordering::Relaxed);
         self.diverged.store(true, Ordering::Relaxed);
         let listing: Vec<String> = surveyed

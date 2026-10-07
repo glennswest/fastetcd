@@ -557,3 +557,24 @@ async fn adopt_needs_root_while_auth_is_on() {
         .await
         .unwrap();
 }
+
+/// fastetcd#65 found this: an auth change through one member, then at once
+/// through another that has not surveyed yet, while a third has not
+/// applied the first (it learns of the commit a heartbeat later). The
+/// survey saw two digests and refused the second change as divergence.
+/// A member that is only behind catches up; only tables that stay
+/// different are divergence.
+#[tokio::test]
+async fn a_member_behind_by_an_entry_is_not_divergence() {
+    let nodes = cluster(3, 3, |_| Opts::default()).await;
+    for (i, n) in nodes.iter().enumerate() {
+        auth_client(n)
+            .await
+            .role_add(pb::AuthRoleAddRequest { name: format!("r{i}") })
+            .await
+            .unwrap_or_else(|e| panic!("auth change {i} through member {}: {e:?}", n.id));
+    }
+    for n in &nodes {
+        assert!(!n.state.auth_gate.diverged(&n.state.auth), "member {} thinks members diverged", n.id);
+    }
+}
