@@ -274,3 +274,28 @@ async fn leases_and_auth_are_imported() {
         assert_eq!(enabled.as_deref(), Some(&[1u8][..]), "{mode:?}: auth on, as in etcd");
     }
 }
+
+/// What `etcdctl snapshot save` writes: the database, then its sha256.
+#[tokio::test]
+async fn an_etcdctl_snapshot_with_its_trailing_sha256_migrates_and_a_bad_one_is_refused() {
+    use sha2::{Digest, Sha256};
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("member.db");
+    build_snapshot_with_leases_and_auth(&db);
+    let mut bytes = std::fs::read(&db).unwrap();
+    assert_eq!(bytes.len() % 512, 0);
+    let sum = Sha256::digest(&bytes);
+    bytes.extend_from_slice(&sum);
+    let saved = dir.path().join("snap.db");
+    std::fs::write(&saved, &bytes).unwrap();
+    let s = migrate_snapshot(&saved, &dir.path().join("data"), false).await.expect("an etcdctl snapshot");
+    assert_eq!((s.imported, s.leases, s.users), (4, 2, 2));
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(!left.iter().any(|n| n.to_string_lossy().contains("etcd-snapshot")), "temporary copy left: {left:?}");
+
+    let n = bytes.len();
+    bytes[n - 1] ^= 1;
+    std::fs::write(&saved, &bytes).unwrap();
+    let err = migrate_snapshot(&saved, &dir.path().join("data2"), false).await.unwrap_err();
+    assert!(err.to_string().contains("sha256"), "{err:#}");
+}

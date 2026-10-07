@@ -1001,6 +1001,7 @@ dependencies = [
  "fastetcd-proto",
  "fastetcd-storage",
  "prost 0.13.5",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

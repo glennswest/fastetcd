@@ -63,6 +63,66 @@ struct LeasePb {
     remaining_ttl: i64,
 }
 
+/// The BoltDB file to read. `etcdctl snapshot save` writes the database
+/// followed by its 32-byte SHA-256 (etcd's snapshot stream); etcd's own
+/// restore recognises one by `size % 512 == 32`, checks the hash and cuts
+/// it off (etcdutl `copyAndVerifyDB`), and so does this: the database
+/// part goes to a temporary copy beside `to`, removed when dropped. A
+/// file without a hash (a member's `member/snap/db`) is read as it is.
+fn without_snapshot_hash(from: &Path, to: &Path) -> anyhow::Result<SnapshotDb> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let len = std::fs::metadata(from)?.len();
+    if len % 512 != 32 {
+        return Ok(SnapshotDb { path: from.to_path_buf(), temp: false });
+    }
+    let mut f = std::fs::File::open(from)?;
+    let mut stored = [0u8; 32];
+    f.seek(SeekFrom::Start(len - 32))?;
+    f.read_exact(&mut stored)?;
+    f.seek(SeekFrom::Start(0))?;
+    let name = to.file_name().map_or("data".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = to.with_file_name(format!(".{name}.etcd-snapshot.db"));
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+    let guard = SnapshotDb { path: tmp, temp: true };
+    let mut hash = Sha256::new();
+    let mut body = std::io::Read::take(&mut f, len - 32);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = body.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+        out.write_all(&buf[..n])?;
+    }
+    out.flush()?;
+    if hash.finalize().as_slice() != stored {
+        anyhow::bail!("{} fails its sha256: the snapshot is corrupt or truncated", from.display());
+    }
+    Ok(guard)
+}
+
+/// The database file to open; a temporary one is removed on drop.
+struct SnapshotDb {
+    path: std::path::PathBuf,
+    temp: bool,
+}
+
+impl SnapshotDb {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SnapshotDb {
+    fn drop(&mut self) {
+        if self.temp {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// fastetcd's minimum lease TTL (the server's `MIN_LEASE_TTL_SECS`).
 const MIN_LEASE_TTL_SECS: i64 = 2;
 
@@ -114,7 +174,8 @@ pub async fn migrate_snapshot_with_mode(
     if !from.exists() {
         anyhow::bail!("source snapshot {from:?} does not exist");
     }
-    let bolt = Bolt::open_ro(from).map_err(|e| anyhow::anyhow!("open bolt: {e}"))?;
+    let db = without_snapshot_hash(from, to)?;
+    let bolt = Bolt::open_ro(db.path()).map_err(|e| anyhow::anyhow!("open bolt: {e}"))?;
 
     // For LatestOnly mode: track latest (mod_rev, create_rev, value)
     // per user key. For PreserveRevisions mode: track every record
