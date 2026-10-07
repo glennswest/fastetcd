@@ -10,7 +10,13 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.21.0`** — `fastetcd-ctl` reaches a TLS client port (#59):
+**`1.22.0`** — A txn inside a txn runs, as in etcd (#56): nested
+compares judged on the pre-txn state, ops in order at one revision
+(`TxnOp::Txn`, `MvccStore::txn_ops`), precheck follows nested branches.
+Proposed only once every member answers `ConfirmLeader` with >= 1.22
+(`version_gate.rs`); do not add or downgrade a member below 1.22 after.
+
+Previous: **`1.21.0`** — `fastetcd-ctl` reaches a TLS client port (#59):
 etcdctl's `--cacert`/`--cert`/`--key` (`ETCDCTL_*`), required CA for
 `https://`, mismatches refused; one channel, `--user`'s token on every
 command. `tests/ctl_tls.sh`.

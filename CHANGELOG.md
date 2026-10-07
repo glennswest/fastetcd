@@ -6,8 +6,10 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
-### 2026-10-07 — a txn inside a txn (#56)
-- **feat:** A `Txn` whose success or failure ops include a `Txn` runs, as
+## [v1.22.0] — 2026-10-07
+
+### Added
+- A `Txn` whose success or failure ops include a `Txn` runs, as
   in etcd since 3.3, instead of answering `Unimplemented`. As etcd's
   release-3.5 `applyTxn`: every compare, nested ones included, is
   judged on the state before the txn; the ops run in order in one write,
@@ -17,12 +19,14 @@
   inside refuses the whole txn. The leader's precheck (#19, #49) follows
   the nested branches. Storage: `TxnOp::Txn(NestedTxn)` and
   `TxnOpResult::Txn`, appended last.
-- **feat:** A member older than 1.22 cannot decode a nested txn, so one
+- A member older than 1.22 cannot decode a nested txn, so one
   is proposed only once every member answers `ConfirmLeader` with 1.22
   or later (`version_gate.rs`, cached per membership): an older member
   gets `FailedPrecondition` naming it, an unreachable one `Unavailable`.
   Flat txns are not gated.
-- **docs:** 00, 03 (mixed versions), README, presentation.
+
+### Documentation
+- 00, 03 (mixed versions), README, presentation.
 
 ## [v1.21.0] — 2026-10-07
 
