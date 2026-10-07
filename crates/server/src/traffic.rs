@@ -67,6 +67,10 @@ pub struct Traffic {
     pub proposals_pending: Gauge,
     pub grpc_started: Family<GrpcLabels, Counter>,
     pub grpc_handled: Family<GrpcHandledLabels, Counter>,
+    /// `/health` answers, healthy and not (etcd's
+    /// `etcd_server_health_success` / `_failures`, fastetcd#69).
+    pub health_success: Counter,
+    pub health_failures: Counter,
 }
 
 /// Adds `n` to a gauge for as long as it is held.

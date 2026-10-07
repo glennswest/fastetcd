@@ -675,23 +675,6 @@ fn apply_etcd_env_compat() {
     }
 }
 
-/// etcd-compat plain-HTTP health probe on the client port. Matches
-/// etcd's `GET /health` response shape so existing load-balancer /
-/// k8s httpGet probes pointed at etcd work unchanged against
-/// fastetcd. https://etcd.io/docs/latest/op-guide/monitoring/#health-check
-async fn health_http_handler() -> impl axum::response::IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        r#"{"health":"true"}"#,
-    )
-}
-
-/// etcd-compat `/livez` and `/readyz` — plain-text "ok" on success,
-/// matching etcd's Kubernetes-style probe endpoints.
-async fn livez_http_handler() -> &'static str {
-    "ok"
-}
-
 fn derive_node_id(name: &str) -> NodeId {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in name.as_bytes() {
@@ -1386,6 +1369,8 @@ async fn main() -> anyhow::Result<()> {
     let peer_read_index = server_state.read_index.clone();
     let peer_proposer = server_state.proposer.clone();
     let peer_lessor = server_state.lessor.clone();
+    // /health, /livez, /readyz and grpc.health.v1 check the member (#69).
+    let health_state = server_state.clone();
     let auth = AuthService::new(server_state);
 
     // Answers other members' ConfirmLeader, serves forwarded reads behind
@@ -1449,16 +1434,22 @@ async fn main() -> anyhow::Result<()> {
     use fastetcd_proto::etcdserverpb::lease_server::LeaseServer as PbLeaseServer;
     use fastetcd_proto::etcdserverpb::maintenance_server::MaintenanceServer as PbMaintServer;
     use fastetcd_proto::etcdserverpb::watch_server::WatchServer as PbWatchServer;
-    let r = health_reporter.clone();
-    tokio::spawn(async move {
-        let mut r = r;
-        r.set_serving::<PbKvServer<KvService>>().await;
-        r.set_serving::<PbClusterServer<ClusterService>>().await;
-        r.set_serving::<PbMaintServer<MaintenanceService>>().await;
-        r.set_serving::<PbWatchServer<WatchService>>().await;
-        r.set_serving::<PbLeaseServer<LeaseService>>().await;
-        r.set_serving::<PbAuthServer<AuthService>>().await;
-    });
+    // Every service, and the server ("") as a whole, follows /readyz.
+    {
+        use tonic::server::NamedService;
+        fastetcd_server::health::spawn_grpc_health(
+            health_state.clone(),
+            health_reporter.clone(),
+            vec![
+                <PbKvServer<KvService> as NamedService>::NAME.to_string(),
+                <PbClusterServer<ClusterService> as NamedService>::NAME.to_string(),
+                <PbMaintServer<MaintenanceService> as NamedService>::NAME.to_string(),
+                <PbWatchServer<WatchService> as NamedService>::NAME.to_string(),
+                <PbLeaseServer<LeaseService> as NamedService>::NAME.to_string(),
+                <PbAuthServer<AuthService> as NamedService>::NAME.to_string(),
+            ],
+        );
+    }
 
     let client_handle = {
         tokio::spawn(async move {
@@ -1491,9 +1482,7 @@ async fn main() -> anyhow::Result<()> {
             let mut app: axum::Router = grpc_routes
                 .routes()
                 .into_axum_router()
-                .route("/health", axum::routing::get(health_http_handler))
-                .route("/livez", axum::routing::get(livez_http_handler))
-                .route("/readyz", axum::routing::get(livez_http_handler));
+                .merge(fastetcd_server::health::router(health_state));
             if let Some(gw) = gateway {
                 app = app.merge(fastetcd_server::gateway::router(gw));
             }

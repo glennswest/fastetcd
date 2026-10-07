@@ -52,7 +52,8 @@ async fn client_port_serves_http_health_alongside_grpc() {
     };
     assert!(health.status().is_success(), "status: {}", health.status());
     let body = health.text().await.unwrap();
-    assert_eq!(body, r#"{"health":"true"}"#);
+    // etcd's body, reason included (#69).
+    assert_eq!(body, r#"{"health":"true","reason":""}"#);
 
     for path in ["/livez", "/readyz"] {
         let resp = client
@@ -61,7 +62,22 @@ async fn client_port_serves_http_health_alongside_grpc() {
             .await
             .unwrap_or_else(|e| panic!("GET {path}: {e}"));
         assert!(resp.status().is_success(), "{path} status: {}", resp.status());
-        assert_eq!(resp.text().await.unwrap(), "ok");
+        assert_eq!(resp.text().await.unwrap(), "ok\n");
+    }
+    // grpc.health.v1 follows /readyz: SERVING for the server as a whole.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut h = tonic_health::pb::health_client::HealthClient::connect(base.clone()).await.unwrap();
+        let r = h
+            .check(tonic_health::pb::HealthCheckRequest { service: String::new() })
+            .await
+            .unwrap()
+            .into_inner();
+        if r.status == tonic_health::pb::health_check_response::ServingStatus::Serving as i32 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "grpc health never SERVING: {r:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // gRPC traffic must still work on the same port.

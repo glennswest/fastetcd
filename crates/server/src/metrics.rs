@@ -458,6 +458,16 @@ impl Metrics {
             "The current number of pending proposals to commit",
             t.proposals_pending.clone(),
         );
+        reg.register(
+            "etcd_server_health_success",
+            "The total number of successful health checks",
+            t.health_success.clone(),
+        );
+        reg.register(
+            "etcd_server_health_failures",
+            "The total number of failed health checks",
+            t.health_failures.clone(),
+        );
         let server_id: Family<Vec<(String, String)>, Gauge> = Family::default();
         server_id
             .get_or_create(&vec![(
