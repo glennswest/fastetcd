@@ -17,9 +17,12 @@ async fn expired_lease_is_auto_revoked_and_keys_cascade_delete() {
     let mut lc = LeaseClient::connect(h.endpoint.clone()).await.unwrap();
     let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
 
-    // 1-second TTL.
+    // A 3 s TTL: deadlines are whole Unix seconds, so a 1 s lease can
+    // lapse in well under a second, between the two puts below on a
+    // loaded build box, and the second put then attaches to a revoked
+    // lease (the precheck-to-apply gap, #115).
     let grant = lc
-        .lease_grant(pb::LeaseGrantRequest { ttl: 1, id: 0 })
+        .lease_grant(pb::LeaseGrantRequest { ttl: 3, id: 0 })
         .await
         .unwrap()
         .into_inner();
@@ -44,7 +47,7 @@ async fn expired_lease_is_auto_revoked_and_keys_cascade_delete() {
     .unwrap();
 
     // Wait through (TTL + tick) + buffer.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    tokio::time::sleep(Duration::from_millis(5000)).await;
 
     // Lease should be gone.
     let leases = lc
