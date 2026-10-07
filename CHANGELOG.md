@@ -6,6 +6,34 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.23.1] — 2026-10-07
+
+### Fixed
+- Auth errors use etcd's codes and texts (#105, #127), so clientv3,
+  etcdctl and client-go recognise them (they match by message). A token
+  a member does not know (it restarted, or has not applied that
+  `Authenticate` yet) is `Unauthenticated` `etcdserver: invalid auth
+  token`, and no token `InvalidArgument` `etcdserver: user name is
+  empty`: clientv3 now re-authenticates and retries by itself, where it
+  used to fail for good. A denied call is `etcdserver: permission denied`
+  (detail at debug); a bad name or password `InvalidArgument`
+  `ErrAuthFailed`; `Authenticate` with auth off `ErrAuthNotEnabled`; a
+  password change during `Authenticate` `ErrAuthOldRevision` (clientv3
+  retries); user/role not found or existing and no root user on
+  `AuthEnable`: etcd's `FailedPrecondition` texts; empty user/role name
+  and a missing permission: etcd's `InvalidArgument` texts
+  (`crates/server/src/etcd_errors.rs`). Behaviour changes, as etcd: a
+  tokenless call is `InvalidArgument` (was `Unauthenticated`; on the
+  gateway 400, was 401), and `Authenticate` is refused while auth is off.
+
+### Added
+- `tests/clientv3_reauth.sh [baseline-ref]`: etcd's Go client (v3.5.17)
+  keeps one client across a member restart that loses every token. This
+  tree passes; v1.23.0 fails with its own text.
+
+### Documentation
+- 03 § Auth errors.
+
 ## [v1.23.0] — 2026-10-07
 
 ### Changed

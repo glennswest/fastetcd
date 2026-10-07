@@ -141,7 +141,12 @@ async fn txn(kv: &mut KvClient<Channel>, tok: &str, t: pb::TxnRequest) -> Result
 
 fn assert_denied(r: Result<pb::TxnResponse, tonic::Status>) {
     match r {
-        Err(s) => assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}"),
+        // etcd's text: clientv3 matches ErrPermissionDenied by it (#127).
+        Err(s) => assert_eq!(
+            (s.code(), s.message()),
+            (tonic::Code::PermissionDenied, "etcdserver: permission denied"),
+            "{s:?}"
+        ),
         Ok(resp) => panic!("txn should have been denied, got {resp:?}"),
     }
 }

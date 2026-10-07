@@ -10,7 +10,13 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.23.0`** — Lease keep-alives renewed in the leader's RAM, as etcd's
+**`1.23.1`** — Auth errors use etcd's codes and texts (#105, #127,
+`crates/server/src/etcd_errors.rs`): an unknown token is
+`ErrInvalidAuthToken`, no token `ErrUserEmpty`, so clientv3
+re-authenticates after a member restart; denials `ErrPermissionDenied`.
+`tests/clientv3_reauth.sh`.
+
+Previous: **`1.23.0`** — Lease keep-alives renewed in the leader's RAM, as etcd's
 lessor (#92): `crates/raft/src/lessor.rs` (renew after a read barrier,
 promote every lease to a full TTL on a new term, effective deadline =
 max(RAM, persisted)), followers forward via `ForwardWrite`, TimeToLive
@@ -2103,7 +2109,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     stable (recommended: safety first; the gap is one fsync per lone write
     on a slow disk, hidden under load and on SSD).
 
-61. **Auth errors use etcd's codes and texts (#105, and #127).** clientv3
+61. **Auth errors use etcd's codes and texts (#105, and #127) — done, shipped in v1.23.1.** clientv3
     turns a status into its typed errors by message (`rpctypes.Error`),
     and re-authenticates only on `ErrInvalidAuthToken` / `ErrUserEmpty` /
     `ErrAuthOldRevision` (`retry_interceptor.go` `shouldRefreshToken`).
@@ -2126,8 +2132,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       AuthEnable: etcd's `FailedPrecondition` texts; empty user / role
       name, permission not given: etcd's `InvalidArgument` texts.
     Work items:
-    - [ ] `etcd_errors.rs`; interceptor, admin, authz, Auth service,
+    - [x] `etcd_errors.rs`; interceptor, admin, authz, Auth service,
       apply errors; tests updated to the codes.
-    - [ ] Tests: etcd-client through a member restart (token lost) and
-      a token unknown on a member; each mapped error.
-    - [ ] Docs (03 auth), changelog; release; close #105, #127.
+    - [x] Tests: `tests/clientv3_reauth.sh` (clientv3 v3.5.17 through a
+      member restart; v1.23.0 fails, this passes); each mapped error.
+    - [x] Docs (03 auth errors), changelog; release 1.23.1; close #105,
+      #127.

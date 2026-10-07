@@ -380,6 +380,22 @@ applied auth state at that moment (etcd checks a put and a revoke again
 at apply), so a permission revoked a moment earlier can still be honoured
 by a member a moment behind.
 
+### Auth errors
+
+Auth errors are etcd's, code and text (since 1.23.1, #105, #127): clientv3
+recognises its typed errors by the text, and re-authenticates by itself
+only on `etcdserver: invalid auth token` (a token this member does not
+know: it restarted, or has not applied that `Authenticate` yet, tokens
+not being persisted, as in etcd) and `etcdserver: user name is empty` (no
+token). A denied call answers `PermissionDenied` `etcdserver: permission
+denied` (the detail is logged at debug, target `fastetcd::authz`); a bad
+name or password `InvalidArgument` `etcdserver: authentication failed,
+invalid user ID or password`; `Authenticate` with auth off
+`FailedPrecondition` `etcdserver: authentication is not enabled`; user and
+role not found / already existing, and a missing root user on
+`AuthEnable`, etcd's `FailedPrecondition` texts. `tests/clientv3_reauth.sh`
+checks etcd's own Go client through a member restart.
+
 ## Storage engine
 
 A data directory holds:
