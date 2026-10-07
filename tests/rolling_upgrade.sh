@@ -241,6 +241,16 @@ echo "-- each member's version change, as it logged it:"
 for j in 1 2 3; do
     grep -hiE "^--- |version|migrat|wal|backup" "$WORK/log$j" | grep -viE "slow raft WAL|keep-alive" | head -12 | sed "s/^/   [$j] /" | cut -c1-220
 done
+# The safety backup is taken before anything writes: before the raft log
+# moves into the WAL (1.12+), which clears the data file's own log.
+for j in 1 2 3; do
+    moved=$(grep -n "raft log moved from the data file into the WAL" "$WORK/log$j" | head -1 | cut -d: -f1)
+    if [ -n "$moved" ]; then
+        backed=$(grep -n "took a safety backup" "$WORK/log$j" | head -1 | cut -d: -f1)
+        check "member $j backed up its data file before moving its raft log into the WAL" \
+            "$([ -n "$backed" ] && [ "$backed" -lt "$moved" ] && echo 1 || echo 0)"
+    fi
+done
 if [ "$FAILED" != 0 ]; then
     echo "-- members' warnings and errors:"
     grep -hE "WARN|ERROR|panic" "$WORK"/log* | tail -40 || true

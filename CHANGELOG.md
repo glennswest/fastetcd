@@ -20,6 +20,14 @@
   `auth_replication::a_member_behind_by_an_entry_is_not_divergence`
   (a member answering two surveys late; without the re-survey, refused).
 
+- The pre-version safety backup (`<data-dir>/backups`, taken when a new
+  version first opens a data dir) is taken before anything writes again.
+  From 1.12 it came after the raft log had moved into the WAL, which
+  clears the data file's own log, so the copy meant for rolling back
+  lacked the log entries not yet applied. Found by the rolling-upgrade
+  test (the members' logs had the move first), which now checks the
+  order (#65).
+
 ### Added
 - `tests/rolling_upgrade.sh <from> [<to>]`: a real rolling upgrade or
   downgrade of three member processes under writes, with auth and a
