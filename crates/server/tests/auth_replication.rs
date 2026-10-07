@@ -98,6 +98,59 @@ impl RaftPeer for OlderPeer {
 struct Opts {
     older: bool,
     snapshot_every: Option<u64>,
+    /// Answer this many `AuthSync` calls with the answer before, as a
+    /// member that has not applied the last auth entry yet (#65).
+    lag_auth_sync: u32,
+}
+
+/// A member one auth entry behind: its next `lag` AuthSync answers are
+/// the one it gave last time; every other RPC is real.
+struct LaggingPeer {
+    inner: RaftPeerService,
+    lag: std::sync::Mutex<(u32, Option<rpb::RaftPayload>)>,
+}
+
+#[tonic::async_trait]
+impl RaftPeer for LaggingPeer {
+    async fn append_entries(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.append_entries(r).await
+    }
+    async fn vote(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.vote(r).await
+    }
+    async fn install_snapshot(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.install_snapshot(r).await
+    }
+    async fn forward_write(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.forward_write(r).await
+    }
+    async fn forward_membership(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.forward_membership(r).await
+    }
+    async fn forward_read(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.forward_read(r).await
+    }
+    async fn auth_sync(&self, r: Request<rpb::RaftPayload>) -> R {
+        let real = self.inner.auth_sync(r).await?.into_inner();
+        let mut lag = self.lag.lock().unwrap();
+        let answer = match (&lag.1, lag.0) {
+            (Some(before), n) if n > 0 => {
+                lag.0 -= 1;
+                before.clone()
+            }
+            _ => {
+                lag.1 = Some(real.clone());
+                real
+            }
+        };
+        Ok(Response::new(answer))
+    }
+    async fn confirm_leader(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.confirm_leader(r).await
+    }
+    async fn lease_time_to_live(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.lease_time_to_live(r).await
+    }
 }
 
 async fn start_node(id: NodeId, opts: Opts) -> Node {
@@ -140,7 +193,15 @@ async fn start_node(id: NodeId, opts: Opts) -> Node {
     let peer_url = format!("http://{}", peer_listener.local_addr().unwrap());
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(peer_listener);
     tokio::spawn(async move {
-        if opts.older {
+        if opts.lag_auth_sync > 0 {
+            let peer = LaggingPeer { inner: peer_service, lag: std::sync::Mutex::new((opts.lag_auth_sync, None)) };
+            tonic::transport::Server::builder()
+                .add_service(RaftPeerServer::new(peer)
+                .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        } else if opts.older {
             tonic::transport::Server::builder()
                 .add_service(RaftPeerServer::new(OlderPeer(peer_service))
                 .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
@@ -566,7 +627,9 @@ async fn adopt_needs_root_while_auth_is_on() {
 /// different are divergence.
 #[tokio::test]
 async fn a_member_behind_by_an_entry_is_not_divergence() {
-    let nodes = cluster(3, 3, |_| Opts::default()).await;
+    // Member 3 answers two surveys late: the one after the first change
+    // still shows the tables before it.
+    let nodes = cluster(3, 3, |id| Opts { lag_auth_sync: if id == 3 { 2 } else { 0 }, ..Opts::default() }).await;
     for (i, n) in nodes.iter().enumerate() {
         auth_client(n)
             .await
