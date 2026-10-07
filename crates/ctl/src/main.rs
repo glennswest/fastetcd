@@ -15,18 +15,36 @@ use fastetcd_proto::etcdserverpb::maintenance_client::MaintenanceClient;
 use fastetcd_proto::fastetcd_admin as apb;
 use fastetcd_proto::fastetcd_admin::fastetcd_admin_client::FastetcdAdminClient;
 use tonic::metadata::MetadataValue;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 #[derive(Debug, Parser)]
 #[command(name = "fastetcd-ctl", version, about)]
 struct Args {
-    /// Server endpoint, e.g. `http://127.0.0.1:2379`.
+    /// Server endpoint, e.g. `http://127.0.0.1:2379`, or
+    /// `https://...` for a TLS client port. Without a scheme it is
+    /// `https://` when a TLS option is given, else `http://`.
     #[arg(long, default_value = "http://127.0.0.1:2379")]
     endpoint: String,
 
-    /// `name:password` to authenticate as, when auth is on. Used by the
-    /// `auth` commands, which need root.
+    /// `name:password` to authenticate as, when auth is on. The token
+    /// goes on every command; `auth`, `defrag` and `snapshot-save` need
+    /// root.
     #[arg(long)]
     user: Option<String>,
+
+    /// CA certificate (PEM) the member's client-port certificate is
+    /// verified against. Required for `https://` (fastetcd#59).
+    #[arg(long, env = "ETCDCTL_CACERT")]
+    cacert: Option<PathBuf>,
+
+    /// Client certificate (PEM) to present, for a member with
+    /// `--client-cert-auth`. With auth on, its CN is the user. Needs `--key`.
+    #[arg(long, env = "ETCDCTL_CERT")]
+    cert: Option<PathBuf>,
+
+    /// Private key (PEM) of `--cert`.
+    #[arg(long, env = "ETCDCTL_KEY")]
+    key: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -91,13 +109,77 @@ enum AuthCmd {
     Adopt { member: String },
 }
 
+/// The endpoint URL to dial: etcdctl's scheme-less `host:port` becomes
+/// `https://` when TLS options are given, else `http://`.
+fn endpoint_url(endpoint: &str, tls: bool) -> String {
+    if endpoint.contains("://") {
+        endpoint.to_string()
+    } else if tls {
+        format!("https://{endpoint}")
+    } else {
+        format!("http://{endpoint}")
+    }
+}
+
+/// The client TLS for `url` from `--cacert`/`--cert`/`--key`, or `None`
+/// for plaintext. A mismatch between the options and the URL's scheme is
+/// an error, never a silent plaintext dial.
+fn tls_config(
+    url: &str,
+    cacert: &Option<PathBuf>,
+    cert: &Option<PathBuf>,
+    key: &Option<PathBuf>,
+) -> anyhow::Result<Option<ClientTlsConfig>> {
+    let any = cacert.is_some() || cert.is_some() || key.is_some();
+    let https = url.starts_with("https://");
+    if any && !https {
+        anyhow::bail!("--cacert/--cert/--key are given but the endpoint {url} is not https://");
+    }
+    if !https {
+        return Ok(None);
+    }
+    let read = |p: &PathBuf, flag: &str| {
+        std::fs::read(p).map_err(|e| anyhow::anyhow!("{flag} {}: {e}", p.display()))
+    };
+    let Some(ca) = cacert else {
+        anyhow::bail!(
+            "the endpoint {url} is https:// but no --cacert is given: pass the CA that signed \
+             the member's client-port certificate (--trusted-ca-file's CA, or ETCDCTL_CACERT)"
+        );
+    };
+    let mut tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(read(ca, "--cacert")?));
+    match (cert, key) {
+        (Some(c), Some(k)) => {
+            tls = tls.identity(Identity::from_pem(read(c, "--cert")?, read(k, "--key")?));
+        }
+        (None, None) => {}
+        (Some(_), None) => anyhow::bail!("--cert needs --key"),
+        (None, Some(_)) => anyhow::bail!("--key needs --cert"),
+    }
+    Ok(Some(tls))
+}
+
+/// One channel to the endpoint, for every command.
+async fn connect(args: &Args) -> anyhow::Result<Channel> {
+    let tls_opts = args.cacert.is_some() || args.cert.is_some() || args.key.is_some();
+    let url = endpoint_url(&args.endpoint, tls_opts);
+    let tls = tls_config(&url, &args.cacert, &args.cert, &args.key)?;
+    let mut ep = Endpoint::from_shared(url.clone())?;
+    if let Some(tls) = tls {
+        ep = ep.tls_config(tls)?;
+    }
+    ep.connect()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("cannot connect to {url}")))
+}
+
 /// Authenticate as `name:password`, returning the token.
-async fn login(endpoint: &str, user: &Option<String>) -> anyhow::Result<Option<String>> {
-    let Some(user) = user else { return Ok(None) };
+async fn login(channel: &Channel, user: &Option<String>) -> anyhow::Result<WithToken> {
+    let Some(user) = user else { return Ok(WithToken(None)) };
     let (name, password) = user
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("--user must be name:password"))?;
-    let mut c = AuthClient::connect(endpoint.to_string()).await?;
+    let mut c = AuthClient::new(channel.clone());
     let r = c
         .authenticate(pb::AuthenticateRequest {
             name: name.to_string(),
@@ -105,7 +187,8 @@ async fn login(endpoint: &str, user: &Option<String>) -> anyhow::Result<Option<S
         })
         .await?
         .into_inner();
-    Ok(Some(r.token))
+    let token = r.token.parse().map_err(|e| anyhow::anyhow!("token: {e}"))?;
+    Ok(WithToken(Some(token)))
 }
 
 /// Attaches the auth token, if any, to every request.
@@ -137,14 +220,7 @@ fn print_member(m: &apb::AuthMember) {
     println!("  roles: {}", m.roles.join(", "));
 }
 
-async fn auth_cmd(endpoint: String, user: Option<String>, cmd: AuthCmd) -> anyhow::Result<()> {
-    let token = login(&endpoint, &user)
-        .await?
-        .map(|t| t.parse())
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("token: {e}"))?;
-    let channel = tonic::transport::Endpoint::from_shared(endpoint)?.connect().await?;
-    let auth = WithToken(token);
+async fn auth_cmd(channel: Channel, auth: WithToken, cmd: AuthCmd) -> anyhow::Result<()> {
     let mut admin = FastetcdAdminClient::with_interceptor(channel.clone(), auth.clone());
     match cmd {
         AuthCmd::Members => {
@@ -207,9 +283,13 @@ fn human_bytes(n: i64) -> String {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    let channel = connect(&args).await?;
+    let auth = login(&channel, &args.user).await?;
+    let kv = || KvClient::with_interceptor(channel.clone(), auth.clone());
+    let maintenance = || MaintenanceClient::with_interceptor(channel.clone(), auth.clone());
     match args.cmd {
         Cmd::Put { key, value } => {
-            let mut c = KvClient::connect(args.endpoint).await?;
+            let mut c = kv();
             let resp = c
                 .put(pb::PutRequest {
                     key: key.into_bytes(),
@@ -221,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
             println!("OK rev={}", resp.header.map(|h| h.revision).unwrap_or(0));
         }
         Cmd::Get { key, prefix } => {
-            let mut c = KvClient::connect(args.endpoint).await?;
+            let mut c = kv();
             let mut range_end = Vec::new();
             if prefix {
                 range_end = prefix_range_end(key.as_bytes());
@@ -240,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Del { key, prefix } => {
-            let mut c = KvClient::connect(args.endpoint).await?;
+            let mut c = kv();
             let mut range_end = Vec::new();
             if prefix {
                 range_end = prefix_range_end(key.as_bytes());
@@ -256,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
             println!("deleted {}", resp.deleted);
         }
         Cmd::SnapshotSave { path } => {
-            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let mut c = maintenance();
             let mut stream = c
                 .snapshot(pb::SnapshotRequest {})
                 .await?
@@ -293,7 +373,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Cmd::Status => {
-            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let mut c = maintenance();
             let r = c.status(pb::StatusRequest {}).await?.into_inner();
             println!("version:      {}", r.version);
             println!("member:       {:x}  leader: {:x}", r.header.map(|h| h.member_id).unwrap_or(0), r.leader);
@@ -318,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Defrag => {
-            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let mut c = maintenance();
             let before = c.status(pb::StatusRequest {}).await?.into_inner().db_size;
             c.defragment(pb::DefragmentRequest {}).await?;
             let after = c.status(pb::StatusRequest {}).await?.into_inner().db_size;
@@ -330,7 +410,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Cmd::Compact { revision } => {
-            let mut c = KvClient::connect(args.endpoint).await?;
+            let mut c = kv();
             c.compact(pb::CompactionRequest {
                 revision,
                 physical: false,
@@ -339,7 +419,7 @@ async fn main() -> anyhow::Result<()> {
             println!("compacted to revision {revision}");
         }
         Cmd::Alarm { disarm } => {
-            let mut c = MaintenanceClient::connect(args.endpoint).await?;
+            let mut c = maintenance();
             let action = if disarm {
                 pb::alarm_request::AlarmAction::Deactivate
             } else {
@@ -367,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Cmd::Auth { cmd } => auth_cmd(args.endpoint, args.user, cmd).await?,
+        Cmd::Auth { cmd } => auth_cmd(channel.clone(), auth.clone(), cmd).await?,
     }
     Ok(())
 }
@@ -408,4 +488,45 @@ fn check_backup(path: &std::path::Path) -> anyhow::Result<()> {
         anyhow::bail!("checksum mismatch");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_endpoint_takes_its_scheme_from_the_tls_options() {
+        assert_eq!(endpoint_url("10.0.0.1:2379", true), "https://10.0.0.1:2379");
+        assert_eq!(endpoint_url("10.0.0.1:2379", false), "http://10.0.0.1:2379");
+        assert_eq!(endpoint_url("http://h:2379", true), "http://h:2379");
+        assert_eq!(endpoint_url("https://h:2379", false), "https://h:2379");
+    }
+
+    #[test]
+    fn tls_options_and_the_scheme_must_agree() {
+        let p = Some(PathBuf::from("/nonexistent/ca.pem"));
+        let err = tls_config("http://h:2379", &p, &None, &None).unwrap_err().to_string();
+        assert!(err.contains("not https://"), "{err}");
+        let err = tls_config("https://h:2379", &None, &None, &None).unwrap_err().to_string();
+        assert!(err.contains("no --cacert"), "{err}");
+        assert!(tls_config("http://h:2379", &None, &None, &None).unwrap().is_none());
+        let err = tls_config("https://h:2379", &p, &None, &None).unwrap_err().to_string();
+        assert!(err.contains("--cacert /nonexistent/ca.pem"), "{err}");
+    }
+
+    #[test]
+    fn cert_and_key_go_together() {
+        let dir = std::env::temp_dir().join(format!("fastetcd-ctl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        std::fs::write(&ca, b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n").unwrap();
+        let ca = Some(ca);
+        let c = Some(dir.join("c.pem"));
+        let err = tls_config("https://h:2379", &ca, &c, &None).unwrap_err().to_string();
+        assert_eq!(err, "--cert needs --key");
+        let err = tls_config("https://h:2379", &ca, &None, &c).unwrap_err().to_string();
+        assert_eq!(err, "--key needs --cert");
+        assert!(tls_config("https://h:2379", &ca, &None, &None).unwrap().is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
