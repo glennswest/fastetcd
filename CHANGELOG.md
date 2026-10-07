@@ -6,26 +6,28 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
-### 2026-10-07 — process metrics; #82 on a blade (#84)
-- **feat:** etcd's process metrics on `/metrics`:
+## [v1.24.0] — 2026-10-07
+
+### Added
+- etcd's process metrics on `/metrics`:
   `process_resident_memory_bytes`, `process_virtual_memory_bytes`,
   `process_cpu_seconds_total`, `process_start_time_seconds`,
   `process_open_fds`, `process_max_fds` (`crates/server/src/
   process_metrics.rs`, from `/proc/self`), so a member's RSS can be
   watched off the node (#84) and etcd dashboards' process panels work.
-- **test:** `READ_ONLY=1` for `tests/bench/blade_getlatency.py`: GETs and
+- `READ_ONLY=1` for `tests/bench/blade_getlatency.py`: GETs and
   LISTs of kube-system's Leases only, for a member that cannot write.
-- **docs:** `docs/benchmarks/blade-server3.md` § Reads: apiserver GET of
-  the cilium-operator lease on server3, p99 2.9–6.4 ms idle, 9.4–12.1 ms
-  at 4 300–4 700 GETs/s; value cache 99.8% hits over the day. 03 §
-  Memory: the process metrics.
-
-### 2026-10-07 — blade get-latency rig (#89)
-- **test:** `tests/bench/blade_getlatency.py <node>`: rustkube's
+- `tests/bench/blade_getlatency.py <node>`: rustkube's
   get-latency / lease-churn load (40 clients renewing their own Lease and
   listing) against a test node's apiserver, with GET and renewal
   percentiles and fastetcd's WAL / checkpoint / write-behind metrics read
   off the node (:2381). Its first run on server3 found #138.
+
+### Documentation
+- `docs/benchmarks/blade-server3.md` § Reads: apiserver GET of
+  the cilium-operator lease on server3, p99 2.9–6.4 ms idle, 9.4–12.1 ms
+  at 4 300–4 700 GETs/s; value cache 99.8% hits over the day. 03 §
+  Memory: the process metrics.
 
 ## [v1.23.1] — 2026-10-07
 

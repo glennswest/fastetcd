@@ -1,0 +1,8 @@
+== ro-r2 on server3 at 20:26:06Z, load 60 s, read-only
+idle  GET lease              n   200  p50     1.5 ms  p99     3.8 ms  max     5.3 ms
+load  GET lease              n  7850  p50     7.6 ms  p99     9.4 ms  max    17.6 ms
+load  clients' GET           n 261055  p50     7.6 ms  p99     9.4 ms  max    23.2 ms
+load  GETs 4340/s by 40 clients
+fastetcd over 60 s: 0 WAL fsyncs, mean 0.0 ms, 0.0 proposals per fsync; 0 checkpoints using 0.0 s; write-behind back-pressure 0
+fastetcd since start: max WAL fsync 84.717 s, max checkpoint commit 72.668 s, back-pressure 0
+fastetcd value cache over the load: 427635 hits, 0 misses (100.00% hits)

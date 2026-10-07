@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.23.1`** — Auth errors use etcd's codes and texts (#105, #127,
+**`1.24.0`** — etcd's `process_*` metrics (#84: RSS off the node,
+`crates/server/src/process_metrics.rs`); the blade rig
+(`tests/bench/blade_getlatency.py`, #89/#84).
+
+Previous: **`1.23.1`** — Auth errors use etcd's codes and texts (#105, #127,
 `crates/server/src/etcd_errors.rs`): an unknown token is
 `ErrInvalidAuthToken`, no token `ErrUserEmpty`, so clientv3
 re-authenticates after a member restart; denials `ErrPermissionDenied`.

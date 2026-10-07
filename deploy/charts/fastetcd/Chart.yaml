@@ -3,7 +3,7 @@ name: fastetcd
 description: A Rust implementation of the etcd v3 wire protocol
 type: application
 version: 0.2.0
-appVersion: "1.23.1"
+appVersion: "1.24.0"
 home: https://github.com/glennswest/fastetcd
 sources:
   - https://github.com/glennswest/fastetcd
