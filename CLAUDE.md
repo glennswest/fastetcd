@@ -10,7 +10,13 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.20.0`** — Members older than 1.10 are kept from a batched log
+**`1.20.1`** — An abandoned snapshot transfer keeps the retained
+snapshot (#45): beginning a receive no longer rolls it off (openraft
+resends a timed-out InstallSnapshot and drops the duplicate, which left
+a member with none); `adopt` enforces retention, ENOSPC on receive still
+discards and retries.
+
+Previous: **`1.20.0`** — Members older than 1.10 are kept from a batched log
 (#77): the store marks that it has applied a batch (`mvcc_meta`
 `batched`, in snapshots; `fastetcd_log_has_batched`); with it set,
 MemberAdd refuses a member answering as older and MemberPromote needs a
@@ -1938,7 +1944,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] storage marker; cluster guard; watch; metrics; tests.
     - [x] Docs (03 upgrade section), changelog; release; close #77.
 
-55. **An abandoned snapshot transfer keeps the retained snapshot (#45, P2).**
+55. **An abandoned snapshot transfer keeps the retained snapshot (#45, P2) — done, shipped in v1.20.1.**
     Flake in `snapshot_transfer_grpc` (learner installed a snapshot, its
     snapshot dir empty). Cause, from logs (repro 1 in ~10 on dev): the
     install took >1 s, the leader's InstallSnapshot timed out and resent;
@@ -1953,5 +1959,5 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Fix + unit test (abandoned transfer keeps the snapshot).
     - [x] Control: with the roll-off put back, 4 of 40 runs fail; with
       the fix 0 of 40.
-    - [ ] Full workspace green; docs (04), changelog; release 1.20.1;
-      close #45.
+    - [x] Full workspace green (sc-build of fdc26a2, 376 tests); docs
+      (04), changelog; release 1.20.1; close #45.

@@ -6,8 +6,10 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
-### 2026-10-07 — an abandoned snapshot transfer keeps the retained snapshot (#45)
-- **fix:** Beginning to receive a snapshot rolled off the retained one,
+## [v1.20.1] — 2026-10-07
+
+### Fixed
+- Beginning to receive a snapshot rolled off the retained one,
   before anything was known about the transfer (#45). openraft resends a
   snapshot whose `InstallSnapshot` timed out, even once the first copy is
   installed, and then drops the duplicate (`snapshot last_log_id <=
