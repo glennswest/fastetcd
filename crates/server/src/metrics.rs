@@ -36,6 +36,11 @@
 //!     / `fastetcd_proposals_single_total` (counters): batched log entries
 //!     this member proposed, the proposals in them, and proposals that
 //!     went alone (#75)
+//!   - `fastetcd_lease_renewals_total{path=ram|raft}` (counter): lease
+//!     keep-alives this member renewed as the leader, in RAM or proposed
+//!     through raft because a member is older than 1.23 (#92);
+//!     `fastetcd_lease_promotions_total`: terms it gave every lease a
+//!     full TTL in, on becoming leader
 //!   - `fastetcd_watch_resyncs_total` / `fastetcd_watch_lag_cancels_total`
 //!     (counters, process-wide): watchers caught up from history, and
 //!     watchers cancelled because that history was gone (#16)
@@ -134,6 +139,8 @@ pub struct Metrics {
     pub proposal_batches_total: Counter,
     pub proposals_batched_total: Counter,
     pub proposals_single_total: Counter,
+    pub lease_renewals_total: Family<Vec<(String, String)>, Counter>,
+    pub lease_promotions_total: Counter,
     pub cache: CacheMetrics,
     pub wal: WalMetrics,
     /// Last leader id we saw, so leader_changes_total tracks
@@ -174,6 +181,8 @@ impl Metrics {
         let proposal_batches_total = Counter::default();
         let proposals_batched_total = Counter::default();
         let proposals_single_total = Counter::default();
+        let lease_renewals_total: Family<Vec<(String, String)>, Counter> = Family::default();
+        let lease_promotions_total = Counter::default();
         let m = Arc::new(Self {
             registry: Mutex::new(registry),
             has_leader: has_leader.clone(),
@@ -206,6 +215,8 @@ impl Metrics {
             proposal_batches_total: proposal_batches_total.clone(),
             proposals_batched_total: proposals_batched_total.clone(),
             proposals_single_total: proposals_single_total.clone(),
+            lease_renewals_total: lease_renewals_total.clone(),
+            lease_promotions_total: lease_promotions_total.clone(),
             cache: CacheMetrics::new(),
             wal: WalMetrics::new(),
             last_leader: AtomicU64::new(0),
@@ -384,6 +395,16 @@ impl Metrics {
                 "Proposals that went as a log entry of their own",
                 proposals_single_total,
             );
+            reg.register(
+                "fastetcd_lease_renewals",
+                "Lease keep-alives renewed as the leader, by path (ram, or raft while a member is older than 1.23)",
+                lease_renewals_total,
+            );
+            reg.register(
+                "fastetcd_lease_promotions",
+                "Terms this member gave every lease a full TTL in, on becoming leader",
+                lease_promotions_total,
+            );
             m.cache.register(&mut reg);
             m.wal.register(&mut reg);
         }
@@ -494,6 +515,14 @@ impl Metrics {
             catch_up(&self.proposals_batched_total, s.batched.load(Ordering::Relaxed));
             catch_up(&self.proposals_single_total, s.single.load(Ordering::Relaxed));
         }
+        let l = state.lessor.stats();
+        for (path, n) in [("ram", &l.renewed_in_ram), ("raft", &l.proposed)] {
+            catch_up(
+                &self.lease_renewals_total.get_or_create(&vec![("path".to_string(), path.to_string())]),
+                n.load(Ordering::Relaxed),
+            );
+        }
+        catch_up(&self.lease_promotions_total, l.promotions.load(Ordering::Relaxed));
         self.recovered_revision.set(
             state
                 .recovery
