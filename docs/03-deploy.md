@@ -377,8 +377,7 @@ with no keys needs only a login.
 (#46), and every check runs on the member serving the call against its
 applied auth state at that moment (etcd checks a put and a revoke again
 at apply), so a permission revoked a moment earlier can still be honoured
-by a member a moment behind. Scope untrusted clients by roles, and
-rotate a leaked token by deleting its user.
+by a member a moment behind.
 
 ## Storage engine
 
