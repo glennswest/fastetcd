@@ -3,8 +3,9 @@
 # process at a time (fastetcd#65).
 #
 #   sc-build 'tests/rolling_upgrade.sh <from-ref> [<to-ref>]'
+#   sc-build 'tests/rolling_upgrade.sh tree v1.24.1'    # a downgrade
 #
-# <to-ref> defaults to this tree. Each ref is built in a git worktree
+# <to-ref> defaults to this tree; `tree` names this tree either side. Each ref is built in a git worktree
 # (fetched from GitHub if the job has no such ref). With etcd's own
 # etcdctl (v3.5.17, sha256 checked) it:
 #   1. starts three members on <from>: auth on (root; alice reading and
@@ -44,14 +45,13 @@ build_ref() { # build_ref <ref> <out-name>: prints the binary
     git worktree remove --force "$WORK/src-$name"
     echo "$TARGET/ru-$name/release/fastetcd"
 }
-OLD=$(build_ref "$FROM" from)
-if [ -n "$TO" ]; then
-    NEW=$(build_ref "$TO" to)
-else
+this_tree() {
     cargo build -q --release --locked -p fastetcd-server >&2
-    NEW=$TARGET/release/fastetcd
-    TO="this tree $(git rev-parse --short HEAD)"
-fi
+    echo "$TARGET/release/fastetcd"
+}
+TO=${TO:-tree}
+if [ "$FROM" = tree ]; then OLD=$(this_tree); FROM="this tree $(git rev-parse --short HEAD)"; else OLD=$(build_ref "$FROM" from); fi
+if [ "$TO" = tree ]; then NEW=$(this_tree); TO="this tree $(git rev-parse --short HEAD)"; else NEW=$(build_ref "$TO" to); fi
 OLD_V=$("$OLD" --version | awk '{print $2}')
 NEW_V=$("$NEW" --version | awk '{print $2}')
 echo "== rolling $FROM ($OLD_V) -> $TO ($NEW_V)"
