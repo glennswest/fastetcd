@@ -67,7 +67,8 @@ async fn client_port_serves_http_health_alongside_grpc() {
     // grpc.health.v1 follows /readyz: SERVING for the server as a whole.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let mut h = tonic_health::pb::health_client::HealthClient::connect(base.clone()).await.unwrap();
+        let channel = tonic::transport::Endpoint::from_shared(base.clone()).unwrap().connect().await.unwrap();
+        let mut h = tonic_health::pb::health_client::HealthClient::new(channel);
         let r = h
             .check(tonic_health::pb::HealthCheckRequest { service: String::new() })
             .await
