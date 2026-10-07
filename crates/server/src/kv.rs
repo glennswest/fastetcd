@@ -107,6 +107,46 @@ fn txn_accesses<'a>(t: &'a pb::TxnRequest, out: &mut Vec<Access<'a>>) {
     }
 }
 
+/// The lease of every put in a txn's two branches, nested txns
+/// included (etcd's `checkTxnReqsPermission` → `checkPutAuth`).
+fn txn_put_leases(t: &pb::TxnRequest, out: &mut Vec<i64>) {
+    for op in t.success.iter().chain(t.failure.iter()) {
+        match &op.request {
+            Some(pb::request_op::Request::RequestPut(p)) if p.lease != 0 => out.push(p.lease),
+            Some(pb::request_op::Request::RequestTxn(n)) => txn_put_leases(n, out),
+            _ => {}
+        }
+    }
+}
+
+/// With auth on, the keys already attached to `leases`: a put naming a
+/// lease needs write on each of them too, since whoever holds the lease
+/// can revoke it, and that deletes them (etcd `checkLeasePuts`,
+/// fastetcd#47). Empty with auth off.
+async fn lease_put_keys(state: &ServerState, mut leases: Vec<i64>) -> Result<Vec<Vec<u8>>, Status> {
+    if !state.auth.is_enabled() {
+        return Ok(Vec::new());
+    }
+    leases.sort_unstable();
+    leases.dedup();
+    let mut keys = Vec::new();
+    for id in leases {
+        keys.extend(
+            state
+                .sm
+                .mvcc()
+                .lease_attached_keys(id)
+                .await
+                .map_err(|e| Status::internal(format!("lease keys: {e}")))?,
+        );
+    }
+    Ok(keys)
+}
+
+fn write_accesses<'a>(keys: &'a [Vec<u8>], out: &mut Vec<Access<'a>>) {
+    out.extend(keys.iter().map(|k| Access { perm: RequiredPerm::Write, key: k, range_end: b"" }));
+}
+
 #[tonic::async_trait]
 impl Kv for KvService {
     async fn range(
@@ -138,8 +178,14 @@ impl Kv for KvService {
     ) -> Result<Response<pb::PutResponse>, Status> {
         let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
-        let mut accesses = Vec::with_capacity(2);
+        let lease_keys = if req.lease != 0 {
+            lease_put_keys(&self.state, vec![req.lease]).await?
+        } else {
+            Vec::new()
+        };
+        let mut accesses = Vec::with_capacity(2 + lease_keys.len());
         put_accesses(&req, &mut accesses);
+        write_accesses(&lease_keys, &mut accesses);
         authorize_all(self.state.sm.mvcc().engine(), &self.state.auth, user.as_ref(), &accesses)
             .await?;
         // Under the NOSPACE alarm a put is refused so the store keeps
@@ -207,8 +253,12 @@ impl Kv for KvService {
         let req = request.into_inner();
         // Authorize every compare and every op in both branches before
         // anything is proposed; one denied access fails the whole txn.
+        let mut leases = Vec::new();
+        txn_put_leases(&req, &mut leases);
+        let lease_keys = lease_put_keys(&self.state, leases).await?;
         let mut accesses = Vec::new();
         txn_accesses(&req, &mut accesses);
+        write_accesses(&lease_keys, &mut accesses);
         authorize_all(self.state.sm.mvcc().engine(), &self.state.auth, user.as_ref(), &accesses)
             .await?;
         if txn_consumes_space(&req) {

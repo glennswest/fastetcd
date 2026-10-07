@@ -356,11 +356,29 @@ With auth off, every call is open, as in etcd. The check runs on the
 member serving the call, against its applied auth state, as etcd checks
 membership changes.
 
-**Auth is not yet a security boundary.** One gap remains, tracked: the
-lease RPCs are not authorized, so any user can revoke any lease and
-delete the keys attached to it (#47). Until that lands, treat auth as
-protection against mistakes by trusted clients, not against a hostile
-one: scope untrusted clients with mTLS and a proxy.
+### Lease calls
+
+A lease's keys are deleted when it is revoked or lapses, so the lease
+calls are checked against the keys attached to the lease when the call
+arrives, as in etcd (`checkLeasePuts`, `checkLeaseRenew`,
+`checkLeaseTimeToLive`, `checkLeaseLeases`; #47). Root is exempt; a lease
+with no keys needs only a login.
+
+| Call | Needs, on every key attached to the lease |
+|---|---|
+| `LeaseRevoke` | write |
+| `LeaseKeepAlive` | write (denied, the keep-alive stream ends with `PermissionDenied`) |
+| `LeaseTimeToLive` | read, with `keys: true` only; the TTL alone needs a login |
+| `LeaseLeases` | read, on every key of every lease |
+| `Put` naming a lease, and every put in either branch of a `Txn` | write, besides the put's own key |
+| `LeaseGrant` | a login |
+
+**Limits.** No authorization gap is known, but: tokens never expire
+(#46), and every check runs on the member serving the call against its
+applied auth state at that moment (etcd checks a put and a revoke again
+at apply), so a permission revoked a moment earlier can still be honoured
+by a member a moment behind. Scope untrusted clients by roles, and
+rotate a leaked token by deleting its user.
 
 ## Storage engine
 

@@ -154,7 +154,7 @@ crates/
 |---------------|-------------|-----------------|
 | KV            | Range, Put, DeleteRange, Txn, Compact | nested Txn (#56) |
 | Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel | response fragmentation (#58) |
-| Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases | authorization of lease RPCs (#47) |
+| Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases (authorized over the lease's keys, #47) | |
 | Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
 | Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot | MoveLeader, Downgrade (#57); Alarm ACTIVATE (deliberate) |
 | Auth          | all RPCs; replicated through Raft; token or client-cert CN | token expiry (#46) |

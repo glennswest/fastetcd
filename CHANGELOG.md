@@ -6,6 +6,21 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-06 — lease RPCs are authorized (#47)
+- **fix:** With auth on, the lease RPCs are checked against the keys
+  attached to the lease, as etcd's are (#47, P1). Any logged-in user
+  could revoke any lease (deleting keys it cannot write), renew it, list
+  its keys or every lease, and attach keys to a lease whose other keys it
+  cannot write. Now, root exempt: `LeaseRevoke` and `LeaseKeepAlive` need
+  write on every attached key (a denied keep-alive ends the stream);
+  `LeaseTimeToLive` with `keys: true` needs read on each; `LeaseLeases`
+  needs read on every key of every lease; a `Put` naming a lease, and
+  every put in either branch of a `Txn`, needs write on the keys already
+  on it. Rules from etcd release-3.5's source (`checkLeaseRenew` and
+  `checkLeaseLeases` were not in the issue's list). New
+  `MvccStore::lease_attached_keys` / `all_lease_attached_keys`. Tests:
+  `crates/server/tests/authz_lease.rs`.
+
 ## [v1.16.0] — 2026-10-06
 
 ### 2026-10-06 — leases in raft snapshots (#41)

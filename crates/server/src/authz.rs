@@ -130,6 +130,21 @@ pub async fn authorize_all(
     Ok(())
 }
 
+/// Authorize `perm` on each of `keys` (single keys), all-or-nothing:
+/// the keys attached to a lease, for the lease RPCs and a put naming the
+/// lease (fastetcd#47). Root is exempt, as everywhere.
+pub async fn authorize_keys(
+    engine: &Arc<dyn KvStore>,
+    auth: &AuthState,
+    user: Option<&UserIdentity>,
+    perm: RequiredPerm,
+    keys: &[Vec<u8>],
+) -> Result<(), Status> {
+    let accesses: Vec<Access<'_>> =
+        keys.iter().map(|k| Access { perm, key: k, range_end: b"" }).collect();
+    authorize_all(engine, auth, user, &accesses).await
+}
+
 fn perm_covers(p: &StoredPermission, required: RequiredPerm, key: &[u8], range_end: &[u8]) -> bool {
     // Permission type gate.
     let matches_type = match required {

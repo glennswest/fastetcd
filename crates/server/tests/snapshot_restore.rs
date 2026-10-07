@@ -127,7 +127,7 @@ async fn a_live_snapshot_restores_into_a_new_data_dir() {
     AuthClient::new(m.channel.clone())
         .user_add(pb::AuthUserAddRequest {
             name: "alice".into(),
-            password: "pw".into(),
+            password: "pw".into(), // not a secret: test fixture
             ..Default::default()
         })
         .await

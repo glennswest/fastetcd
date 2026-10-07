@@ -201,10 +201,10 @@ ahead, #94).
 
 | | Issue |
 |---|---|
-| P1 | #47 lease RPCs bypass authorization · #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
+| P1 | #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
 | P2 | #69 `/health` always healthy · #97 3 members: a lone write pays two fsyncs in series · #103 leadership lost under heavy load (fixed election timeouts) · #92 keepalive through Raft · #105 unknown-token error text breaks clientv3 re-auth · #84 #89 #101 verify on an X9 spinning disk |
 
-Auth is enforced but **not yet a security boundary**: #47.
+Auth: no known authorization gap; tokens never expire (#46).
 `gh issue list` for everything.
 
 ---

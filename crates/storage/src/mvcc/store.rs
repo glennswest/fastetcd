@@ -1148,6 +1148,29 @@ impl MvccStore {
         self.evaluate_compares_with(&*snap, compares, &indexes).await
     }
 
+    /// The keys attached to lease `id` (none if it does not exist), for
+    /// lease authorization (fastetcd#47).
+    pub async fn lease_attached_keys(&self, id: LeaseId) -> MvccResult<Vec<Vec<u8>>> {
+        let snap = self.inner.engine.snapshot().await?;
+        let (start, end) = lease_keys_bounds(id);
+        snap.range(TABLE_LEASE_KEYS, start, end, 0)
+            .await?
+            .iter()
+            .map(|(k, _)| parse_lease_keys_key(k).map(|(_, key)| key))
+            .collect()
+    }
+
+    /// Every key attached to any lease (`LeaseLeases` authorization,
+    /// fastetcd#47).
+    pub async fn all_lease_attached_keys(&self) -> MvccResult<Vec<Vec<u8>>> {
+        let snap = self.inner.engine.snapshot().await?;
+        snap.range(TABLE_LEASE_KEYS, Bound::Unbounded, Bound::Unbounded, 0)
+            .await?
+            .iter()
+            .map(|(k, _)| parse_lease_keys_key(k).map(|(_, key)| key))
+            .collect()
+    }
+
     /// List all lease IDs.
     pub async fn lease_list(&self) -> MvccResult<Vec<LeaseId>> {
         let snap = self.inner.engine.snapshot().await?;

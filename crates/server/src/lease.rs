@@ -28,6 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::authz::{authorize_keys, RequiredPerm, UserIdentity};
 use crate::state::{response_header, ServerState};
 
 #[derive(Clone)]
@@ -43,6 +44,31 @@ impl LeaseService {
     async fn propose(&self, entry: FastetcdLogEntry) -> Result<FastetcdLogResponse, Status> {
         self.state.propose(entry).await
     }
+}
+
+/// With auth on, require `perm` on every key attached to lease `id` now
+/// (fastetcd#47): etcd's `checkLeasePuts` (revoke, write), `checkLeaseRenew`
+/// (keep-alive, write) and `checkLeaseTimeToLive` (read). Root is exempt;
+/// a lease with no keys, or none at all, needs only the login the
+/// interceptor already checked. Checked against this member's applied
+/// state at the API layer, as the KV checks are; etcd checks a revoke
+/// at apply.
+pub(crate) async fn authorize_lease(
+    state: &ServerState,
+    user: Option<&UserIdentity>,
+    perm: RequiredPerm,
+    id: i64,
+) -> Result<(), Status> {
+    if !state.auth.is_enabled() || id == 0 {
+        return Ok(());
+    }
+    let keys = state
+        .sm
+        .mvcc()
+        .lease_attached_keys(id)
+        .await
+        .map_err(|e| Status::internal(format!("lease keys: {e}")))?;
+    authorize_keys(state.sm.mvcc().engine(), &state.auth, user, perm, &keys).await
 }
 
 fn now_unix() -> i64 {
@@ -91,7 +117,10 @@ impl Lease for LeaseService {
         &self,
         request: Request<pb::LeaseRevokeRequest>,
     ) -> Result<Response<pb::LeaseRevokeResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        // Revoking deletes every attached key (etcd `checkLeasePuts`).
+        authorize_lease(&self.state, user.as_ref(), RequiredPerm::Write, req.id).await?;
         let resp = self
             .propose(FastetcdLogEntry::LeaseRevoke { id: req.id })
             .await?;
@@ -113,6 +142,7 @@ impl Lease for LeaseService {
         request: Request<Streaming<pb::LeaseKeepAliveRequest>>,
     ) -> Result<Response<Self::LeaseKeepAliveStream>, Status> {
         let state = self.state.clone();
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let mut inbound = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<pb::LeaseKeepAliveResponse, Status>>(8);
 
@@ -121,6 +151,15 @@ impl Lease for LeaseService {
                 let Ok(req) = req else {
                     break;
                 };
+                // A renewal keeps every attached key alive (etcd
+                // `checkLeaseRenew`); denied, the stream ends with the
+                // error, as etcd's does.
+                if let Err(status) =
+                    authorize_lease(&state, user.as_ref(), RequiredPerm::Write, req.id).await
+                {
+                    let _ = tx.send(Err(status)).await;
+                    break;
+                }
                 let res = match state
                     .propose(FastetcdLogEntry::LeaseKeepAlive {
                         id: req.id,
@@ -177,7 +216,13 @@ impl Lease for LeaseService {
         &self,
         request: Request<pb::LeaseTimeToLiveRequest>,
     ) -> Result<Response<pb::LeaseTimeToLiveResponse>, Status> {
+        let user = request.extensions().get::<UserIdentity>().cloned();
         let req = request.into_inner();
+        // Listing the keys needs read on each of them; the TTL alone
+        // needs only a login (etcd: checked "only if Keys is true").
+        if req.keys {
+            authorize_lease(&self.state, user.as_ref(), RequiredPerm::Read, req.id).await?;
+        }
         let ttl = self
             .state
             .sm
@@ -209,8 +254,27 @@ impl Lease for LeaseService {
 
     async fn lease_leases(
         &self,
-        _request: Request<pb::LeaseLeasesRequest>,
+        request: Request<pb::LeaseLeasesRequest>,
     ) -> Result<Response<pb::LeaseLeasesResponse>, Status> {
+        // Read on every key of every lease (etcd `checkLeaseLeases`).
+        if self.state.auth.is_enabled() {
+            let user = request.extensions().get::<UserIdentity>().cloned();
+            let keys = self
+                .state
+                .sm
+                .mvcc()
+                .all_lease_attached_keys()
+                .await
+                .map_err(|e| Status::internal(format!("lease keys: {e}")))?;
+            authorize_keys(
+                self.state.sm.mvcc().engine(),
+                &self.state.auth,
+                user.as_ref(),
+                RequiredPerm::Read,
+                &keys,
+            )
+            .await?;
+        }
         let ids = self
             .state
             .sm
