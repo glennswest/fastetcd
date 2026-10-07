@@ -220,7 +220,7 @@ Auth: no known authorization gap; tokens never expire (#46).
   (#64), WebSocket gateway streams (#66), a real `/health` (#69),
   `--auto-compaction-mode` (#21, an owner decision).
 - **Writes on slow disks and 3 members**: more writes per fsync (#94),
-  replicate before the leader's own fsync (#97), keepalive off Raft
+  replicate before the leader's own fsync (#97),
   (#92), configurable election timeouts (#103).
 - **Operations**: a rolling-upgrade test (#65), test containers on the
   test machines (#36).

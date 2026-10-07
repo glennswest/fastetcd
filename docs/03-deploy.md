@@ -569,6 +569,22 @@ member older than 1.22 or downgrade one below it**: it stops at that
 entry. `MemberAdd` does not check for this (it refuses only members
 older than 1.10).
 
+**Lease keep-alives (1.23, #92).** As in etcd, the leader renews a lease
+in RAM: a keep-alive is not logged, so it costs no fsync (on a follower it
+is forwarded to the leader, and TimeToLive is answered by the leader).
+The leader confirms it still leads before renewing. Expiry is still a
+`LeaseRevoke` through Raft, proposed by the leader for a lease whose
+deadline, the later of the persisted one and its RAM renewal, has
+passed. A renewal lives only in the leader's RAM, so **a new leader, or a
+restarted single member, gives every lease a full TTL from the moment it
+leads** (etcd's `Promote`; etcd's optional lease checkpointing is not
+implemented). A member older than 1.23 that became leader would read only
+the persisted deadlines and expire every lease kept alive that way, so
+RAM renewal is used only while every member answers `ConfirmLeader` with
+1.23 or later; until then keep-alives go through Raft as before
+(`fastetcd_lease_renewals_total{path="raft"}`). **Do not downgrade a
+member below 1.23**, or add one, while keep-alives are renewed in RAM.
+
 The same holds for replicated auth entries since 1.5.0.
 
 **Leases in raft snapshots (1.16, #41).** Before 1.16 a raft snapshot
@@ -791,6 +807,8 @@ from deltas between scrapes.
 | `fastetcd_read_index_total{path}` | counter | Linearizable read barriers this member served, by path: `sole_voter` (the only voter, from local state), `quorum` (leadership confirmed over `ConfirmLeader`), `raft` (openraft's read-index, which queues behind writes). Mostly `raft` on a leader means the fast path is not being taken: an older or unreachable member, or leadership changing. |
 | `fastetcd_proposal_batches_total` | counter | Batched log entries this member proposed (group commit). |
 | `fastetcd_proposals_batched_total` / `fastetcd_proposals_single_total` | counter | Proposals that went in batches, and alone. Stays all `single` while any member is older than 1.10. |
+| `fastetcd_lease_renewals_total{path}` | counter | Keep-alives this member renewed as the leader: `ram`, or `raft` while a member is older than 1.23 (#92). |
+| `fastetcd_lease_promotions_total` | counter | Terms in which this member, as the new leader, gave every lease a full TTL. |
 | `fastetcd_log_has_batched` | gauge | 1 once this member has applied a batched log entry; never back to 0. From then on a member older than 1.10 cannot read the log (#77). |
 | `fastetcd_members_unable_to_read_batches` | gauge | On the leader: members answering as older than 1.10 while the log holds batches. Non-zero: upgrade or replace them. |
 

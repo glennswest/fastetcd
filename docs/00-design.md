@@ -32,7 +32,10 @@ on the apply path, without requiring any client to change.
    opt-in per request (`Range.serializable = true`).
 5. **All mutations go through Raft.** Lease grants, lease revocations on
    expiry, compaction events, auth changes — all are Raft proposals.
-   No back-channel writes to the state machine.
+   No back-channel writes to the state machine. A lease keep-alive is
+   not a mutation of the store: as in etcd, the leader renews it in RAM
+   and a new leader gives every lease a full TTL (#92, 03-deploy
+   § Leases).
 
 ## Component choices
 

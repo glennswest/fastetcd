@@ -178,9 +178,13 @@ of each), leases with their keys, and users, roles and the auth flag;
 users keep their etcd passwords (#60).
 
 **`fastetcd-bench`** — load generator. `--endpoint`, `--mode put |
-get-lin | get-ser | read-under-load` (default `put`), `--conns 64`,
+get-lin | get-ser | read-under-load | durability-write | durability-check
+| keepalive` (default `put`), `--conns 64`,
 `--total 50000`, `--val-bytes 256`, `--keys 10000`. `read-under-load`
 (#71): `--conns` clients loop GET + CAS Txn on their own key (a prefix
 Range every fifth loop) for `--duration-secs 20` while a probe makes
 `--probes 200` sequential linearizable, then serializable, Ranges;
-prints write rate and latency and both probes' percentiles.
+prints write rate and latency and both probes' percentiles. `keepalive`
+(#92): `--conns` clients, each with its own lease (TTL 60 s) and
+keep-alive stream, `--total` keep-alives in all, each awaited; prints
+throughput and latency (etcd's `benchmark lease-keepalive`).

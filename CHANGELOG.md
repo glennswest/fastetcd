@@ -6,6 +6,30 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — keep-alives renewed in the leader's RAM (#92)
+- **perf:** A lease keep-alive is no longer a raft proposal (a WAL fsync
+  and an apply each). As etcd's lessor: the leader confirms it still
+  leads and renews the lease in RAM (`crates/raft/src/lessor.rs`); a
+  follower forwards it (`ForwardWrite`, renewed there by a 1.23 leader);
+  TimeToLive is answered by the leader (new peer RPC `LeaseTimeToLive`;
+  a follower of an older leader answers itself, as before); expiry uses
+  the later of the persisted deadline and the RAM renewal, and is still a
+  `LeaseRevoke` through Raft.
+- **BREAKING (behaviour, as etcd):** a new leader, or a restarted single
+  member, gives every lease a full TTL from when it leads (etcd's
+  `Promote`), since renewals live only in the old leader's RAM.
+- **feat:** RAM renewal waits until every member answers `ConfirmLeader`
+  with 1.23 or later (the #56 version gate, now
+  `fastetcd_raft::version_gate`): an older member made leader would
+  expire every lease kept alive in RAM. Until then keep-alives go through
+  Raft. Metrics `fastetcd_lease_renewals_total{path}`,
+  `fastetcd_lease_promotions_total`.
+- **test:** `fastetcd-bench --mode keepalive`, `tests/keepalive_bench.sh`
+  (etcd's `benchmark lease-keepalive`); `BENCH_ARGS` for
+  `tests/read_latency.sh`.
+- **docs:** 00 (design rule 5), 03 (leases, mixed versions, metrics),
+  presentation.
+
 ### 2026-10-07 — #95 measured on an X9 blade (#101)
 - **docs:** `docs/benchmarks/blade-server3.md`: the kubelet's status
   report on server3's spinning disk with fastetcd v1.18.0 (release
