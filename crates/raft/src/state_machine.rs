@@ -368,6 +368,8 @@ impl FastetcdStateMachine {
     ) -> Result<FastetcdLogResponse, anyhow::Error> {
         let mut out = Vec::with_capacity(subs.len());
         let mut applied_staged = false;
+        // The log now holds a batch: a pre-1.10 member cannot read it (#77).
+        self.mvcc.stage_batched_marker().await;
         for (j, sub) in subs.iter().enumerate() {
             if matches!(sub, FastetcdLogEntry::Batch(_)) {
                 anyhow::bail!("nested batch in log entry {index}");

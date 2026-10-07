@@ -542,12 +542,20 @@ member, learners included, answers the 1.10 `ConfirmLeader` peer RPC,
 so a rolling upgrade is safe: writes go one per entry, as before, until
 the last member is upgraded. After that:
 
-- **Do not add a member older than 1.10** (`MemberAdd`): the leader may
-  batch before it learns of the new member, and an older one stops at
-  the first batch in the log.
-- **Do not downgrade a member below 1.10** once the cluster has batched
-  (`fastetcd_proposal_batches_total` > 0 on any leader since then): it
-  cannot read the log. Replace it with an empty member instead.
+- **Do not add a member older than 1.10**: an older one stops at the
+  first batch in the log. Since 1.20 a member records that its log has
+  held a batch (`fastetcd_log_has_batched` = 1, never reset, carried by
+  snapshots), and once it has, `MemberAdd` asks the new member which
+  version it runs and refuses one older than 1.10. A member that does not
+  answer yet (`member add` before it is started, the usual order) is
+  added as a learner, but `MemberPromote` (or adding it as a voter) needs
+  it to answer as 1.10 or later (#77).
+- **Do not downgrade a member below 1.10** once the cluster has batched:
+  it cannot read its own log. A downgraded binary cannot be made to
+  refuse, so the leader checks every member every 30 s and logs an error
+  naming one that answers as older; `fastetcd_members_unable_to_read_batches`
+  counts them (on the leader). Upgrade it again, or remove it and add it
+  back empty.
 
 The same holds for replicated auth entries since 1.5.0.
 
@@ -771,6 +779,8 @@ from deltas between scrapes.
 | `fastetcd_read_index_total{path}` | counter | Linearizable read barriers this member served, by path: `sole_voter` (the only voter, from local state), `quorum` (leadership confirmed over `ConfirmLeader`), `raft` (openraft's read-index, which queues behind writes). Mostly `raft` on a leader means the fast path is not being taken: an older or unreachable member, or leadership changing. |
 | `fastetcd_proposal_batches_total` | counter | Batched log entries this member proposed (group commit). |
 | `fastetcd_proposals_batched_total` / `fastetcd_proposals_single_total` | counter | Proposals that went in batches, and alone. Stays all `single` while any member is older than 1.10. |
+| `fastetcd_log_has_batched` | gauge | 1 once this member has applied a batched log entry; never back to 0. From then on a member older than 1.10 cannot read the log (#77). |
+| `fastetcd_members_unable_to_read_batches` | gauge | On the leader: members answering as older than 1.10 while the log holds batches. Non-zero: upgrade or replace them. |
 
 **Store:** `etcd_debugging_mvcc_current_revision`,
 `etcd_debugging_mvcc_compact_revision`,

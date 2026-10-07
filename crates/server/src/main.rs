@@ -1307,6 +1307,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn the lease auto-expiry ticker — leader-only, no-op on followers.
     fastetcd_server::lease_expiry::spawn(server_state.clone());
+    // On the leader: report members that cannot read a batched log (#77).
+    fastetcd_server::batch_guard::spawn_watch(server_state.clone());
     if fastetcd_server::space::spawn(server_state.clone()).is_some() {
         tracing::info!(
             quota_backend_bytes = args.quota_backend_bytes,

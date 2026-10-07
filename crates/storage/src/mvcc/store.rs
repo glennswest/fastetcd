@@ -66,6 +66,10 @@ pub const META_KEY_RAFT_MEMBERSHIP: &[u8] = b"raft_membership";
 /// How far into a batched log entry the state machine has applied
 /// (fastetcd#75); opaque to this crate, like the two keys above.
 pub const META_KEY_RAFT_BATCH: &[u8] = b"raft_batch_progress";
+/// Set (to `[1]`) by the first applied `Batch` log entry and never
+/// cleared (fastetcd#77): a member older than 1.10 cannot read this log,
+/// and nothing else recorded that the cluster had batched.
+pub const META_KEY_BATCHED: &[u8] = b"batched";
 /// On-disk data-format version. Absent on data directories written
 /// before v1.0.1 (which never persisted raft membership durably, so an
 /// upgrade could strand the cluster — see fastetcd#11). Its absence is
@@ -375,6 +379,8 @@ struct Inner {
     /// (membership and blank entries mutate no MVCC state) is committed
     /// on its own by `flush_raft_meta`.
     pending_raft_meta: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// [`META_KEY_BATCHED`], as the engine holds it (fastetcd#77).
+    batched: AtomicBool,
     /// Auth's in-memory half: the enabled flag and the token set
     /// (fastetcd#32). Owned here so the state machine updates it on
     /// apply and the server's interceptor reads the same state.
@@ -422,6 +428,7 @@ impl MvccStore {
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
+        let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
         drop(snap);
 
         // If meta keys were absent, persist their initial values so
@@ -445,6 +452,7 @@ impl MvccStore {
                 }),
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
+                batched: AtomicBool::new(batched),
                 auth: AuthMemory::default(),
                 ops: OpCounters::default(),
                 apply_sync: AtomicBool::new(true),
@@ -588,6 +596,22 @@ impl MvccStore {
         let mut pending = self.inner.pending_raft_meta.lock().await;
         pending.retain(|(k, _)| k.as_slice() != META_KEY_RAFT_BATCH);
         pending.push((META_KEY_RAFT_BATCH.to_vec(), progress));
+    }
+
+    /// Whether this store's log has held a batched entry (fastetcd#77).
+    pub fn has_batched(&self) -> bool {
+        self.inner.batched.load(Ordering::Relaxed)
+    }
+
+    /// Record that a batched entry is being applied: the marker is staged
+    /// into that entry's own commit (and set in RAM at once), the first
+    /// time only. A crash before the commit replays the entry, which
+    /// stages it again.
+    pub async fn stage_batched_marker(&self) {
+        if self.inner.batched.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        self.inner.pending_raft_meta.lock().await.push((META_KEY_BATCHED.to_vec(), vec![1]));
     }
 
     /// The batch progress as last committed, if any.
@@ -749,7 +773,10 @@ impl MvccStore {
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
+        // A snapshot from a batched cluster carries the marker (#77).
+        let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
         drop(snap);
+        self.inner.batched.fetch_or(batched, Ordering::Relaxed);
         self.load_index().await?;
         state.current_rev = current;
         state.compact_rev = compact;

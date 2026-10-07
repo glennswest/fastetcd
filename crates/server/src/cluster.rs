@@ -140,6 +140,28 @@ impl Cluster for ClusterService {
             peers.insert(new_id, first_url.clone());
         }
 
+        // A member that cannot read this log's batched entries is refused
+        // before anything changes (#77).
+        if let Err(e) = crate::batch_guard::guard_add(&self.state, new_id).await {
+            self.peers.write().await.remove(&new_id);
+            return Err(e);
+        }
+        if !req.is_learner && self.state.sm.mvcc().has_batched() {
+            // A voter must be known to read the log; one not reachable yet
+            // is added as a learner and promoted later (#77).
+            if let crate::batch_guard::MemberVersion::Unreachable(_) =
+                crate::batch_guard::member_version(&self.state, new_id).await
+            {
+                self.peers.write().await.remove(&new_id);
+                return Err(Status::failed_precondition(format!(
+                    "member {new_id:x} cannot be reached to confirm it runs fastetcd 1.10 or \
+                     later, and this cluster's log holds batched entries an older member cannot \
+                     read (#77): add it as a learner (`member add --learner`), start it, then \
+                     promote it"
+                )));
+            }
+        }
+
         // add_learner; non-blocking so we don't wait for catch-up.
         // Forwards to the leader if this node isn't it (#7).
         self.state.propose_add_learner(new_id, &first_url).await?;
@@ -255,6 +277,9 @@ impl Cluster for ClusterService {
         // Root only while auth is on, as in etcd (checkMembershipOperationPermission, #31).
         crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
+        // A voter that cannot read this log's batched entries would stop
+        // at the first and cost the quorum (#77).
+        crate::batch_guard::guard_voter(&self.state, req.id).await?;
         let mut voters = current_voter_set(&self.state.raft).await;
         if !voters.insert(req.id) {
             return Err(Status::failed_precondition(format!(

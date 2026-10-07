@@ -54,6 +54,9 @@ pub struct ServerState {
     pub committed_index: Option<Arc<AtomicU64>>,
     /// The raft WAL's counters, for `/metrics` (fastetcd#85).
     pub wal: Option<Arc<fastetcd_raft::wal_log_store::WalStats>>,
+    /// Members the leader last found older than 1.10 while the log holds
+    /// batched entries they cannot read (`batch_guard`, fastetcd#77).
+    pub older_members: Arc<AtomicU64>,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -87,6 +90,7 @@ impl ServerState {
             traffic: Arc::new(Traffic::default()),
             committed_index: None,
             wal: None,
+            older_members: Arc::default(),
             write_behind: None,
             read_index: None,
             proposer: None,

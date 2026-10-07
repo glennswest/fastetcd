@@ -6,6 +6,22 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — older members kept from a batched log (#77)
+- **feat:** A member records that its log has held a batched entry
+  (`mvcc_meta` `batched`, set by the first applied batch, carried by
+  snapshots, never cleared; gauge `fastetcd_log_has_batched`), so "has
+  this cluster batched?" has an answer (#77). Only docs guarded against
+  putting a member older than 1.10, which cannot decode a batch and stops
+  at the first, behind such a log.
+- **feat:** With that set, `MemberAdd` asks the new member `ConfirmLeader`
+  first and refuses one older than 1.10 (FailedPrecondition, naming it);
+  one not reachable yet is added as a learner (the usual `member add`,
+  then start order), and `MemberPromote` (or adding it as a voter) needs
+  it to answer as 1.10 or later.
+- **feat:** The leader asks every member every 30 s while the log holds
+  batches; one answering as older (a downgrade) is logged as an error and
+  counted in `fastetcd_members_unable_to_read_batches`.
+
 ## [v1.19.0] — 2026-10-07
 
 ### 2026-10-07 — fastetcd-migrate imports leases and auth (#60)

@@ -524,3 +524,46 @@ async fn an_election_timeout_above_the_stall_keeps_the_leader() {
         assert_eq!((after, l1), (before, l0), "the leader or the term changed (every member stalled: {everyone})");
     }
 }
+
+/// fastetcd#77: once the log holds batched entries, a member older than
+/// 1.10 is refused as a new member and as a voter, one not reachable yet
+/// may join as a learner but not be promoted, and the leader's watch
+/// names an older member (a downgrade).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_member_is_kept_from_a_batched_log() {
+    use fastetcd_server::batch_guard::{guard_add, guard_voter, older_members};
+    let nodes = cluster(0).await;
+    let leader = leader_of(&nodes);
+    let (_, _) = run_load(&leader.client, &a_follower_of(&nodes).client, 24, 2).await;
+    assert!(leader.state.sm.mvcc().has_batched(), "the load did not batch");
+
+    let old = start_node(4, true).await;
+    let new = start_node(5, false).await;
+    leader.peers.write().await.insert(4, old.peer_url.clone());
+    leader.peers.write().await.insert(5, new.peer_url.clone());
+    leader.peers.write().await.insert(6, "http://127.0.0.1:1".into());
+    let refused = |r: Result<(), Status>, what: &str, says: &str| match r {
+        Err(s) => {
+            assert_eq!(s.code(), tonic::Code::FailedPrecondition, "{what}: {s:?}");
+            assert!(s.message().contains(says), "{what}: {}", s.message());
+        }
+        Ok(()) => panic!("{what}: allowed"),
+    };
+    refused(guard_add(&leader.state, 4).await, "add an older member", "older than 1.10");
+    refused(guard_voter(&leader.state, 4).await, "promote an older member", "older than 1.10");
+    guard_add(&leader.state, 5).await.expect("add a 1.10+ member");
+    guard_voter(&leader.state, 5).await.expect("promote a 1.10+ member");
+    guard_add(&leader.state, 6).await.expect("add one not started yet (the usual order)");
+    refused(guard_voter(&leader.state, 6).await, "promote one that cannot be reached", "cannot be reached");
+
+    // A member found older while the log holds batches: named by the watch.
+    // (A cluster with an older member never batches, so the mark is set
+    // by hand, as a downgrade after batching would find it.)
+    let mixed = cluster(1).await;
+    assert!(!mixed[0].state.sm.mvcc().has_batched());
+    mixed[0].state.sm.mvcc().stage_batched_marker().await;
+    assert_eq!(older_members(&mixed[0].state).await, vec![3], "the older member named");
+    // Without batched entries an older member is no one's problem.
+    assert!(!mixed[1].state.sm.mvcc().has_batched());
+    guard_add(&mixed[1].state, 3).await.expect("no batches: an older member may join");
+}

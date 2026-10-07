@@ -280,3 +280,34 @@ async fn the_proposer_batches_concurrent_proposals() {
     assert!(batches >= 1);
     assert!(entries <= 10, "40 proposals took {entries} log entries");
 }
+
+/// fastetcd#77: the first applied batch marks the store as batched (a
+/// pre-1.10 member cannot read its log); plain entries do not. The mark
+/// survives a reopen and travels with a snapshot.
+#[tokio::test]
+async fn a_batch_marks_the_store_and_the_mark_lasts() {
+    use openraft::storage::RaftSnapshotBuilder;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+    {
+        let engine = Arc::new(RedbEngine::open(&path).unwrap());
+        let mvcc = MvccStore::open(engine).await.unwrap();
+        let mut sm = FastetcdStateMachine::open(mvcc.clone(), dir.path().join("snapshots")).await.unwrap();
+        sm.apply(vec![entry(1, put("plain"))]).await.unwrap();
+        assert!(!mvcc.has_batched(), "a plain entry marks nothing");
+        sm.apply(vec![entry(2, FastetcdLogEntry::Batch(vec![put("a"), put("b")]))]).await.unwrap();
+        assert!(mvcc.has_batched());
+        // A learner caught up by this member's snapshot is marked too.
+        let snap = sm.get_snapshot_builder().await.build_snapshot().await.unwrap();
+        let other = tempdir().unwrap();
+        let o_engine = Arc::new(RedbEngine::open(other.path().join("db.redb")).unwrap());
+        let o_mvcc = MvccStore::open(o_engine).await.unwrap();
+        let mut o_sm = FastetcdStateMachine::open(o_mvcc.clone(), other.path().join("snapshots")).await.unwrap();
+        assert!(!o_mvcc.has_batched());
+        o_sm.install_snapshot(&snap.meta, snap.snapshot).await.unwrap();
+        assert!(o_mvcc.has_batched(), "the mark travels with a snapshot");
+    }
+    let engine = Arc::new(RedbEngine::open(&path).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    assert!(mvcc.has_batched(), "the mark survives a reopen");
+}

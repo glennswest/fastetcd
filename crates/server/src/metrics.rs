@@ -119,6 +119,8 @@ pub struct Metrics {
     pub current_revision: Gauge,
     pub compact_revision: Gauge,
     pub auth_diverged: Gauge,
+    pub log_has_batched: Gauge,
+    pub members_unable_to_read_batches: Gauge,
     pub is_leader: Gauge,
     pub proposals_committed: Gauge,
     pub proposals_applied: Gauge,
@@ -157,6 +159,8 @@ impl Metrics {
         let current_revision = Gauge::default();
         let compact_revision = Gauge::default();
         let auth_diverged = Gauge::default();
+        let log_has_batched = Gauge::default();
+        let members_unable_to_read_batches = Gauge::default();
         let is_leader = Gauge::default();
         let proposals_committed = Gauge::default();
         let proposals_applied = Gauge::default();
@@ -187,6 +191,8 @@ impl Metrics {
             current_revision: current_revision.clone(),
             compact_revision: compact_revision.clone(),
             auth_diverged: auth_diverged.clone(),
+            log_has_batched: log_has_batched.clone(),
+            members_unable_to_read_batches: members_unable_to_read_batches.clone(),
             is_leader: is_leader.clone(),
             proposals_committed: proposals_committed.clone(),
             proposals_applied: proposals_applied.clone(),
@@ -291,6 +297,18 @@ impl Metrics {
                 "etcd_debugging_mvcc_compact_revision",
                 "MVCC revision below which historical reads return ErrCompacted",
                 compact_revision,
+            );
+            reg.register(
+                "fastetcd_log_has_batched",
+                "1 once this member has applied a batched log entry (it never goes back to 0): \
+                 a member older than 1.10 cannot read this cluster's log (fastetcd#77)",
+                log_has_batched,
+            );
+            reg.register(
+                "fastetcd_members_unable_to_read_batches",
+                "On the leader: members that answer as older than 1.10 while the log holds \
+                 batched entries. They stop at the first one; upgrade or replace them (fastetcd#77)",
+                members_unable_to_read_batches,
             );
             reg.register(
                 "fastetcd_auth_diverged",
@@ -488,6 +506,9 @@ impl Metrics {
         let comp = state.sm.mvcc().compact_revision().await;
         self.compact_revision.set(comp);
         self.auth_diverged.set(state.auth_gate.diverged(&state.auth) as i64);
+        self.log_has_batched.set(state.sm.mvcc().has_batched() as i64);
+        self.members_unable_to_read_batches
+            .set(state.older_members.load(std::sync::atomic::Ordering::Relaxed) as i64);
         if let Ok(size) = state.sm.mvcc().engine().size_on_disk().await {
             self.db_size_bytes.set(size as i64);
         }

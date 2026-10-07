@@ -19,6 +19,7 @@ pub mod auth;
 pub mod auth_sync;
 pub mod authz;
 pub mod backup;
+pub mod batch_guard;
 pub mod cluster;
 pub mod cluster_id;
 pub mod compaction;
