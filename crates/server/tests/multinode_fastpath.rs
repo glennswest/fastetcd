@@ -534,8 +534,13 @@ async fn an_older_member_is_kept_from_a_batched_log() {
     use fastetcd_server::batch_guard::{guard_add, guard_voter, older_members};
     let nodes = cluster(0).await;
     let leader = leader_of(&nodes);
-    let (_, _) = run_load(&leader.client, &a_follower_of(&nodes).client, 24, 2).await;
-    assert!(leader.state.sm.mvcc().has_batched(), "the load did not batch");
+    // Load until the leader has applied a batch (the gate opens once its
+    // probe has heard every member).
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !leader.state.sm.mvcc().has_batched() {
+        assert!(Instant::now() < deadline, "30 s of load did not batch");
+        run_load(&leader.client, &a_follower_of(&nodes).client, 24, 2).await;
+    }
 
     let old = start_node(4, true).await;
     let new = start_node(5, false).await;
