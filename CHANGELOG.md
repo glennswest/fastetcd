@@ -6,6 +6,25 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — election timeouts are settable (#103)
+- **feat:** `--heartbeat-interval` and `--election-timeout` (ms, etcd's
+  names; `ETCD_HEARTBEAT_INTERVAL` / `ETCD_ELECTION_TIMEOUT`), defaults
+  unchanged (250, 1000; the election range is [t, 2t)). The timeouts were
+  fixed, and a 3-member cluster lost its leader under heavy writes on a
+  stalling disk (#103). The cause, from openraft 0.9.24: a leader's
+  heartbeats come from RaftCore's tick, and RaftCore waits for each
+  append's fsync, so a leader is silent for as long as its fsync stalls,
+  and past the followers' timeout plus openraft's leader lease (3–4 s by
+  default) they elect another. Raising `--election-timeout` above the
+  disk's worst stall keeps the leader. The election timeout must be at
+  least 2x the heartbeat (etcd asks 5x; the defaults predate it) and at
+  most 50 s.
+- **feat:** A WAL fsync longer than the election timeout is logged as
+  such (`slow raft WAL fdatasync, longer than the election timeout`),
+  naming the flag.
+- **test:** `multinode_fastpath`: with every fsync stalled 6 s, a 1 s
+  election timeout elects again; a 10 s one keeps the leader and term.
+
 ### 2026-10-07 — 3-member write maxima attributed (#83)
 - **docs:** The multi-second write maxima on a 3-member cluster under
   `tests/read_latency.sh` are the shared build disk's, not fastetcd's

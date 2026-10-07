@@ -253,6 +253,24 @@ struct Args {
     // can launch without error; the values are logged but not
     // otherwise consumed (yet).
     //
+    /// Time between a leader's heartbeats, in milliseconds (etcd's
+    /// `--heartbeat-interval`). In fastetcd it is also how long one
+    /// AppendEntries may take, sent and fsynced by the follower (openraft
+    /// 0.9's replication timeout, #94), so do not set it below what the
+    /// followers' disk needs for one fsync.
+    #[arg(long, env = "FASTETCD_HEARTBEAT_INTERVAL", default_value_t = 250)]
+    heartbeat_interval: u64,
+
+    /// How long a follower waits without hearing from the leader before
+    /// it calls an election, in milliseconds (etcd's
+    /// `--election-timeout`); each member picks its own from [t, 2t). A
+    /// leader sends no heartbeat while a WAL fsync is in progress
+    /// (#103), so on a disk whose fsync can stall, set it above the
+    /// longest stall (`fastetcd_wal_fsync_max_seconds`). At least twice
+    /// `--heartbeat-interval`, at most 50 s.
+    #[arg(long, env = "FASTETCD_ELECTION_TIMEOUT", default_value_t = 1000)]
+    election_timeout: u64,
+
     /// Take a raft snapshot (and then purge the log) every N applied
     /// entries. Lower keeps the log smaller; higher lets a lagging
     /// follower catch up from the log instead of a snapshot. Matches
@@ -629,6 +647,8 @@ fn apply_etcd_env_compat() {
         // is singular, but the env var fallback still maps across.
         ("FASTETCD_LISTEN_METRICS_URL", "ETCD_LISTEN_METRICS_URLS"),
         ("FASTETCD_SNAPSHOT_COUNT", "ETCD_SNAPSHOT_COUNT"),
+        ("FASTETCD_HEARTBEAT_INTERVAL", "ETCD_HEARTBEAT_INTERVAL"),
+        ("FASTETCD_ELECTION_TIMEOUT", "ETCD_ELECTION_TIMEOUT"),
         ("FASTETCD_QUOTA_BACKEND_BYTES", "ETCD_QUOTA_BACKEND_BYTES"),
         ("FASTETCD_MAX_SNAPSHOTS", "ETCD_MAX_SNAPSHOTS"),
         (
@@ -970,6 +990,7 @@ async fn main() -> anyhow::Result<()> {
         fastetcd_raft::wal_log_store::WalLogOptions {
             segment_bytes: args.wal_segment_bytes,
             cache_bytes: args.wal_cache_bytes as usize,
+            election_timeout: std::time::Duration::from_millis(args.election_timeout),
             ..Default::default()
         },
     )
@@ -982,11 +1003,14 @@ async fn main() -> anyhow::Result<()> {
     // every `snapshot_count` applied entries and then purges the log,
     // keeping only `max_in_snapshot_log_to_keep`. Exposed so operators
     // can tune the log-size vs follower-catch-up tradeoff (#13).
+    // etcd's two flags, as openraft's three (#103).
+    let (heartbeat_interval, election_timeout_min, election_timeout_max) =
+        raft_timeouts(args.heartbeat_interval, args.election_timeout)?;
     let config = Arc::new(
         Config {
-            heartbeat_interval: 250,
-            election_timeout_min: 1000,
-            election_timeout_max: 2000,
+            heartbeat_interval,
+            election_timeout_min,
+            election_timeout_max,
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(args.snapshot_count),
             max_in_snapshot_log_to_keep: args.max_in_snapshot_log_to_keep,
             ..Default::default()
@@ -1499,6 +1523,26 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// openraft's heartbeat interval and election range from etcd's
+/// `--heartbeat-interval` and `--election-timeout` (fastetcd#103): the
+/// election timeout t becomes [t, 2t). etcd wants t >= 5x the heartbeat;
+/// fastetcd's defaults (250 ms, 1 s) predate the flags and openraft only
+/// needs t > the heartbeat, so the floor here is 2x. etcd's 50 s ceiling.
+fn raft_timeouts(heartbeat_ms: u64, election_ms: u64) -> anyhow::Result<(u64, u64, u64)> {
+    if heartbeat_ms == 0 {
+        anyhow::bail!("--heartbeat-interval must be at least 1 ms");
+    }
+    if election_ms < 2 * heartbeat_ms {
+        anyhow::bail!(
+            "--election-timeout ({election_ms} ms) must be at least twice --heartbeat-interval ({heartbeat_ms} ms)"
+        );
+    }
+    if election_ms > 50_000 {
+        anyhow::bail!("--election-timeout ({election_ms} ms) is too long: at most 50000 ms, as in etcd");
+    }
+    Ok((heartbeat_ms, election_ms, election_ms * 2))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1560,5 +1604,19 @@ mod tests {
             let got = if id == "auto_defrag" { a.auto_defrag } else { a.client_cert_auth };
             assert_eq!(got, want, "{var}={v}");
         }
+    }
+
+    #[test]
+    fn election_timeouts_from_etcd_flags() {
+        assert_eq!(raft_timeouts(250, 1000).unwrap(), (250, 1000, 2000), "the defaults, as before");
+        assert_eq!(raft_timeouts(100, 1000).unwrap(), (100, 1000, 2000), "etcd's defaults");
+        assert_eq!(raft_timeouts(250, 10_000).unwrap(), (250, 10_000, 20_000));
+        assert!(raft_timeouts(0, 1000).is_err());
+        assert!(raft_timeouts(500, 999).is_err());
+        assert!(raft_timeouts(250, 50_001).is_err());
+        let a = parse(&["--heartbeat-interval=100", "--election-timeout=5000"]).unwrap();
+        assert_eq!((a.heartbeat_interval, a.election_timeout), (100, 5000));
+        let a = parse(&[]).unwrap();
+        assert_eq!((a.heartbeat_interval, a.election_timeout), (250, 1000));
     }
 }

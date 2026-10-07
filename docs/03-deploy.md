@@ -580,6 +580,30 @@ it. During the upgrade a write sent to an older follower that the 1.14
 leader refuses comes back `Unavailable` instead of etcd's error (the
 follower cannot decode the refusal); the write is refused either way.
 
+### Timeouts and slow disks
+
+A leader writes every log entry to its WAL and waits for the fsync before
+it does anything else, heartbeats included (openraft 0.9 sends them from
+the same loop, #103). If one fsync takes longer than the followers'
+election timeout, plus openraft's leader lease, they elect a new leader.
+With the defaults (`--heartbeat-interval 250`, `--election-timeout 1000`)
+that is a stall of about 3–4 s. Each election pauses writes for a few
+seconds. etcd behaves the same way and has the same remedy:
+
+- Read the longest fsync each member has seen, `fastetcd_wal_fsync_max_seconds`.
+  Look for the `slow raft WAL fdatasync` warnings, which name the
+  election timeout when an fsync outlasted it.
+- Set `--election-timeout` above the longest stall, on every member
+  (`ETCD_ELECTION_TIMEOUT` works too). A follower then waits longer before
+  it notices a leader that is really gone: that is the trade.
+- Leave `--heartbeat-interval` alone unless the followers' fsync is fast.
+  In fastetcd it is also how long one AppendEntries may take to be sent and
+  fsynced by a follower (#94); below that, replication times out and
+  retries forever.
+
+The election timeout must be at least twice the heartbeat interval and at
+most 50 s.
+
 ### Cluster id
 
 Every response header carries a `cluster_id`. Clients that talk to

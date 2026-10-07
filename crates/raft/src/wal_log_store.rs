@@ -88,6 +88,11 @@ pub struct WalLogOptions {
     /// Added to every fdatasync: tests stand in for a slow disk with
     /// it. Zero in the server.
     pub sync_delay: Duration,
+    /// The member's election timeout (zero: not known). An fdatasync
+    /// longer than it is logged as a likely leader change (#103): openraft
+    /// 0.9 sends a leader's heartbeats from RaftCore, which waits for the
+    /// fsync of every append.
+    pub election_timeout: Duration,
 }
 
 impl Default for WalLogOptions {
@@ -96,6 +101,7 @@ impl Default for WalLogOptions {
             segment_bytes: fastetcd_storage::raft_wal::DEFAULT_SEGMENT_BYTES,
             cache_bytes: 64 * 1024 * 1024,
             sync_delay: Duration::ZERO,
+            election_timeout: Duration::ZERO,
         }
     }
 }
@@ -112,6 +118,9 @@ pub struct WalStats {
     pub proposals_synced: AtomicU64,
     /// Longest single fdatasync since the process started.
     pub fsync_max_nanos: AtomicU64,
+    /// Test hook: added to every fdatasync, as `WalLogOptions::sync_delay`
+    /// but changeable while running ([`WalLogStore::set_sync_delay`]).
+    pub sync_delay_nanos: AtomicU64,
     pub bytes_appended: AtomicU64,
     pub segments: AtomicU64,
     pub cached_bytes: AtomicU64,
@@ -226,7 +235,7 @@ fn writer(
     rx: mpsc::Receiver<Cmd>,
     state: Arc<Mutex<State>>,
     stats: Arc<WalStats>,
-    sync_delay: Duration,
+    opts: WalLogOptions,
 ) {
     // Once a write fails, every later one fails too: a gap in the log
     // must never be followed by an entry.
@@ -277,6 +286,7 @@ fn writer(
         }
         if failed.is_none() && sync {
             let t = Instant::now();
+            let sync_delay = Duration::from_nanos(stats.sync_delay_nanos.load(Ordering::Relaxed));
             if !sync_delay.is_zero() {
                 std::thread::sleep(sync_delay);
             }
@@ -288,7 +298,19 @@ fn writer(
             stats.fsyncs.fetch_add(1, Ordering::Relaxed);
             stats.fsync_nanos.fetch_add(took, Ordering::Relaxed);
             stats.fsync_max_nanos.fetch_max(took, Ordering::Relaxed);
-            if took >= SLOW_FSYNC.as_nanos() as u64 {
+            let election = opts.election_timeout.as_nanos() as u64;
+            if election > 0 && took >= election {
+                // A leader sends no heartbeat while RaftCore waits for this
+                // fsync, so followers may have elected a new one (#103).
+                tracing::warn!(
+                    took_ms = took / 1_000_000,
+                    election_timeout_ms = election / 1_000_000,
+                    entries,
+                    "slow raft WAL fdatasync, longer than the election timeout: \
+                     a leader sends no heartbeat meanwhile, so followers may elect \
+                     another; on this disk raise --election-timeout"
+                );
+            } else if took >= SLOW_FSYNC.as_nanos() as u64 {
                 // etcd's "slow fdatasync" warning, at its threshold: a
                 // timestamped record that tells a disk stall from a
                 // stall inside fastetcd (#83).
@@ -341,6 +363,14 @@ pub struct WalLogStore {
     stats: Arc<WalStats>,
     committed_index: Arc<AtomicU64>,
     progress: LogProgress,
+}
+
+impl WalLogStore {
+    /// Tests: make every later fdatasync take `d` longer, as a disk that
+    /// stalls (#103). Zero in the server.
+    pub fn set_sync_delay(&self, d: Duration) {
+        self.stats.sync_delay_nanos.store(d.as_nanos() as u64, Ordering::Relaxed);
+    }
 }
 
 fn has_segments(dir: &Path) -> bool {
@@ -509,13 +539,14 @@ impl WalLogStore {
         }));
         let stats = Arc::new(WalStats::default());
         stats.segments.store(wal.segment_count() as u64, Ordering::Relaxed);
+        stats.sync_delay_nanos.store(opts.sync_delay.as_nanos() as u64, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         {
             let state = state.clone();
             let stats = stats.clone();
             std::thread::Builder::new()
                 .name("raft-wal".into())
-                .spawn(move || writer(wal, rx, state, stats, opts.sync_delay))?;
+                .spawn(move || writer(wal, rx, state, stats, opts))?;
         }
         Ok(Self { state, tx, reader, engine, stats, committed_index, progress })
     }

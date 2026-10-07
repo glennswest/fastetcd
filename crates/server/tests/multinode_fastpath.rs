@@ -42,7 +42,19 @@ struct Node {
     peers: PeerEndpoints,
     raft: Raft<TypeConfig>,
     state: Arc<ServerState>,
+    log: WalLogStore,
 }
+
+/// A member's raft timing: openraft's heartbeat and election range.
+#[derive(Clone, Copy)]
+struct Timing {
+    heartbeat: u64,
+    election_min: u64,
+    election_max: u64,
+}
+
+/// Generous: the build box runs several jobs at once (#44).
+const HARNESS_TIMING: Timing = Timing { heartbeat: 100, election_min: 1500, election_max: 3000 };
 
 /// A member's peer service; `older` makes it a member older than #75
 /// (no `ConfirmLeader`), everything else real.
@@ -85,6 +97,10 @@ impl RaftPeer for Peer {
 }
 
 async fn start_node(id: NodeId, older: bool) -> Node {
+    start_node_with(id, older, HARNESS_TIMING).await
+}
+
+async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let engine: Arc<dyn fastetcd_storage::KvStore> =
         Arc::new(RedbEngine::open(dir.path().join("data.redb")).unwrap());
@@ -98,6 +114,7 @@ async fn start_node(id: NodeId, older: bool) -> Node {
         .await
         .unwrap();
     let progress = log.progress();
+    let log_handle = log.clone();
     fastetcd_raft::wal_log_store::spawn_checkpointer(
         log.clone(),
         sm.applied_index(),
@@ -105,10 +122,9 @@ async fn start_node(id: NodeId, older: bool) -> Node {
     );
     let config = Arc::new(
         Config {
-            // Generous: the build box runs several jobs at once (#44).
-            heartbeat_interval: 100,
-            election_timeout_min: 1500,
-            election_timeout_max: 3000,
+            heartbeat_interval: timing.heartbeat,
+            election_timeout_min: timing.election_min,
+            election_timeout_max: timing.election_max,
             ..Default::default()
         }
         .validate()
@@ -160,7 +176,7 @@ async fn start_node(id: NodeId, older: bool) -> Node {
             .unwrap();
     });
 
-    Node { _dir: dir, id, peer_url, client, peers, raft, state }
+    Node { _dir: dir, id, peer_url, client, peers, raft, state, log: log_handle }
 }
 
 async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
@@ -173,9 +189,13 @@ async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
 
 /// Three members, `older` of them (ids from 3 down) older than #75.
 async fn cluster(older: u64) -> Vec<Node> {
+    cluster_with(older, HARNESS_TIMING).await
+}
+
+async fn cluster_with(older: u64, timing: Timing) -> Vec<Node> {
     let mut nodes = Vec::new();
     for id in 1..=3 {
-        nodes.push(start_node(id, id > 3 - older).await);
+        nodes.push(start_node_with(id, id > 3 - older, timing).await);
     }
     for a in &nodes {
         for b in &nodes {
@@ -436,4 +456,57 @@ async fn a_member_far_behind_on_big_batches_catches_up() {
         .unwrap()
         .into_inner();
     assert_eq!(got.count, (ROUNDS * WRITERS) as i64);
+}
+
+/// The highest raft term any member has seen.
+fn max_term(nodes: &[Node]) -> u64 {
+    nodes.iter().map(|n| n.raft.metrics().borrow().current_term).max().unwrap_or(0)
+}
+
+/// fastetcd#103: every WAL fsync takes `stall`, and two writes go through
+/// the leader. openraft 0.9 sends heartbeats from RaftCore, which waits
+/// for each append's fsync, so the leader is silent for each stall.
+/// Returns (term before, highest term after, leader before, leader after).
+async fn writes_through_fsync_stalls(timing: Timing, stall: Duration) -> (u64, u64, NodeId, NodeId) {
+    let nodes = cluster_with(0, timing).await;
+    let leader = leader_of(&nodes).id;
+    let term = max_term(&nodes);
+    for n in &nodes {
+        n.log.set_sync_delay(stall);
+    }
+    let mut kv = KvClient::connect(nodes[(leader - 1) as usize].client.clone()).await.unwrap();
+    for i in 0..2 {
+        // A put may fail while leadership moves; the term says what happened.
+        let put = kv.put(pb::PutRequest { key: format!("stall{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() });
+        let _ = tokio::time::timeout(Duration::from_secs(60), put).await;
+    }
+    for n in &nodes {
+        n.log.set_sync_delay(Duration::ZERO);
+    }
+    // Let any election in progress settle before reading the outcome.
+    sleep(Duration::from_secs(2)).await;
+    let after = max_term(&nodes);
+    let now = nodes[0].raft.metrics().borrow().current_leader.unwrap_or(0);
+    (term, after, leader, now)
+}
+
+/// At etcd-like timeouts (heartbeat 250 ms, election 1 s), a 6 s fsync
+/// stall costs the leader: followers hear nothing for longer than their
+/// election timeout plus openraft's leader lease (3-4 s) and elect again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_fsync_stall_longer_than_the_election_timeout_elects_again() {
+    let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
+    let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
+    eprintln!("1 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
+    assert!(after > before, "no election during 6 s fsync stalls at a 1 s election timeout (term {before})");
+}
+
+/// With `--election-timeout` above the stall (10 s: 30-40 s with the
+/// lease), the same stalls keep the leader and the term.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_election_timeout_above_the_stall_keeps_the_leader() {
+    let timing = Timing { heartbeat: 250, election_min: 10_000, election_max: 20_000 };
+    let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
+    eprintln!("10 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
+    assert_eq!((after, l1), (before, l0), "the leader or the term changed");
 }
