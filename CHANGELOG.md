@@ -19,13 +19,15 @@
 - **feat:** `Authenticate` also verifies bcrypt password hashes (etcd's),
   so users migrated from etcd keep their passwords; passwords set in
   fastetcd stay argon2. New dependency `bcrypt` 0.15.
-- **fix:** `fastetcd-migrate` could not read a snapshot saved by etcd at
-  all (`open bolt: invalid database`): `etcdctl snapshot save` writes the
-  database followed by its 32-byte SHA-256, and only BoltDB files written
-  by bbolt itself had been tested. As etcd's own restore does, a file
-  whose size % 512 == 32 has its hash checked (a mismatch is refused)
-  and cut off, through a temporary copy; a file without one (a member's
-  `member/snap/db`) is read as it is.
+- **fix:** `fastetcd-migrate` could not read any file etcd wrote
+  (`open bolt: invalid database`). The bbolt-rs crate uses its own magic
+  number unless built with `compat`, which gives Go bbolt's (etcd's); its
+  tests passed only because their BoltDB files were written by the same
+  bbolt-rs. Built with `compat` now. And `etcdctl snapshot save` writes
+  the database followed by its 32-byte SHA-256: as etcd's own restore
+  does, a file whose size % 512 == 32 has its hash checked (a mismatch is
+  refused) and cut off, through a temporary copy; a file without one (a
+  member's `member/snap/db`) is read as it is.
 - **fix:** `--preserve-revisions` attached a key to every lease any of
   its records named, deleted generations included; `bulk_load_records`
   now attaches only a live key's latest record.

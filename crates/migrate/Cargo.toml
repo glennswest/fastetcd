@@ -22,7 +22,10 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 prost.workspace = true
-bbolt-rs = "1.3"
+# `compat`: Go bbolt's magic number (0xED0CDAED), which etcd's files carry.
+# Without it bbolt-rs writes and accepts only its own (0x5caff01d), so no
+# real etcd snapshot could be read (#60).
+bbolt-rs = { version = "1.3", features = ["compat"] }
 sha2.workspace = true
 
 fastetcd-storage.workspace = true
