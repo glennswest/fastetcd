@@ -2225,3 +2225,20 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Chart probes: liveness /livez, readiness /readyz (gRPC health
       now follows /readyz and would restart members on quorum loss).
     - [x] Docs (README, 01, 03), changelog; release 1.25.0; close #69.
+
+66. **A real rolling upgrade, process restarts included (#65, P2).** Every
+    mixed-version rule (#32 AuthSync, #50 ForwardRead, #75/#77 batching,
+    #85 WAL migration, #41 lease trailer, #56/#92 version gates) was
+    tested in process with a simulated older peer. Plan:
+    `tests/rolling_upgrade.sh <from-ref> <to-ref|tree>`: build both,
+    3 members on `from` with auth (root; alice scoped to /app/), a 600 s
+    lease with a key, 4 writers putting unique keys through all endpoints;
+    replace members one at a time (SIGTERM, start `to` on the same data
+    dir); check every acknowledged write is there (linearizable), the
+    longest write outage, auth + RBAC, the lease and its key, each
+    upgraded member's pre-version backup, batching 0 until the last
+    member is >= 1.10 and on after, no member behind at the end.
+    Scenarios: A v1.9.0 → tree, B v1.24.1 → tree, C tree → v1.24.1.
+    Work items:
+    - [ ] Script; A, B, C on sc-build; fix what they find.
+    - [ ] Docs (02-testing, 03 upgrades), changelog; close #65.
