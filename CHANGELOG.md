@@ -6,6 +6,21 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — an abandoned snapshot transfer keeps the retained snapshot (#45)
+- **fix:** Beginning to receive a snapshot rolled off the retained one,
+  before anything was known about the transfer (#45). openraft resends a
+  snapshot whose `InstallSnapshot` timed out, even once the first copy is
+  installed, and then drops the duplicate (`snapshot last_log_id <=
+  committed`), so the resend deleted the snapshot just installed and the
+  member was left with none (rebuilt on demand, at a cost). Caught in the
+  logs of `snapshot_transfer_grpc` on dev (the "flaky" test, ~1 in 5 on a
+  loaded box): install took 1.4 s, the leader's RPCs timed out and
+  resent, `rolled off an old snapshot index=199`, then `No need to
+  install snapshot`. Retention is now enforced when a received snapshot
+  is adopted; a full disk is still handled by the receive's ENOSPC path
+  (discard retained, write again). A member receiving a snapshot holds
+  one extra copy while the disk has room.
+
 ## [v1.20.0] — 2026-10-07
 
 ### 2026-10-07 — older members kept from a batched log (#77)

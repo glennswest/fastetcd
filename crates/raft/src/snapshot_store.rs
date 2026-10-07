@@ -194,11 +194,17 @@ impl SnapshotStore {
 
     /// Create the temp file a snapshot from the leader is received into.
     ///
-    /// Retention is enforced first, exactly as before any other snapshot
-    /// write, so receiving never needs room for `retain + 1` copies.
+    /// Nothing is rolled off here: a transfer that begins may never be
+    /// installed. openraft resends a snapshot whose `InstallSnapshot`
+    /// timed out, even after the first copy was installed, and drops the
+    /// duplicate (`snapshot last_log_id <= committed`): rolling off here
+    /// deleted the snapshot just installed and left the member with none
+    /// (fastetcd#45). Retention is enforced when a received snapshot is
+    /// adopted. Room is made only if the disk needs it: a chunk that hits
+    /// ENOSPC discards the retained snapshots and is written again
+    /// (`SnapshotFile`), so a full volume still never wedges (#14, #30).
     pub fn begin_incoming(&self) -> io::Result<(File, PathBuf)> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        self.make_room_for_one();
         let path = self.dir.join(format!(
             "{INCOMING_PREFIX}{}-{}.{SNAP_EXT}{TMP_SUFFIX}",
             std::process::id(),
@@ -481,6 +487,28 @@ mod tests {
             before,
             "one snapshot in, one snapshot out — the footprint must not grow"
         );
+    }
+
+    /// fastetcd#45: a transfer that begins and is then abandoned (openraft
+    /// drops a resent copy of a snapshot already installed) leaves the
+    /// retained snapshot alone; one that is adopted replaces it.
+    #[test]
+    fn an_abandoned_transfer_keeps_the_retained_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::open(dir.path(), 1).unwrap();
+        store.store(&meta_at(1), &[1u8; 64]).unwrap();
+
+        let (file, path) = store.begin_incoming().unwrap();
+        assert_eq!(store.indices(), vec![1], "beginning a transfer rolls nothing off");
+        drop(file);
+        std::fs::remove_file(&path).unwrap(); // what dropping the incoming body does
+        assert_eq!(store.indices(), vec![1], "the abandoned transfer left the snapshot");
+        assert_eq!(store.read_body(1).unwrap(), vec![1u8; 64]);
+
+        let (mut file, path) = store.begin_incoming().unwrap();
+        file.write_all(&[2u8; 64]).unwrap();
+        store.adopt(&meta_at(2), &file, &path).unwrap();
+        assert_eq!(store.indices(), vec![2], "an adopted transfer takes the one slot");
     }
 
     #[test]

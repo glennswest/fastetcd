@@ -77,6 +77,15 @@ snapshot is discarded and the write is retried — openraft can always
 rebuild one, and a node with no snapshot is worth more than a node that
 cannot write one.
 
+A snapshot *received* from the leader is the exception (since 1.21,
+#45): the retained one is kept until the received one is installed, and
+rolled off then. openraft resends a snapshot whose transfer timed out,
+and drops the copy if the first was installed meanwhile; rolling off
+when a transfer began deleted the snapshot just installed. So while a
+member receives a snapshot it holds one extra copy if the disk has room;
+if it has not, the first chunk that hits `ENOSPC` discards the retained
+snapshots and is written again, as before.
+
 **Moves snapshots through files, not memory.** A snapshot is serialized
 straight into its file and fsynced; sent to a lagging follower by
 reading that file a chunk at a time; received into a temp file in the
