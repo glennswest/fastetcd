@@ -533,14 +533,31 @@ async fn an_election_timeout_above_the_stall_keeps_the_leader() {
 async fn an_older_member_is_kept_from_a_batched_log() {
     use fastetcd_server::batch_guard::{guard_add, guard_voter, older_members};
     let nodes = cluster(0).await;
-    let leader = leader_of(&nodes);
-    // Load until the leader has applied a batch (the gate opens once its
-    // probe has heard every member).
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !leader.state.sm.mvcc().has_batched() {
-        assert!(Instant::now() < deadline, "30 s of load did not batch");
-        run_load(&leader.client, &a_follower_of(&nodes).client, 24, 2).await;
-    }
+    // Concurrent puts through whoever leads (leadership may move on a
+    // loaded box; a failed put is just retried) until a member has
+    // applied a batch. The guards run from that member: they need its
+    // mark and its peer connections, not the leadership.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let leader = loop {
+        if let Some(n) = nodes.iter().find(|n| n.state.sm.mvcc().has_batched()) {
+            break n;
+        }
+        assert!(Instant::now() < deadline, "60 s of load did not batch");
+        let kv = KvClient::connect(leader_of(&nodes).client.clone()).await.unwrap();
+        let puts: Vec<_> = (0..24)
+            .map(|i| {
+                let mut kv = kv.clone();
+                tokio::spawn(async move {
+                    let _ = kv
+                        .put(pb::PutRequest { key: format!("b{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() })
+                        .await;
+                })
+            })
+            .collect();
+        for p in puts {
+            let _ = p.await;
+        }
+    };
 
     let old = start_node(4, true).await;
     let new = start_node(5, false).await;
