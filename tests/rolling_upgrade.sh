@@ -177,6 +177,10 @@ for i in 1 2 3; do
         fi
     fi
     echo "   after member $i: batched entries per member: $(for j in 1 2 3; do printf '%s ' "$(metric "$j" fastetcd_proposals_batched_total)"; done)"
+    # A keep-alive across the mixed cluster (through Raft while a member
+    # is older than 1.23, in the leader's RAM once none is, #92).
+    ka=$(root lease keep-alive --once "$LEASE" 2>&1 | tail -1)
+    check "a lease keep-alive answers after member $i ($ka)" "$(echo "$ka" | grep -q 'TTL(600)' && echo 1 || echo 0)"
 done
 old_mm=$(echo "$OLD_V" | awk -F. '{print $1*1000+$2}')
 new_mm=$(echo "$NEW_V" | awk -F. '{print $1*1000+$2}')
@@ -202,11 +206,11 @@ for w in 1 2 3 4; do
     last=$(tail -1 "$WORK/acked$w" | awk '{print $2}')
     acked=$((acked + last))
     [ "$have" -lt "$last" ] && lost=$((lost + last - have))
-    gap=$(awk 'NR>1 {g=$1-p; if (g>m) m=g} {p=$1} END {printf "%d", m}' "$WORK/acked$w")
-    [ "$gap" -gt "$longest" ] && longest=$gap
+    gap=$(awk 'NR>1 {g=$1-p; if (g>m) m=g} {p=$1} END {printf "%.1f", m}' "$WORK/acked$w")
+    longest=$(awk -v a="$gap" -v b="$longest" 'BEGIN {print (a > b) ? a : b}')
 done
 check "every acknowledged write is there ($acked acknowledged, $lost missing)" "$([ "$lost" = 0 ] && echo 1 || echo 0)"
-check "the longest stretch without an acknowledged write: ${longest} s (bound ${MAX_OUTAGE_S} s)" "$([ "$longest" -le "$MAX_OUTAGE_S" ] && echo 1 || echo 0)"
+check "the longest stretch without an acknowledged write: ${longest} s (bound ${MAX_OUTAGE_S} s)" "$(awk -v a="$longest" -v b="$MAX_OUTAGE_S" 'BEGIN {print (a <= b) ? 1 : 0}')"
 check "root logs in and reads" "$([ "$(root get /plain --print-value-only)" = p ] && echo 1 || echo 0)"
 check "alice reads /app/x" "$([ "$(ctl --user alice:alicepw get /app/x --print-value-only 2>/dev/null)" = appv ] && echo 1 || echo 0)" # not a secret: test fixture
 check "alice is denied /secret/s" "$(ctl --user alice:alicepw get /secret/s >/dev/null 2>&1 && echo 0 || echo 1)" # not a secret: test fixture
@@ -225,6 +229,10 @@ for j in 1 2 3; do
         check "member $j is running" 0
         tail -20 "$WORK/log$j"
     fi
+done
+echo "-- each member's version change, as it logged it:"
+for j in 1 2 3; do
+    grep -hiE "^--- |version|migrat|wal|backup" "$WORK/log$j" | grep -viE "slow raft WAL|keep-alive" | head -12 | sed "s/^/   [$j] /" | cut -c1-220
 done
 if [ "$FAILED" != 0 ]; then
     echo "-- members' warnings and errors:"
