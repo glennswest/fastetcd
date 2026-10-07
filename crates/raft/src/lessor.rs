@@ -142,7 +142,8 @@ impl Lessor {
         }
         let alone = {
             let m = s.raft.metrics().borrow().clone();
-            m.membership_config.membership().nodes().all(|(id, _)| *id == m.id)
+            let alone = m.membership_config.membership().nodes().all(|(id, _)| *id == m.id);
+            alone
         };
         if alone {
             return s.gate.check(&s.raft, &s.forwarder).await.is_ok();
