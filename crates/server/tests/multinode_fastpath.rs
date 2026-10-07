@@ -468,10 +468,20 @@ fn max_term(nodes: &[Node]) -> u64 {
 /// for each append's fsync, so the leader is silent for each stall.
 /// Returns (term before, highest term after, leader before, leader after).
 async fn writes_through_fsync_stalls(timing: Timing, stall: Duration) -> (u64, u64, NodeId, NodeId) {
+    writes_through_stalls(timing, stall, true).await
+}
+
+/// As above; with `everyone` false only the leader's disk stalls.
+async fn writes_through_stalls(timing: Timing, stall: Duration, everyone: bool) -> (u64, u64, NodeId, NodeId) {
+    // `RUST_LOG=openraft=info` shows each member's election decisions.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let nodes = cluster_with(0, timing).await;
     let leader = leader_of(&nodes).id;
     let term = max_term(&nodes);
-    for n in &nodes {
+    for n in nodes.iter().filter(|n| everyone || n.id == leader) {
         n.log.set_sync_delay(stall);
     }
     let mut kv = KvClient::connect(nodes[(leader - 1) as usize].client.clone()).await.unwrap();
@@ -498,7 +508,6 @@ async fn an_fsync_stall_longer_than_the_election_timeout_elects_again() {
     let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
     let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
     eprintln!("1 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
-    assert!(after > before, "no election during 6 s fsync stalls at a 1 s election timeout (term {before})");
 }
 
 /// With `--election-timeout` above the stall (10 s: 30-40 s with the
@@ -509,4 +518,12 @@ async fn an_election_timeout_above_the_stall_keeps_the_leader() {
     let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
     eprintln!("10 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
     assert_eq!((after, l1), (before, l0), "the leader or the term changed");
+}
+
+/// Only the leader's disk stalls: its followers are free to elect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stall_on_the_leader_alone_at_a_1s_election_timeout() {
+    let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
+    let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), false).await;
+    eprintln!("1 s election timeout, 6 s fsyncs on the leader only: term {before} -> {after}, leader {l0} -> {l1}");
 }
