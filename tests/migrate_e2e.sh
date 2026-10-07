@@ -79,8 +79,10 @@ f() { "$CTL" --endpoints "$FEP" "$@"; }
 check "root logs in with its etcd password" "p" "$(f --user root:rootpw get /plain --print-value-only 2>&1)"
 check "alice reads /app/ with her etcd password" "appv" "$(f --user alice:alicepw get /app/x --print-value-only 2>&1)"
 check "a wrong password is refused" "refused" "$(f --user alice:nope get /app/x >/dev/null 2>&1 && echo accepted || echo refused)"
+DENIED=$(f --user alice:alicepw get /plain 2>&1 || true)
+echo "   alice get /plain: $DENIED"
 check "alice is denied /plain (RBAC came across)" "denied" \
-    "$(f --user alice:alicepw get /plain 2>&1 | grep -q 'permission denied' && echo denied || echo allowed)"
+    "$(echo "$DENIED" | grep -qiE 'permission ?denied' && echo denied || echo allowed)"
 check "no token is refused (auth stayed on)" "refused" "$(f get /plain >/dev/null 2>&1 && echo accepted || echo refused)"
 check "both leases came across" "2" "$(f --user root:rootpw lease list | sed -n 's/^found \([0-9]*\) leases$/\1/p')"
 check "the long lease holds its key" "/session/long" \
