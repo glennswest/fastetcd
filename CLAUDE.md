@@ -1907,3 +1907,26 @@ Tracked live in the Claude task system. Snapshot of the order:
       magic, then no freelist): own reader (`bolt.rs`); etcd's trailing
       sha256; a denied call answers fastetcd's own text, not etcd's
       (#127).
+
+54. **Pre-1.10 members are kept from batched logs, and reported (#77, P2).**
+    A member older than 1.10 cannot decode `FastetcdLogEntry::Batch` and
+    stalls on the first one; only prose (03-deploy) guarded against
+    adding one or downgrading one once a cluster has batched, and nothing
+    recorded that it had. Plan (the issue's 1–3; 4 is the rolling-upgrade
+    test, #65):
+    - Marker `batched` in `mvcc_meta`, staged into the first applied
+      batch's commit; replicated with snapshots (mvcc_meta travels),
+      reloaded at open and after an install. `MvccStore::has_batched()`.
+      Gauge `fastetcd_log_has_batched`.
+    - MemberAdd: with the marker set, ask the new member `ConfirmLeader`
+      before adding it; an older one (`Unimplemented`) is refused,
+      naming the version line; unreachable (not started yet, the usual
+      `member add` order) goes ahead, with a warning. MemberPromote
+      (and add as voter of a member that answers): refused unless the
+      member answers as 1.10+.
+    - Leader watch (every 30 s, marker set): every member asked
+      `ConfirmLeader`; an older one (a downgrade) logs an error naming it
+      and counts in `fastetcd_members_unable_to_read_batches`.
+    Work items:
+    - [ ] storage marker; cluster guard; watch; metrics; tests.
+    - [ ] Docs (03 upgrade section), changelog; release; close #77.
