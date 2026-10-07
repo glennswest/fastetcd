@@ -8,16 +8,18 @@
 
 ### 2026-10-06 — a batch takes what queued, bounded by bytes (#94)
 - **perf:** A batch of proposals takes everything that queued, up to
-  4096 (was 256) or 2 MiB (was 512 KiB), so with 1000 clients waiting
+  4096 (was 256) or 512 KiB (unchanged), so with 1000 clients waiting
   one fsync carries hundreds of writes instead of at most 256 (#94, P1;
   etcd carries ~350–450 there). Test: 1000 writers on a 200 ms fsync.
 - **fix:** A follower far behind on large log entries could never catch
   up: openraft put as many entries as the log reader returned (up to
   300) in one AppendEntries, the peer port decoded at most 4 MiB, the
   follower refused the message, and the leader sent it again, forever
-  (8 full batches of the old 512 KiB were enough). The WAL reader now
-  hands replication at most 3 MiB of entries per AppendEntries (always at
-  least one entry; under the 4 MiB older members accept), and the peer
+  (8 full batches of 512 KiB were enough); and openraft gives each
+  AppendEntries one heartbeat interval (250 ms) to be sent, appended and
+  fsynced, resending a slower one at the same size. The WAL reader now
+  hands replication at most 1 MiB of entries per AppendEntries (always at
+  least one entry), and the peer
   port decodes up to 16 MiB (`PEER_MAX_DECODE_BYTES`), for one client
   write near the client port's own 4 MiB limit.
 

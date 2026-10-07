@@ -430,8 +430,8 @@ async fn concurrent_writers_share_a_wal_fsync() {
 async fn a_thousand_writers_are_not_capped_at_256_per_fsync() {
     // fastetcd#94: a batch held at most 256 proposals, so with 1000
     // clients waiting one fsync carried at most 256 (etcd: ~350-450 at
-    // 1000 clients on the slow disk). Now bytes bound a batch (2 MiB, here
-    // ~1000 x ~250 B), so the writers settle into groups of hundreds.
+    // 1000 clients on the slow disk). Now bytes bound a batch (512 KiB,
+    // here ~1000 x ~250 B), so the writers settle into groups of hundreds.
     let per = proposals_per_fsync(1000, 2).await;
     assert!(per > 300.0, "1000 writers, {per:.1} proposals per fsync");
 }
@@ -460,7 +460,7 @@ async fn replication_reads_are_bounded_by_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let (raft, log, _sm) = slow_node(dir.path(), Duration::ZERO, Duration::ZERO).await;
     let first = raft.metrics().borrow().last_log_index.unwrap() + 1;
-    // 30 entries of ~400 KiB: ~12 MiB, three times an RPC's worth.
+    // 30 entries of ~400 KiB: ~12 MiB, twelve times an RPC's worth.
     for i in 0..30 {
         raft.client_write(big_put(i, 400 * 1024)).await.unwrap();
     }
@@ -477,7 +477,7 @@ async fn replication_reads_are_bounded_by_bytes() {
         start = got.last().unwrap().log_id.index + 1;
         rpcs += 1;
     }
-    assert!(rpcs >= 4, "~12 MiB took {rpcs} reads of at most 3 MiB");
+    assert!(rpcs >= 12, "~12 MiB took {rpcs} reads of at most 1 MiB");
     // One entry over the bound is still returned, alone.
     raft.client_write(big_put(99, (REPLICATION_BYTES + 1024) as usize)).await.unwrap();
     let last = raft.metrics().borrow().last_log_index.unwrap();

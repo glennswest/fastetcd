@@ -344,14 +344,15 @@ async fn an_older_member_means_no_batches() {
 }
 
 /// fastetcd#94: a member behind by more batched log than the peer port
-/// takes in one message still catches up. A batch is one log entry, up to
-/// 2 MiB since #94, and openraft sends as many entries as the log reader
-/// hands it (up to 300) in one AppendEntries. A learner added after ~24
-/// MiB of batched writes is caught up from the log (nothing is purged
+/// takes in one message, or can append within a heartbeat, still catches
+/// up. A batch is one log entry (up to 512 KiB), and openraft sends as
+/// many entries as the log reader hands it (up to 300) in one
+/// AppendEntries, giving it one heartbeat interval. A learner added after
+/// ~24 MiB of batched writes is caught up from the log (nothing is purged
 /// yet). Without the WAL reader's byte bound the leader sends that whole
 /// backlog in one message, past even the 16 MiB the peer port now
-/// decodes, the learner refuses it, and the leader sends it again,
-/// forever. (A learner, not a stalled voter: a voter that heard no
+/// decodes; the learner refuses it (or cannot append it in time), and
+/// the leader sends it again, forever. (A learner, not a stalled voter: a voter that heard no
 /// heartbeat would call an election.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_far_behind_on_big_batches_catches_up() {

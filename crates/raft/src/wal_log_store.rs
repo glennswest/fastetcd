@@ -622,12 +622,13 @@ impl WalLogStore {
 
 /// Most encoded entry bytes [`WalLogStore`] hands openraft for one
 /// AppendEntries (fastetcd#94). openraft sends as many entries as the
-/// reader returns (up to 300), and a follower's peer port refused any
-/// message over 4 MiB until 1.17, so a lagging follower sent several
-/// full batches was refused, and sent the same again, forever. 3 MiB
-/// leaves room for the RPC's own framing under the 4 MiB that older
-/// members accept. One entry larger than this still goes, alone.
-pub const REPLICATION_BYTES: u64 = 3 * 1024 * 1024;
+/// reader returns (up to 300) in one message, and gives each message
+/// `heartbeat_interval` (250 ms) to be sent, appended and fsynced by the
+/// follower; a message that cannot make it is sent again at the same
+/// size, forever, and before 1.17 one over 4 MiB was refused outright.
+/// 1 MiB (two full batches) fits both. One entry larger than this still
+/// goes, alone.
+pub const REPLICATION_BYTES: u64 = 1024 * 1024;
 
 impl RaftLogReader<TypeConfig> for WalLogStore {
     /// Only replication calls this: the entries from `start`, stopping

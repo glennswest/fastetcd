@@ -50,10 +50,12 @@ pub const IN_FLIGHT: usize = 1;
 /// all, as etcd's does (fastetcd#94; it was 256).
 pub const MAX_BATCH: usize = 4096;
 /// Most encoded bytes in one batch. A batch is one log entry, which
-/// cannot be split across AppendEntries, so it stays under the WAL
-/// reader's replication bound (`wal_log_store::REPLICATION_BYTES`, 3 MiB)
-/// and always fits in one RPC; a proposal larger than this goes alone.
-pub const MAX_BATCH_BYTES: u64 = 2 * 1024 * 1024;
+/// cannot be split across AppendEntries, and each AppendEntries must be
+/// sent, appended and fsynced by a follower within a heartbeat interval
+/// (openraft's timeout), so a batch stays well under the WAL reader's
+/// replication bound (`wal_log_store::REPLICATION_BYTES`, 1 MiB). A
+/// proposal larger than this goes alone.
+pub const MAX_BATCH_BYTES: u64 = 512 * 1024;
 /// How often a closed gate asks the members again.
 const PROBE_EVERY: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);

@@ -1735,11 +1735,15 @@ Tracked live in the Claude task system. Snapshot of the order:
     4 MiB, which a follower refuses and openraft resends forever, as a
     Network error). Plan:
     - WAL log reader: `limited_get_log_entries` (used only by openraft's
-      replication) returns entries up to `REPLICATION_BYTES` (3 MiB of
-      encoded entries, always at least one), so an AppendEntries stays
-      under 4 MiB, which 1.10–1.16 followers accept too.
-    - Proposer: `MAX_BATCH` 256 → 4096, `MAX_BATCH_BYTES` 512 KiB → 2 MiB
-      (under `REPLICATION_BYTES`, so one batch always fits in one RPC).
+      replication) returns entries up to `REPLICATION_BYTES` (1 MiB of
+      encoded entries, always at least one). openraft 0.9.24 gives each
+      AppendEntries `heartbeat_interval` (250 ms) to be sent, appended
+      and fsynced (`C::timeout(heartbeat_interval, ..)` in
+      replication), and resends a slow one at the same size: 3 MiB did
+      not make it on dev (first try), 1 MiB is two full batches.
+    - Proposer: `MAX_BATCH` 256 → 4096; `MAX_BATCH_BYTES` stays 512 KiB
+      (2 MiB first tried: entries that big could not replicate within
+      a heartbeat). #94's case is the count: 1000 x ~250 B = 250 KiB.
     - Peer port decodes up to 16 MiB (a single client write near 4 MiB
       plus the RPC's framing could exceed 4 MiB).
     Work items:
