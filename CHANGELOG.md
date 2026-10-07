@@ -6,6 +6,29 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.25.1] — 2026-10-08
+
+### Fixed
+- An auth change made through one member right after one made through
+  another could be refused as divergence (`FailedPrecondition`, "members
+  hold different auth state", `fastetcd_auth_diverged` 1) when a member
+  had not applied the first change yet: the gate compared digests once.
+  It now surveys again, every 50 ms for up to 3 s, before calling it
+  divergence (a member behind catches up; tables that differ from before
+  1.5 do not). Found by the new rolling-upgrade test setting up auth
+  through etcdctl over three endpoints (#65). Test
+  `auth_replication::a_member_behind_by_an_entry_is_not_divergence`
+  (a member answering two surveys late; without the re-survey, refused).
+
+### Added
+- `tests/rolling_upgrade.sh <from> [<to>]`: a real rolling upgrade or
+  downgrade of three member processes under writes, with auth and a
+  lease, checked end to end (#65). Run: v1.9.0 → this, v1.24.1 → this,
+  this → v1.24.1.
+
+### Documentation
+- 02-testing (the script), 03 (tested rolling upgrades).
+
 ## [v1.25.0] — 2026-10-07
 
 ### Changed

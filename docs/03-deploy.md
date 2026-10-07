@@ -566,6 +566,14 @@ with `--initial-cluster-state=existing`); `MemberRemove` removes them.
 On separate hosts, listen on a routable address and set
 `--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 
+**Tested rolling upgrades** (`tests/rolling_upgrade.sh`, #65, at 1.25.1):
+v1.9.0 → 1.25.1 and v1.24.1 → 1.25.1 one member process at a time, and
+1.25.1 → v1.24.1 back, under writes, with auth and a lease: nothing
+acknowledged lost, no write outage over a few seconds, auth, RBAC and
+the lease intact, a pre-version backup on every member, batching only
+once no member is older than 1.10. Do the same: one member at a time,
+each back and applying before the next.
+
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
 a member older than 1.10 cannot decode. It does so only once every

@@ -124,10 +124,13 @@ first role grant-permission app readwrite /app/ --prefix >/dev/null
 first user add alice:alicepw >/dev/null # not a secret: test fixture
 first user grant-role alice app >/dev/null
 first auth enable >/dev/null
-root put /app/x appv >/dev/null
-root put /secret/s sv >/dev/null
-LEASE=$(root lease grant 600 | awk '{print $2}')
-root put /lease/k lv --lease="$LEASE" >/dev/null
+# Also through one member: before 1.23.1 a token reaching a member that
+# has not applied it yet got fastetcd's own text, and etcdctl does not
+# authenticate again on that (#105).
+first --user root:rootpw put /app/x appv >/dev/null # not a secret: test fixture
+first --user root:rootpw put /secret/s sv >/dev/null # not a secret: test fixture
+LEASE=$(first --user root:rootpw lease grant 600 | awk '{print $2}') # not a secret: test fixture
+first --user root:rootpw put /lease/k lv --lease="$LEASE" >/dev/null # not a secret: test fixture
 echo "== $OLD_V on all three: auth on, lease $LEASE, writers starting"
 
 # ---- writers ----------------------------------------------------------------
@@ -183,7 +186,7 @@ for i in 1 2 3; do
     echo "   after member $i: batched entries per member: $(for j in 1 2 3; do printf '%s ' "$(metric "$j" fastetcd_proposals_batched_total)"; done)"
     # A keep-alive across the mixed cluster (through Raft while a member
     # is older than 1.23, in the leader's RAM once none is, #92).
-    ka=$(root lease keep-alive --once "$LEASE" 2>&1 | tail -1)
+    ka=$(on "$i" lease keep-alive --once "$LEASE" 2>&1 | tail -1)
     check "a lease keep-alive answers after member $i ($ka)" "$(echo "$ka" | grep -q 'TTL(600)' && echo 1 || echo 0)"
 done
 old_mm=$(echo "$OLD_V" | awk -F. '{print $1*1000+$2}')

@@ -74,6 +74,24 @@ and certificates with openssl, starts this tree's `fastetcd` with
 ctl command over TLS: CN identity, `--user`, and the refusals (no or the
 wrong CA, plaintext against TLS, mismatched options).
 
+A real rolling upgrade (#65): `sc-build 'tests/rolling_upgrade.sh
+<from-ref> [<to-ref>]'` (`tree` names this tree either side, so `tree
+v1.24.1` is a downgrade) builds both, starts three member processes on
+`from` with auth (root; alice on /app/ only), a 600 s lease with a key
+and four writers putting unique keys through all endpoints, replaces the
+members one at a time with `to` (SIGTERM, same data dir and flags), and
+checks every acknowledged write is there, the longest write outage (15 s
+bound), auth and RBAC, a lease keep-alive at each step and the lease's
+key at the end, each replaced member's pre-version backup, no batched
+log entry while a member is older than 1.10 and batching after, and that
+every member applied the same last index. etcd's etcdctl v3.5.17 is the
+client. Run as v1.9.0 → tree (crosses 1.10's batching, 1.12's WAL
+migration and the later version gates), v1.24.1 → tree, and tree →
+v1.24.1 when a release changes anything that crosses the wire or the
+disk. The other scripts: `tests/clientv3_reauth.sh` (etcd's Go client
+across a member restart, #105), `tests/chart_args.sh`,
+`tests/migrate_e2e.sh`.
+
 Read latency under write load, on a real disk (#71):
 `sc-build 'tests/read_latency.sh v1.8.0'` runs `fastetcd-bench --mode
 read-under-load` (40 clients looping GET + CAS Txn, a prefix Range every
