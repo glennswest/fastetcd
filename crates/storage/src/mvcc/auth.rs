@@ -309,12 +309,14 @@ async fn get_role(snap: &dyn Snapshot, name: &str) -> Result<Option<StoredRole>,
     }
 }
 
-fn user_not_found(name: &str) -> AuthApplyError {
-    AuthApplyError::NotFound(format!("auth: user {name} not found"))
+// The texts are etcd's (rpctypes), so clientv3 recognises them
+// (fastetcd#105): the server answers them with etcd's codes.
+fn user_not_found(_name: &str) -> AuthApplyError {
+    AuthApplyError::NotFound("etcdserver: user name not found".into())
 }
 
-fn role_not_found(name: &str) -> AuthApplyError {
-    AuthApplyError::NotFound(format!("auth: role {name} not found"))
+fn role_not_found(_name: &str) -> AuthApplyError {
+    AuthApplyError::NotFound("etcdserver: role name not found".into())
 }
 
 /// Validate `op` against the tables in `snap` and stage its writes in
@@ -340,7 +342,7 @@ pub async fn plan(
             // As etcd: a root user must exist before auth can be on.
             if get_user(snap, "root").await?.is_none() {
                 return Ok(Err(AuthApplyError::FailedPrecondition(
-                    "root user must exist before AuthEnable".into(),
+                    "etcdserver: root user does not exist".into(),
                 )));
             }
             batch.put(TABLE_AUTH_STATE, META_AUTH_ENABLED, &[1u8]);
@@ -357,17 +359,18 @@ pub async fn plan(
                 return Ok(Err(user_not_found(user)));
             };
             if &u.password_hash != checked_hash || u.no_password {
-                return Ok(Err(AuthApplyError::FailedPrecondition(format!(
-                    "auth: the password of user {user} changed while authenticating; retry"
-                ))));
+                // etcd's ErrAuthOldRevision: clientv3 authenticates again.
+                return Ok(Err(AuthApplyError::FailedPrecondition(
+                    "etcdserver: revision of auth store is old".into(),
+                )));
             }
             fx.add_token = Some((token.clone(), user.clone()));
         }
         AuthOp::UserAdd { name, password_hash, no_password } => {
             if get_user(snap, name).await?.is_some() {
-                return Ok(Err(AuthApplyError::AlreadyExists(format!(
-                    "auth: user {name} already exists"
-                ))));
+                return Ok(Err(AuthApplyError::AlreadyExists(
+                    "etcdserver: user name already exists".into(),
+                )));
             }
             put_user(
                 batch,
@@ -416,9 +419,9 @@ pub async fn plan(
         }
         AuthOp::RoleAdd { name } => {
             if get_role(snap, name).await?.is_some() {
-                return Ok(Err(AuthApplyError::AlreadyExists(format!(
-                    "auth: role {name} already exists"
-                ))));
+                return Ok(Err(AuthApplyError::AlreadyExists(
+                    "etcdserver: role name already exists".into(),
+                )));
             }
             put_role(batch, &StoredRole { name: name.clone(), permissions: Vec::new() })?;
         }

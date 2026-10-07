@@ -24,6 +24,7 @@ pub mod cluster;
 pub mod cluster_id;
 pub mod compaction;
 pub mod conv;
+pub mod etcd_errors;
 pub mod gateway;
 pub mod kv;
 pub mod lease;

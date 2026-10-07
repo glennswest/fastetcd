@@ -74,8 +74,8 @@ pub async fn authorize_all(
         Some(u) => u,
         None => {
             // The interceptor should have rejected this before we
-            // got here; defensive.
-            return Err(Status::unauthenticated("auth: no user identity on request"));
+            // got here; defensive. etcd's ErrUserEmpty (#105).
+            return Err(crate::etcd_errors::user_empty());
         }
     };
     // Root user is unconditionally authorized.
@@ -92,7 +92,8 @@ pub async fn authorize_all(
         .await
         .map_err(|e| Status::internal(format!("authz: read user: {e}")))?
         .ok_or_else(|| {
-            Status::permission_denied(format!("authz: user {} not found", user.name))
+            tracing::debug!(target: "fastetcd::authz", user = %user.name, "permission check: no such user");
+            crate::etcd_errors::permission_denied()
         })?;
     let user_rec: StoredUser = bincode::deserialize(&user_bytes)
         .map_err(|e| Status::internal(format!("authz: decode user: {e}")))?;
@@ -119,12 +120,16 @@ pub async fn authorize_all(
 
     for a in accesses {
         if !perms.iter().any(|p| perm_covers(p, a.perm, a.key, a.range_end)) {
-            return Err(Status::permission_denied(format!(
-                "authz: user {} lacks {:?} on key {:?}",
-                user.name,
-                a.perm,
-                String::from_utf8_lossy(a.key)
-            )));
+            // etcd's text, which clientv3 matches as ErrPermissionDenied
+            // (#127); the detail goes to the log.
+            tracing::debug!(
+                target: "fastetcd::authz",
+                user = %user.name,
+                perm = ?a.perm,
+                key = %String::from_utf8_lossy(a.key),
+                "permission denied"
+            );
+            return Err(crate::etcd_errors::permission_denied());
         }
     }
     Ok(())
@@ -210,7 +215,7 @@ pub async fn require_root(
     if !auth.is_enabled() {
         return Ok(());
     }
-    let user = user.ok_or_else(|| Status::unauthenticated("auth: no user identity on request"))?;
+    let user = user.ok_or_else(crate::etcd_errors::user_empty)?;
     if user.name == "root" {
         return Ok(());
     }
@@ -231,10 +236,8 @@ pub async fn require_root(
     if is_root {
         Ok(())
     } else {
-        Err(Status::permission_denied(format!(
-            "authz: {} is not root; this call needs the root role",
-            user.name
-        )))
+        tracing::debug!(target: "fastetcd::authz", user = %user.name, "not root: admin call denied");
+        Err(crate::etcd_errors::permission_denied())
     }
 }
 

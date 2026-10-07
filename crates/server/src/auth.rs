@@ -40,6 +40,7 @@ use fastetcd_storage::mvcc::auth::{
 };
 use rand::RngCore;
 use tonic::{Request, Response, Status};
+use crate::etcd_errors;
 
 use crate::auth_sync::propose_auth;
 use crate::authz::{holds_role, require_root, UserIdentity};
@@ -96,9 +97,7 @@ impl AuthService {
     async fn admin<T>(&self, req: &Request<T>) -> Result<(), Status> {
         let caller = self.caller(req);
         if self.state.auth.is_enabled() && caller.is_none() {
-            return Err(Status::unauthenticated(
-                "auth: missing or invalid `token` metadata; call Authenticate first",
-            ));
+            return Err(etcd_errors::unidentified(req));
         }
         require_root(self.state.sm.mvcc().engine(), &self.state.auth, caller.as_ref()).await
     }
@@ -247,17 +246,18 @@ impl Auth for AuthService {
         &self,
         req: Request<pb::AuthenticateRequest>,
     ) -> Result<Response<pb::AuthenticateResponse>, Status> {
+        // etcd's answers (`authStore.CheckPassword`), so clientv3 knows
+        // them (#105).
+        if !self.state.auth.is_enabled() {
+            return Err(etcd_errors::auth_not_enabled());
+        }
         let req = req.into_inner();
-        let user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
-            Status::unauthenticated(format!("auth: user {} not found", req.name))
-        })?;
+        let user = load_user(&self.state, &req.name).await?.ok_or_else(etcd_errors::auth_failed)?;
         if user.no_password {
-            return Err(Status::unauthenticated(
-                "auth: user has no password (no_password set)",
-            ));
+            return Err(etcd_errors::no_password_user());
         }
         if !verify_password(&req.password, &user.password_hash) {
-            return Err(Status::unauthenticated("auth: invalid password"));
+            return Err(etcd_errors::auth_failed());
         }
         // Replicated, so any member accepts the token. The entry carries
         // the hash checked here; if the password changed meanwhile it is
@@ -270,9 +270,13 @@ impl Auth for AuthService {
                 checked_hash: user.password_hash,
             })
             .await
-            .map_err(|s| match s.code() {
-                tonic::Code::NotFound => Status::unauthenticated(s.message().to_string()),
-                _ => s,
+            // Deleted meanwhile: a wrong user, as etcd sees it.
+            .map_err(|s| {
+                if s.message() == etcd_errors::USER_NOT_FOUND {
+                    etcd_errors::auth_failed()
+                } else {
+                    s
+                }
             })?;
         Ok(Response::new(pb::AuthenticateResponse { header: Some(header), token }))
     }
@@ -284,7 +288,7 @@ impl Auth for AuthService {
         self.admin(&req).await?;
         let req = req.into_inner();
         if req.name.is_empty() {
-            return Err(Status::invalid_argument("auth: empty user name"));
+            return Err(etcd_errors::user_empty());
         }
         let no_password = req.options.as_ref().map(|o| o.no_password).unwrap_or(false);
         let password_hash = if no_password {
@@ -312,7 +316,7 @@ impl Auth for AuthService {
         }
         let req = req.into_inner();
         let user = load_user(&self.state, &req.name).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: user {} not found", req.name))
+            etcd_errors::user_not_found()
         })?;
         Ok(Response::new(pb::AuthUserGetResponse {
             header: Some(self.header().await),
@@ -386,7 +390,7 @@ impl Auth for AuthService {
         self.admin(&req).await?;
         let req = req.into_inner();
         if req.name.is_empty() {
-            return Err(Status::invalid_argument("auth: empty role name"));
+            return Err(etcd_errors::role_empty());
         }
         let header = self.change(AuthOp::RoleAdd { name: req.name }).await?;
         Ok(Response::new(pb::AuthRoleAddResponse { header: Some(header) }))
@@ -406,7 +410,7 @@ impl Auth for AuthService {
         }
         let req = req.into_inner();
         let role = load_role(&self.state, &req.role).await?.ok_or_else(|| {
-            Status::not_found(format!("auth: role {} not found", req.role))
+            etcd_errors::role_not_found()
         })?;
         Ok(Response::new(pb::AuthRoleGetResponse {
             header: Some(self.header().await),
@@ -442,7 +446,7 @@ impl Auth for AuthService {
         let req = req.into_inner();
         let p = req
             .perm
-            .ok_or_else(|| Status::invalid_argument("auth: missing Permission"))?;
+            .ok_or_else(etcd_errors::permission_not_given)?;
         let perm_type =
             pb_perm_type(p.perm_type).ok_or_else(|| Status::invalid_argument("auth: bad perm type"))?;
         let perm = StoredPermission { perm_type, key: p.key, range_end: p.range_end };
@@ -519,12 +523,10 @@ impl tonic::service::Interceptor for AuthInterceptor {
                 req.extensions_mut().insert(user);
                 Ok(req)
             }
-            None => Err(Status::unauthenticated(if self.client_cert_auth {
-                "auth: missing or invalid `token` metadata, and no client certificate \
-                 with a Common Name; call Authenticate first"
-            } else {
-                "auth: missing or invalid `token` metadata; call Authenticate first"
-            })),
+            // etcd's ErrInvalidAuthToken (a token naming no one here) or
+            // ErrUserEmpty (none): the errors clientv3 re-authenticates on
+            // (#105).
+            None => Err(etcd_errors::unidentified(&req)),
         }
     }
 }

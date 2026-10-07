@@ -208,11 +208,20 @@ impl AuthGate {
     }
 }
 
+/// etcd answers every auth refusal at apply `FailedPrecondition` (user or
+/// role not found or already existing, no root user), except
+/// `ErrAuthOldRevision`, `InvalidArgument` (fastetcd#105).
 fn apply_error(e: AuthApplyError) -> Status {
     match e {
-        AuthApplyError::NotFound(m) => Status::not_found(m),
-        AuthApplyError::AlreadyExists(m) => Status::already_exists(m),
-        AuthApplyError::FailedPrecondition(m) => Status::failed_precondition(m),
+        AuthApplyError::NotFound(m)
+        | AuthApplyError::AlreadyExists(m)
+        | AuthApplyError::FailedPrecondition(m) => {
+            if m == crate::etcd_errors::AUTH_OLD_REVISION {
+                crate::etcd_errors::auth_old_revision()
+            } else {
+                Status::failed_precondition(m)
+            }
+        }
     }
 }
 
