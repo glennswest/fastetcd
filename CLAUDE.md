@@ -1987,3 +1987,34 @@ Tracked live in the Claude task system. Snapshot of the order:
       only and `--client-cert-auth`; every command over TLS; the
       refusals. 31/31 at d8885f8.
     - [x] Docs (01, 02, 03), changelog; release 1.21.0; close #59.
+
+57. **A Txn inside a Txn runs, as in etcd (#56, P2).** `RequestOp.
+    request_txn` was refused `Unimplemented`. etcd release-3.5
+    (`apply.go`): `compareToPath` evaluates every compare, nested ones
+    included (only in the branches taken), against the state *before*
+    the txn; the ops then run in order in one write txn, so they share
+    one revision (sub-revisions in order) and a Range sees earlier
+    writes, nested or not. A nested `ResponseTxn` carries `succeeded` and
+    its branch's responses. Plan:
+    - storage: `TxnOp::Txn(NestedTxn { compares, success, failure })`
+      and `TxnOpResult::Txn { succeeded, op_results }`, appended last.
+      `MvccStore::txn` recurses: a nested txn's compares are evaluated
+      against the snapshot and index the txn started from (nothing is
+      committed until the end, under the write lock), as etcd's.
+    - raft precheck (#19, #49): the puts that would run, through nested
+      branches, are what is checked.
+    - server: conv recursion; response recursion; authz and the space
+      check already recurse.
+    - **Version gate**: an old member cannot decode the new variant (its
+      AppendEntries fails and it stops). A txn that nests is proposed
+      only once every member answers `ConfirmLeader` with version >=
+      1.22.0 (cached per membership); an older member → FailedPrecondition
+      naming it, unreachable → Unavailable. Flat txns are unchanged.
+    Work items:
+    - [ ] storage types + recursion; unit tests (branches, revision /
+      sub-revision order, nested compares see pre-txn state, Range sees
+      earlier nested writes, refusal inside a nested txn refuses all).
+    - [ ] raft precheck recursion; server conv/response/gate.
+    - [ ] Tests: gRPC (etcd-client) nested txn responses; 3 members
+      (applied everywhere); gate with an older member.
+    - [ ] Docs (00/03 mixed versions), changelog; release 1.22.0; close #56.
