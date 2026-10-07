@@ -68,8 +68,8 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 |---|---|---|---|---|
 | `--heartbeat-interval` | `250` | `FASTETCD_HEARTBEAT_INTERVAL` | `ETCD_HEARTBEAT_INTERVAL` | Milliseconds between a leader's heartbeats. Also the time one AppendEntries may take, sent and fsynced by the follower (openraft's replication timeout, #94): not below one fsync of the followers' disk. |
 | `--election-timeout` | `1000` | `FASTETCD_ELECTION_TIMEOUT` | `ETCD_ELECTION_TIMEOUT` | Milliseconds a follower waits for the leader before calling an election (each member picks from [t, 2t)). A leader sends no heartbeat during a WAL fsync, so on a disk that stalls set it above the longest stall (#103; [03-deploy](03-deploy.md#timeouts-and-slow-disks)). At least 2x the heartbeat (etcd asks 5x), at most 50 000. |
-| `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied log entries. Since 1.10 one entry can be a batch of writes (#75; up to 4096 or 512 KiB since 1.17, #94), so under concurrent load that is more writes than etcd's count, which is per proposal (#80). |
-| `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted entries kept after a purge, for followers just behind. |
+| `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied writes, as etcd counts them. A log entry can be a batch of writes (#75, #94); since 1.18 each counts (#80; 1.10–1.17 counted entries). |
+| `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted writes kept in the log after a purge, for followers just behind (since 1.18 counted in writes, #80). |
 | `--max-snapshots` | `1` | `FASTETCD_MAX_SNAPSHOTS` | `ETCD_MAX_SNAPSHOTS` | Snapshots kept on disk (each a full copy), rolled off before a new one is written. |
 
 ## Memory (RAM cache)

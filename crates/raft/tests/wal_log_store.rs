@@ -345,6 +345,15 @@ async fn slow_node(
     fsync: Duration,
     checkpoint: Duration,
 ) -> (Raft<TypeConfig>, WalLogStore, FastetcdStateMachine) {
+    slow_node_with(dir, fsync, checkpoint, config()).await
+}
+
+async fn slow_node_with(
+    dir: &std::path::Path,
+    fsync: Duration,
+    checkpoint: Duration,
+    cfg: Arc<Config>,
+) -> (Raft<TypeConfig>, WalLogStore, FastetcdStateMachine) {
     let base: Arc<dyn KvStore> = Arc::new(RedbEngine::open(dir.join("fastetcd.redb")).unwrap());
     let wb: Arc<dyn KvStore> = Arc::new(WriteBehind::new(base, 64 * 1024 * 1024));
     let engine: Arc<dyn KvStore> = Arc::new(SlowCheckpoint(wb, checkpoint));
@@ -358,7 +367,7 @@ async fn slow_node(
     )
     .await
     .unwrap();
-    let raft = Raft::<TypeConfig>::new(1, config(), NopNetwork, log.clone(), sm.clone())
+    let raft = Raft::<TypeConfig>::new(1, cfg, NopNetwork, log.clone(), sm.clone())
         .await
         .unwrap();
     raft.initialize(BTreeSet::from([1])).await.unwrap();
@@ -529,4 +538,81 @@ async fn slow_checkpoints_leave_the_disk_to_the_wal() {
     }
     raft.shutdown().await.unwrap();
     checkpointer.abort();
+}
+
+/// fastetcd#80: `--snapshot-count` counts writes, not log entries. With
+/// writes batched into few entries, openraft's entry-counted policy (here
+/// a million entries, so it never fires) would let the log grow without
+/// bound; the proposal-counted policy snapshots once 200 proposals are
+/// applied, and purges down to about 100.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshots_and_purges_are_counted_in_proposals() {
+    use openraft::RaftMetrics;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Arc::new(
+        Config {
+            heartbeat_interval: 100,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1_000_000),
+            max_in_snapshot_log_to_keep: 1_000_000,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap(),
+    );
+    let (raft, log, sm) = slow_node_with(dir.path(), Duration::from_millis(50), Duration::ZERO, cfg).await;
+    let proposer = fastetcd_raft::Proposer::spawn(
+        raft.clone(),
+        log.progress(),
+        fastetcd_raft::WriteForwarder::new(fastetcd_raft::empty_peers()),
+    );
+    let write = |from: usize, n: usize| {
+        let p = proposer.clone();
+        async move {
+            let tasks: Vec<_> = (from..from + n)
+                .map(|i| {
+                    let p = p.clone();
+                    tokio::spawn(async move { p.propose(put(i)).await.expect("proposal applied") })
+                })
+                .collect();
+            for t in tasks {
+                t.await.unwrap();
+            }
+        }
+    };
+    let metrics = |r: &Raft<TypeConfig>| -> RaftMetrics<NodeId, openraft::BasicNode> { r.metrics().borrow().clone() };
+
+    // Without the policy: 300 writes in a few batched entries, no snapshot.
+    write(0, 300).await;
+    sleep_ms(1500).await;
+    let m = metrics(&raft);
+    assert!(m.snapshot.is_none(), "openraft snapshotted at {:?} entries", m.last_log_index);
+    let entries = m.last_log_index.unwrap();
+    assert!(entries < 200, "300 writes took {entries} log entries: not batched enough to tell");
+
+    // The policy: a snapshot (by proposals), then a purge to ~100 kept.
+    fastetcd_raft::snapshot_policy::spawn(raft.clone(), sm.proposal_log(), 200, 100);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let m = metrics(&raft);
+        if m.snapshot.is_some() && m.purged.is_some() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no snapshot and purge: {:?} / {:?}", m.snapshot, m.purged);
+        sleep_ms(100).await;
+    }
+    let m = metrics(&raft);
+    let (snap, purged) = (m.snapshot.unwrap().index, m.purged.unwrap().index);
+    let p = sm.proposal_log();
+    let kept = p.cumulative_at(snap) - p.cumulative_at(purged);
+    eprintln!("{} proposals in {entries} entries; snapshot at {snap}, purged to {purged}, {kept} proposals kept", p.total());
+    assert!(snap <= entries + 2, "snapshot at {snap}: by proposals, not entries");
+    assert!(kept >= 100, "only {kept} proposals kept after the purge, asked for 100");
+    assert!(purged > 0 && purged < snap, "purged to {purged}, snapshot at {snap}");
+    raft.shutdown().await.unwrap();
+}
+
+async fn sleep_ms(ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
 }

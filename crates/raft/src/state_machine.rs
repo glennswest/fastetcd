@@ -63,6 +63,9 @@ pub struct FastetcdStateMachine {
     /// waits on this, not on openraft's metrics, which RaftCore only
     /// publishes between messages (fastetcd#71).
     applied: Arc<watch::Sender<u64>>,
+    /// Proposals per applied entry, for snapshots counted in proposals
+    /// (fastetcd#80, `crate::snapshot_policy`).
+    proposals: Arc<crate::snapshot_policy::ProposalLog>,
 }
 
 /// `LogId` → the value [`FastetcdStateMachine::applied_index`] carries.
@@ -262,6 +265,7 @@ impl FastetcdStateMachine {
             })),
             mvcc,
             snapshots,
+            proposals: Arc::default(),
         })
     }
 
@@ -384,6 +388,12 @@ impl FastetcdStateMachine {
             self.mvcc.stage_raft_meta(applied_bytes, None).await;
         }
         Ok(FastetcdLogResponse::Batch(out))
+    }
+
+    /// Proposals per applied entry (fastetcd#80): what
+    /// [`crate::snapshot_policy::spawn`] counts snapshots in.
+    pub fn proposal_log(&self) -> Arc<crate::snapshot_policy::ProposalLog> {
+        self.proposals.clone()
     }
 
     /// The applied position, `last_applied_log_id.index + 1` (0 = none),
@@ -598,6 +608,7 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
                 responses.push(response);
                 g.last_applied_log_id = Some(log_id);
                 self.applied.send_replace(log_id.index + 1);
+                self.proposals.record(log_id.index, subs.len() as u64);
                 continue;
             }
 
@@ -629,6 +640,9 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
             responses.push(response);
             g.last_applied_log_id = Some(log_id);
             self.applied.send_replace(log_id.index + 1);
+            if matches!(entry.payload, openraft::EntryPayload::Normal(_)) {
+                self.proposals.record(log_id.index, 1);
+            }
         }
 
         // Membership and blank entries mutate no MVCC state, so nothing

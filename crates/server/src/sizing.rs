@@ -76,7 +76,8 @@ pub const HISTORY_FRACTION_PCT: u64 = 30;
 /// engine settles around in practice.
 pub const COW_OVERHEAD_PCT: u64 = 160;
 
-/// Average raft log entry, for turning `--snapshot-count` into bytes.
+/// Average write in the raft log, for turning `--snapshot-count` (writes
+/// between snapshots, #80) into bytes.
 /// Lease renewals are small and pod updates are not; 2 KiB is the
 /// middle of what a Kubernetes workload produces.
 pub const AVG_LOG_ENTRY_BYTES: u64 = 2 * 1024;
@@ -96,7 +97,8 @@ pub const HIGH_WATER_PCT: u64 = 80;
 pub struct ClusterShape {
     pub nodes: u64,
     pub pods_per_node: u64,
-    /// `--snapshot-count`: raft log entries between snapshots.
+    /// `--snapshot-count`: writes between snapshots (proposals, not log
+    /// entries, since #80).
     pub snapshot_count: u64,
     /// `--max-snapshots`: retained snapshots, each a full copy.
     pub max_snapshots: u64,
@@ -260,7 +262,7 @@ pub fn report(shape: ClusterShape) -> String {
         human(e.snapshot_bytes)
     ));
     out.push_str(&format!(
-        "  raft log (WAL)           +{:>10}   ({} entries x {}, + {} of preallocated segments)\n",
+        "  raft log (WAL)           +{:>10}   ({} writes x {}, + {} of preallocated segments)\n",
         human(e.log_bytes),
         shape.snapshot_count,
         human(AVG_LOG_ENTRY_BYTES),

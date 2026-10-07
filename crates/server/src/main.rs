@@ -272,14 +272,16 @@ struct Args {
     election_timeout: u64,
 
     /// Take a raft snapshot (and then purge the log) every N applied
-    /// entries. Lower keeps the log smaller; higher lets a lagging
-    /// follower catch up from the log instead of a snapshot. Matches
-    /// etcd's `--snapshot-count`.
+    /// writes (proposals; a batched log entry counts each one, #80).
+    /// Lower keeps the log smaller; higher lets a lagging follower catch
+    /// up from the log instead of a snapshot. Matches etcd's
+    /// `--snapshot-count`.
     #[arg(long, env = "FASTETCD_SNAPSHOT_COUNT", default_value_t = 5000)]
     snapshot_count: u64,
 
-    /// Number of already-snapshotted log entries to retain after a
-    /// purge (a catch-up buffer for followers just behind the snapshot).
+    /// Already-snapshotted writes (proposals, #80) to retain in the log
+    /// after a purge: a catch-up buffer for followers just behind the
+    /// snapshot.
     #[arg(
         long,
         env = "FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP",
@@ -1151,6 +1153,15 @@ async fn main() -> anyhow::Result<()> {
     let log_progress = log.progress();
     let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
+    // `--snapshot-count` and `--max-in-snapshot-log-to-keep` in proposals,
+    // as etcd counts them, not in log entries, which can be batches
+    // (#80). openraft's entry-counted policy above stays as the backstop.
+    fastetcd_raft::snapshot_policy::spawn(
+        raft.clone(),
+        sm.proposal_log(),
+        args.snapshot_count,
+        args.max_in_snapshot_log_to_keep,
+    );
 
     // Bootstrap: only the `new` state initializes; `existing` waits
     // for an external add-learner call.

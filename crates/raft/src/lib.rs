@@ -25,6 +25,7 @@ pub mod precheck;
 pub mod proposer;
 pub mod read_index;
 pub mod snapshot_data;
+pub mod snapshot_policy;
 pub mod snapshot_store;
 pub mod state_machine;
 pub mod types;

@@ -136,8 +136,8 @@ itself once occupancy falls back below `--space-clear-percent` (70).
 | `--auto-defrag` | `true` | Let the reclaim path defragment. |
 | `--max-snapshots` | `1` | Snapshots retained on disk. |
 | `--auto-compaction-retention` | `0` | Steady-state compaction (off; Kubernetes drives its own). |
-| `--snapshot-count` | `5000` | Applied log entries between raft snapshots (an entry may be a batch of up to 4096 writes / 512 KiB, #80). |
-| `--max-in-snapshot-log-to-keep` | `1000` | Log entries kept after a purge. |
+| `--snapshot-count` | `5000` | Applied writes between raft snapshots (a batched log entry counts each write in it, #80). |
+| `--max-in-snapshot-log-to-keep` | `1000` | Writes kept in the log after a purge. |
 
 Each has an `ETCD_*` environment fallback where etcd has the same flag,
 so an unmodified etcd `EnvironmentFile` keeps working.
@@ -241,16 +241,17 @@ The multipliers, in order of size: MVCC history between compactions
 `--upgrade-backup-retain` safety backups (a full copy each). Sizing for
 the 63 MiB is how a volume fills.
 
-The raft-log term assumes 2 KiB per log entry (`--snapshot-count` x
+The raft-log term assumes 2 KiB per write (`--snapshot-count` x
 2 KiB, 10 MiB at the default), plus three WAL segments (48 MiB): since
 1.12 the log is in segments in `wal/` written full size up front (#85):
 the one being written, a zero-filled spare ready behind it, and a purged
-segment that stays until a checkpoint covers it. Since 1.10 a leader under concurrent
-writes batches up to 4096 proposals (512 KiB) into one entry (#75, #94), and
-snapshots still come every `--snapshot-count` *entries*, so a busy
-cluster can carry more log between snapshots than the estimate shows.
-The high-water reclaim snapshots and purges it before the volume fills;
-the estimate itself is #80.
+segment that stays until a checkpoint covers it. A leader under
+concurrent writes batches up to 4096 proposals (512 KiB) into one log
+entry (#75, #94); since 1.18 `--snapshot-count` and
+`--max-in-snapshot-log-to-keep` count those writes, not entries, as etcd's
+do (#80), so the estimate holds under batching too. (1.10–1.17 counted
+entries, and a busy cluster could carry far more log between snapshots
+than it shows.)
 
 **Small clusters all land in the same bucket.** 1 node and 10 nodes both
 provision at 512 MiB, because below roughly 50 nodes the estimate is

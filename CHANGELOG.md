@@ -6,6 +6,20 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — `--snapshot-count` counts writes (#80)
+- **fix:** `--snapshot-count` and `--max-in-snapshot-log-to-keep` count
+  writes (proposals), as etcd's do, not raft log entries (#80). Since
+  1.10 an entry can be a batch of hundreds of writes, and openraft's
+  policy counts entries, so the log between snapshots, and what a purge
+  kept, held far more than the flags (and `fastetcd sizing`) say. The
+  state machine now counts the writes in each entry it applies
+  (`snapshot_policy::ProposalLog`), and a task on every member triggers a
+  snapshot once `--snapshot-count` writes are applied since the last,
+  and after it purges the log to about `--max-in-snapshot-log-to-keep`
+  writes (`Raft::trigger().snapshot()` / `purge_log`). openraft's
+  entry-counted policy stays as a backstop. Test: 300 writes batched into
+  few entries snapshot at 200 writes and purge to >= 100.
+
 ### 2026-10-07 — election timeouts are settable (#103)
 - **feat:** `--heartbeat-interval` and `--election-timeout` (ms, etcd's
   names; `ETCD_HEARTBEAT_INTERVAL` / `ETCD_ELECTION_TIMEOUT`), defaults
