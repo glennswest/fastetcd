@@ -6,6 +6,22 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — test containers (#36)
+- **test:** fastetcd's test container per stormcentral's test standard
+  (#36): `test/` (crate `fastetcd-test`, a workspace member but not a
+  default member, so the golden's build is unchanged), `test/build.sh`
+  (static musl test binary + the commit's static `fastetcd`),
+  `test/Containerfile` (`FROM scratch`), `test/requires.toml` (nothing
+  beyond the namespace), `test/README.md`. `short`: the node's fastetcd
+  (health, status, no alarms; KV, watch and lease round trips under
+  `/storm-test/<run id>/`, removed; never anything cluster-wide on the
+  live store) and the commit's binary serving. `medium`: compaction and
+  watch history, lease expiry, RBAC, NOSPACE recovery, snapshot restore,
+  SIGKILL durability, 3-member leader loss, all on the suite's own
+  members. `long`: night waves (ramp, hold, drain) sized from the pod's
+  cgroup, with a throughput and residue trend. `tests/test_container.sh`
+  runs all three in an sc-build job.
+
 ## [v1.17.0] — 2026-10-07
 
 ### 2026-10-06 — a batch takes what queued, bounded by bytes (#94)

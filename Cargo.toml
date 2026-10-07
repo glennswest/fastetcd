@@ -7,6 +7,17 @@ members = [
     "crates/server",
     "crates/migrate",
     "crates/ctl",
+    "test",
+]
+# The test container's crate (#36) is built only by test/build.sh
+# (`-p fastetcd-test`): a plain `cargo build`, the golden's, is unchanged.
+default-members = [
+    "crates/proto",
+    "crates/storage",
+    "crates/raft",
+    "crates/server",
+    "crates/migrate",
+    "crates/ctl",
 ]
 
 [workspace.package]

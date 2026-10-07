@@ -80,6 +80,20 @@ election and `slow raft WAL fdatasync` log lines, so a stall can be
 put down to the disk, an election or fastetcd (#83). `DATA_ROOT=/dev/shm`
 puts the data dirs on tmpfs, where no fsync stalls.
 
+**On a running node: the test container (#36).** Per stormcentral's
+test standard, `test/` builds one image (`test/build.sh` stages a static
+test binary and the commit's static `fastetcd`; `test/Containerfile`
+packages them `FROM scratch`) that stormcentral runs on its test machines
+as `/test short|medium|long` (`stormcentral test run fastetcd short`).
+`short` checks the node's fastetcd without changing anything cluster-wide
+(health, status and alarms, KV, watch and lease round trips under
+`/storm-test/<run id>/`, removed) and that the commit's binary serves;
+`medium` runs features and failure paths (compaction, leases, RBAC,
+NOSPACE, snapshot restore, SIGKILL, leader loss) on members it starts
+itself; `long` runs night waves with a trend. `test/README.md` lists every
+check. `sc-build tests/test_container.sh` runs all three in a build job,
+against a local member standing in for the node.
+
 Against upstream etcd (#90): `tests/bench/compare.sh <etcd-version>`
 downloads the etcd release (sha256-checked), builds etcd's own
 `benchmark` tool from the same tag with a downloaded Go, builds

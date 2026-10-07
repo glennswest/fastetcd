@@ -1,0 +1,18 @@
+# fastetcd-test — fastetcd's test image, per stormcentral
+# docs/test-standard.md (#36). One image for all three suites: the Job runs
+# `/test short|medium|long`.
+#
+# test/build.sh builds both binaries on the build box (static, musl) and
+# stages them; this packages them. `short` tests the node's fastetcd at
+# $STORM_NODE:2379 (read-only cluster state; its own keys under
+# /storm-test/<run id>/, removed); every suite also runs /fastetcd, the
+# commit under test, as its own members on loopback, data under /results.
+# No shell, no tools, no privileges.
+#
+# The build context is the repo root (the standard's).
+FROM scratch
+ARG COMMIT=unknown
+LABEL storm.io/test-of="fastetcd" storm.io/test-commit="${COMMIT}"
+COPY test/.stage/fastetcd-test /test
+COPY test/.stage/fastetcd /fastetcd
+ENTRYPOINT ["/test"]

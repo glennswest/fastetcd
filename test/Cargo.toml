@@ -1,0 +1,24 @@
+[package]
+name = "fastetcd-test"
+description = "fastetcd's test container: short, medium and long suites of a running fastetcd, per stormcentral docs/test-standard.md (#36)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# A workspace member, so the one Cargo.lock pins it, but not a default
+# member: `cargo build` at the root (the golden, sc-build) builds exactly
+# what it did before. test/build.sh builds it with `-p fastetcd-test`.
+[[bin]]
+name = "fastetcd-test"
+path = "src/main.rs"
+
+# Only crates the workspace already pins.
+[dependencies]
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+fastetcd-proto.workspace = true

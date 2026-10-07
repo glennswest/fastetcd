@@ -1,0 +1,12 @@
+# What fastetcd-test's suites need from stormcentral's runner beyond the
+# run's namespace (docs/test-standard.md). short, medium and long take the
+# standard's budgets and need nothing more: no privilege, host path, host
+# network or cluster read.
+#
+# - short reaches the node's fastetcd at $STORM_NODE:2379 over the pod
+#   network, plaintext. Once stormcos#146 puts that port on mutual TLS the
+#   runner gives the test no client certificate, and its node checks
+#   report skip, saying so.
+# - Every suite runs the image's /fastetcd as child processes on loopback,
+#   with their data under /results (or $TMPDIR).
+# - long sizes its waves from the pod's own CPUs and cgroup memory limit.
