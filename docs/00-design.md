@@ -152,7 +152,7 @@ crates/
 
 | Service       | Implemented | Not implemented |
 |---------------|-------------|-----------------|
-| KV            | Range, Put, DeleteRange, Txn, Compact | nested Txn (#56) |
+| KV            | Range, Put, DeleteRange, Txn (nested txns too, #56), Compact | |
 | Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel | response fragmentation (#58) |
 | Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases (authorized over the lease's keys, #47) | |
 | Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
@@ -273,4 +273,4 @@ first server start initializes raft on the migrated store.
 
 - A second engine for tail latency (#55): wire engine selection, with
   on-disk format detection, or drop it.
-- Watch fragmentation (#58) and nested Txn (#56).
+- Watch fragmentation (#58).

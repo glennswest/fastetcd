@@ -215,7 +215,7 @@ Auth: no known authorization gap; tokens never expire (#46).
 
 - **Correctness first**: the lease-not-found check at apply as etcd
   does it, once members' lease tables are known to agree (#115).
-- **etcd parity gaps**: nested Txn (#56), MoveLeader / Downgrade (#57),
+- **etcd parity gaps**: MoveLeader / Downgrade (#57),
   watch fragmentation (#58), token TTL (#46), Lock / Election services
   (#64), WebSocket gateway streams (#66), a real `/health` (#69),
   `--auto-compaction-mode` (#21, an owner decision).

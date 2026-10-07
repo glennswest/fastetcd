@@ -558,6 +558,17 @@ the last member is upgraded. After that:
   counts them (on the leader). Upgrade it again, or remove it and add it
   back empty.
 
+**A txn inside a txn (1.22, #56).** A nested txn is a new kind of log
+entry content that a member older than 1.22 cannot decode. The member a
+txn that nests arrives at asks every other member its version
+(`ConfirmLeader`, once per membership) and refuses the txn until all run
+1.22 or later: `FailedPrecondition` naming an older member, `Unavailable`
+while one does not answer. Flat txns are never held back, so a rolling
+upgrade is safe. Once a nested txn has been applied, **do not add a
+member older than 1.22 or downgrade one below it**: it stops at that
+entry. `MemberAdd` does not check for this (it refuses only members
+older than 1.10).
+
 The same holds for replicated auth entries since 1.5.0.
 
 **Leases in raft snapshots (1.16, #41).** Before 1.16 a raft snapshot

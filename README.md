@@ -26,7 +26,7 @@ single- and multi-member, with linearizable reads by default:
   offline `backup` / `restore` / `fsck` / `defrag`, volume sizing.
 - Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
 
-Not implemented (each has an issue): nested Txn (#56), MoveLeader and
+Not implemented (each has an issue): MoveLeader and
 Downgrade (#57), watch response fragmentation (#58), raising an alarm by
 hand (deliberate), the etcd v2 API (out of scope). Differences from
 etcd are listed under [Compatibility boundary](#compatibility-boundary).
@@ -115,7 +115,7 @@ goal is a drop-in replacement, not a fork of behavior.
 | Consensus | Raft (etcd-io/raft) | Raft (`openraft`) |
 | Storage engine | BoltDB (bbolt), mmap B+tree | `redb`, behind a `KvStore` trait |
 | MVCC model | Revisions, generations, leases | Same model, reimplemented |
-| Watch / Lease / Txn | Full | Wire-compatible; no nested Txn (#56), no watch fragmentation (#58) |
+| Watch / Lease / Txn | Full | Wire-compatible, nested txns included (#56); no watch fragmentation (#58) |
 | Auth | Token / per-key RBAC | Token / per-key RBAC |
 | TLS | Yes | Yes |
 | Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
@@ -171,8 +171,10 @@ Differences from etcd:
 
 - `--auto-compaction-retention` counts revisions; etcd's default mode
   counts hours (#21).
-- `MoveLeader` and `Downgrade` answer `Unimplemented` (#57); a nested
-  Txn is refused (#56); raising an alarm by hand is refused.
+- `MoveLeader` and `Downgrade` answer `Unimplemented` (#57); raising an
+  alarm by hand is refused.
+- A txn inside a txn is refused until every member runs 1.22 or later
+  (#56, 03-deploy).
 - `--log-level` and `--max-request-bytes` are accepted and ignored;
   logging is set with `RUST_LOG` (#54).
 - A `Put` naming a lease that does not exist is refused with etcd's
