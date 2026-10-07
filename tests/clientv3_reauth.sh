@@ -51,6 +51,9 @@ run() {
     exec 3>"$dir/go"
     for _ in $(seq 100); do grep -q "^ok put before" "$dir/client" 2>/dev/null && break; sleep 0.1; done
     cat "$dir/client"
+    # Past the checkpoint (100 ms): otherwise the restart replays the
+    # Authenticate entry from the WAL and the token survives it.
+    sleep 2
     kill "$(cat "$dir/pid")"; wait "$(cat "$dir/pid")" 2>/dev/null || true
     echo "   member restarted (every token is gone)"
     start
