@@ -1763,3 +1763,38 @@ Tracked live in the Claude task system. Snapshot of the order:
       writers: 500 per fsync (cap 256 put back: 222, fails). Learner:
       caught up 2/2 (~47 s); replication bound disabled: never.
     - Not verified: the issue's slow-VM bench (benchslow is gone).
+
+50. **Test containers per the stormcos test standard (#36, P1).** One
+    image from `test/Containerfile` (`FROM scratch`: the static
+    `fastetcd-test` as `/test`, and the commit's static `fastetcd` as
+    `/fastetcd`), built by `test/build.sh` on the build box (musl), run by
+    stormcentral as `/test short|medium|long`; JSON lines, exit 0/1/2.
+    The node's fastetcd is rustkube's live store, so nothing cluster-wide
+    (compact, defrag, alarms, auth, membership) is ever done to it:
+    - **short** (< 2 min): the node's fastetcd at `$STORM_NODE:2379`:
+      `/health`, status + no alarms, put/get/txn/range/delete under
+      `/storm-test/<run id>/`, a watch sees them, a lease with a key
+      revoked; everything it made removed. A client port that needs a
+      client certificate (stormcos#146; the runner gives none) → skip,
+      saying so. Then the commit's own `/fastetcd`, started on loopback in
+      the pod: up, a write and a read.
+    - **medium** (~10 min): the commit's binary in the pod, data under
+      `/results` (or `$TMPDIR`): history + watch + compaction, lease
+      expiry and keep-alive, auth + RBAC (incl. lease authz, #47), the
+      NOSPACE alarm on a small quota and recovery, live snapshot →
+      `fastetcd restore` (#61), SIGKILL keeps every acknowledged write,
+      3 members: follower forwarding, leader SIGKILLed → new leader,
+      nothing acknowledged lost, old leader rejoins.
+    - **long** (night): waves sized from the pod's own CPUs and memory
+      limit (cgroup): ramp (keys), hold (mixed load, watches, lease
+      churn), drain (delete, compact, defrag); per wave throughput, p99,
+      RSS, fds, db size after defrag; a slower wave or growing residue
+      fails.
+    Work items:
+    - [ ] `test/` crate (workspace member, not a default member, so the
+      golden's `cargo build` is unchanged), build.sh, Containerfile,
+      requires.toml, README.
+    - [ ] sc-build: build.sh stages static binaries; run `medium` and a
+      short-against-a-local-member in the job.
+    - [ ] `stormcentral test run fastetcd short` on a test machine.
+    - [ ] Docs (02-testing), changelog; close #36.
