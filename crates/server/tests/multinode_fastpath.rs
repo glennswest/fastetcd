@@ -463,15 +463,11 @@ fn max_term(nodes: &[Node]) -> u64 {
     nodes.iter().map(|n| n.raft.metrics().borrow().current_term).max().unwrap_or(0)
 }
 
-/// fastetcd#103: every WAL fsync takes `stall`, and four writes go through
+/// fastetcd#103: WAL fsyncs take `stall` (on every member, or with
+/// `everyone` false on the leader alone) while four writes go through
 /// the leader. openraft 0.9 sends heartbeats from RaftCore, which waits
 /// for each append's fsync, so the leader is silent for each stall.
 /// Returns (term before, highest term after, leader before, leader after).
-async fn writes_through_fsync_stalls(timing: Timing, stall: Duration) -> (u64, u64, NodeId, NodeId) {
-    writes_through_stalls(timing, stall, true).await
-}
-
-/// As above; with `everyone` false only the leader's disk stalls.
 async fn writes_through_stalls(timing: Timing, stall: Duration, everyone: bool) -> (u64, u64, NodeId, NodeId) {
     // `RUST_LOG=openraft=info` shows each member's election decisions.
     let _ = tracing_subscriber::fmt()
@@ -500,32 +496,31 @@ async fn writes_through_stalls(timing: Timing, stall: Duration, everyone: bool) 
     (term, after, leader, now)
 }
 
-/// At etcd-like timeouts (heartbeat 250 ms, election 1 s), a 6 s fsync
-/// stall costs the leader: followers hear nothing for longer than their
-/// election timeout plus openraft's leader lease (3-4 s) and elect again.
+/// At the default timeouts (heartbeat 250 ms, election 1 s), a 6 s fsync
+/// stall on the leader alone costs it the leadership: its followers hear
+/// nothing for longer than their election timeout plus openraft's leader
+/// lease (3-4 s) and elect another (3 of 3 runs on dev). (With every
+/// member's disk stalled at once the outcome depends on timing: a
+/// follower stuck in its own fsync does not time out. On dev it ranged
+/// from no election to 40 terms of churn with no leader, so it is not
+/// asserted.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_fsync_stall_longer_than_the_election_timeout_elects_again() {
+async fn a_stall_on_the_leader_longer_than_the_election_timeout_elects_again() {
     let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
-    let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
-    eprintln!("1 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
-    assert!(after > before, "no election during 6 s fsync stalls at a 1 s election timeout (term {before})");
+    let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), false).await;
+    eprintln!("1 s election timeout, 6 s fsyncs on the leader: term {before} -> {after}, leader {l0} -> {l1}");
+    assert!(after > before, "no election while the leader stalled 6 s at a 1 s election timeout (term {before})");
 }
 
 /// With `--election-timeout` above the stall (10 s: 30-40 s with the
-/// lease), the same stalls keep the leader and the term.
+/// lease), the same stall keeps the leader and the term, whether the
+/// leader's disk alone or every member's stalls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_election_timeout_above_the_stall_keeps_the_leader() {
     let timing = Timing { heartbeat: 250, election_min: 10_000, election_max: 20_000 };
-    let (before, after, l0, l1) = writes_through_fsync_stalls(timing, Duration::from_secs(6)).await;
-    eprintln!("10 s election timeout, 6 s fsyncs: term {before} -> {after}, leader {l0} -> {l1}");
-    assert_eq!((after, l1), (before, l0), "the leader or the term changed");
-}
-
-/// Only the leader's disk stalls: its followers are free to elect.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stall_on_the_leader_alone_at_a_1s_election_timeout() {
-    let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
-    let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), false).await;
-    eprintln!("1 s election timeout, 6 s fsyncs on the leader only: term {before} -> {after}, leader {l0} -> {l1}");
-    assert!(after > before, "no election while the leader alone stalled 6 s (term {before})");
+    for everyone in [false, true] {
+        let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), everyone).await;
+        eprintln!("10 s election timeout, 6 s fsyncs (every member: {everyone}): term {before} -> {after}, leader {l0} -> {l1}");
+        assert_eq!((after, l1), (before, l0), "the leader or the term changed (every member stalled: {everyone})");
+    }
 }

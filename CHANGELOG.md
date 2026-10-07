@@ -36,8 +36,12 @@
 - **feat:** A WAL fsync longer than the election timeout is logged as
   such (`slow raft WAL fdatasync, longer than the election timeout`),
   naming the flag.
-- **test:** `multinode_fastpath`: with every fsync stalled 6 s, a 1 s
-  election timeout elects again; a 10 s one keeps the leader and term.
+- **test:** `multinode_fastpath`: with the leader's fsyncs stalled 6 s
+  (`WalLogStore::set_sync_delay`), a 1 s election timeout elects again;
+  a 10 s one keeps the leader and term, with the leader's disk alone or
+  every member's stalled. (With every disk stalled at a 1 s timeout the
+  outcome depends on timing, from no election to 40 terms of churn with
+  no leader, so it is not asserted.)
 
 ### 2026-10-07 — 3-member write maxima attributed (#83)
 - **docs:** The multi-second write maxima on a 3-member cluster under
