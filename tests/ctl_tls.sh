@@ -65,12 +65,12 @@ expect_err() {
     local out
     if out=$("$@" 2>&1); then
         fail "$what: succeeded: $out"
-    elif printf '%s' "$out" | grep -qiE "$pat"; then
+    elif printf '%s' "$out" | grep -qiE -e "$pat"; then
         ok "$what"
     else
         fail "$what: no /$pat/ in: $out"
     fi
-    printf '%s\n' "$out" | grep -iE "$pat" | head -2 | sed 's/^/        /'
+    printf '%s\n' "$out" | { grep -iE -e "$pat" || true; } | head -2 | sed "s/^/        /"
 }
 
 PID=
