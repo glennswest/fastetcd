@@ -10,7 +10,16 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.18.0`** — `--heartbeat-interval` / `--election-timeout` (#103):
+**`1.19.0`** — `fastetcd-migrate` works on real etcd snapshots and
+brings leases and auth (#60). It never could read a file etcd wrote:
+bbolt-rs needs `compat` for Go's magic and refuses freelist-less files
+(etcd's `NoFreelistSync`), so `crates/migrate/src/bolt.rs` reads BoltDB
+itself; `etcdctl snapshot save`'s trailing sha256 is checked and cut as
+etcd's restore does. Leases granted with the TTL etcd restores with;
+roles, users (bcrypt hash kept: `Authenticate` verifies bcrypt) and the
+auth flag through `apply_auth`. `tests/migrate_e2e.sh`: real etcd v3.5.
+
+Previous: **`1.18.0`** — `--heartbeat-interval` / `--election-timeout` (#103):
 openraft 0.9 sends a leader's heartbeats from RaftCore, which waits for
 each append's fsync, so a WAL stall longer than the followers' election
 timeout plus the leader lease (3–4 s by default) elects again (test: a
@@ -1891,6 +1900,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       → migrate → fastetcd: keys, leases expiring, users logging in with
       their etcd passwords, RBAC enforced.
     Work items:
-    - [ ] migrate leases + auth; bulk-load fix; server bcrypt; tests.
-    - [ ] e2e with real etcd; docs (00, README migration), changelog;
+    - [x] migrate leases + auth; bulk-load fix; server bcrypt; tests.
+    - [x] e2e with real etcd; docs (00, README migration), changelog;
       release; close #60.
+    - Found by the e2e: the tool could not open any etcd file (bbolt-rs:
+      magic, then no freelist): own reader (`bolt.rs`); etcd's trailing
+      sha256; a denied call answers fastetcd's own text, not etcd's
+      (#127).

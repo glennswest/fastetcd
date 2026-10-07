@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.19.0] — 2026-10-07
+
 ### 2026-10-07 — fastetcd-migrate imports leases and auth (#60)
 - **fix:** `fastetcd-migrate` read only etcd's `key` bucket (#60): keys
   kept lease ids no lease backed, so they never expired, and users, roles
