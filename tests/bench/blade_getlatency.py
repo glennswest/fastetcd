@@ -12,6 +12,11 @@ WAL / checkpoint / write-behind metrics over the loaded window (:2381,
 stormcos#242). Anonymous requests: a test node's apiserver allows them.
 Lease the machine first (`stormcentral testhost lease`). Creates and
 deletes namespace fastetcd-89.
+
+READ_ONLY=1: no writes at all (for a member that cannot write, #138): the
+probe GETs kube-system's cilium-operator-resource-lock Lease (fastetcd#84)
+and the forty clients GET kube-system's Leases in turn and LIST them every
+fifth loop.
 """
 import http.client, json, os, ssl, sys, threading, time, urllib.request
 
@@ -20,7 +25,8 @@ if len(sys.argv) < 2:
 NODE, TAG = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "g1")
 SECS = float(sys.argv[3]) if len(sys.argv) > 3 else 60
 OUT = os.environ.get("OUT", "tmp/blade")
-NS = "fastetcd-89"
+READ_ONLY = os.environ.get("READ_ONLY") == "1"
+NS = "kube-system" if READ_ONLY else "fastetcd-89"
 CTX = ssl._create_unverified_context()
 LEASES = f"/apis/coordination.k8s.io/v1/namespaces/{NS}/leases"
 
@@ -52,7 +58,8 @@ class Client:
                 self.c = self.conn()
 
 
-WANT = ("fastetcd_wal_fsyncs_total", "fastetcd_wal_fsync_seconds_total", "fastetcd_wal_fsync_max_seconds",
+WANT = ("fastetcd_value_cache_hits_total", "fastetcd_value_cache_misses_total",
+        "fastetcd_wal_fsyncs_total", "fastetcd_wal_fsync_seconds_total", "fastetcd_wal_fsync_max_seconds",
         "fastetcd_wal_proposals_synced_total", "fastetcd_checkpoint_commit_max_seconds",
         "fastetcd_checkpoint_seconds_total", "fastetcd_checkpoints_total",
         "fastetcd_write_behind_backpressure_total", "etcd_debugging_mvcc_put_total")
@@ -91,18 +98,38 @@ def probe(c, path, n=200):
 def main():
     os.makedirs(OUT, exist_ok=True)
     admin = Client()
-    admin.req("POST", "/api/v1/namespaces", {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS}})
-    s, d = admin.req("POST", LEASES, {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease",
-                                      "metadata": {"name": "probe"}, "spec": {"holderIdentity": "x"}})
-    if s not in (200, 201, 409):
-        sys.exit(f"create probe lease: {s} {d[:200]!r}")
-    print(f"== {TAG} on {NODE} at {time.strftime('%H:%M:%SZ', time.gmtime())}, load {SECS:.0f} s")
-    idle = probe(Client(), LEASES + "/probe")
+    if READ_ONLY:
+        probe_path = LEASES + "/cilium-operator-resource-lock"
+        names = [l["metadata"]["name"] for l in json.loads(admin.req("GET", LEASES)[1])["items"]]
+    else:
+        probe_path = LEASES + "/probe"
+        admin.req("POST", "/api/v1/namespaces", {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS}})
+        s, d = admin.req("POST", LEASES, {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease",
+                                          "metadata": {"name": "probe"}, "spec": {"holderIdentity": "x"}})
+        if s not in (200, 201, 409):
+            sys.exit(f"create probe lease: {s} {d[:200]!r}")
+    print(f"== {TAG} on {NODE} at {time.strftime('%H:%M:%SZ', time.gmtime())}, load {SECS:.0f} s"
+          + (", read-only" if READ_ONLY else ""))
+    idle = probe(Client(), probe_path)
     print("idle  " + line("GET lease", idle))
 
     stop = threading.Event()
     puts, renewals = [], [0]
     lock = threading.Lock()
+
+    def reader(i):
+        c = Client()
+        n = 0
+        while not stop.is_set():
+            t = time.perf_counter()
+            s, _ = c.req("GET", f"{LEASES}/{names[(i + n) % len(names)]}")
+            if s == 200:
+                with lock:
+                    puts.append((time.perf_counter() - t) * 1000)
+                    renewals[0] += 1
+            if n % 5 == 0:
+                c.req("GET", LEASES)
+            n += 1
 
     def worker(i):
         c = Client()
@@ -125,7 +152,8 @@ def main():
                 c.req("GET", LEASES)
             n += 1
 
-    threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(40)]
+    threads = [threading.Thread(target=reader if READ_ONLY else worker, args=(i,), daemon=True)
+               for i in range(40)]
     for t in threads:
         t.start()
     time.sleep(3)
@@ -137,28 +165,34 @@ def main():
     c = Client()
     end = time.time() + SECS
     while time.time() < end:
-        loaded += probe(c, LEASES + "/probe", 50)
+        loaded += probe(c, probe_path, 50)
     m1 = metrics()
     stop.set()
     for t in threads:
         t.join(timeout=30)
     secs = m1["t"] - m0["t"]
     print("load  " + line("GET lease", loaded))
-    print("load  " + line("renewal (PUT lease)", puts))
-    print(f"load  renewals {renewals[0] / secs:.0f}/s by 40 clients")
+    what = "clients' GET" if READ_ONLY else "renewal (PUT lease)"
+    print("load  " + line(what, puts))
+    print(f"load  {'GETs' if READ_ONLY else 'renewals'} {renewals[0] / secs:.0f}/s by 40 clients")
     d = lambda k: m1[k] - m0[k]
     f = d("fastetcd_wal_fsyncs_total")
+    fs = max(f, 1)
     print(f"fastetcd over {secs:.0f} s: {f:.0f} WAL fsyncs, mean "
-          f"{1000 * d('fastetcd_wal_fsync_seconds_total') / f:.1f} ms, "
-          f"{d('fastetcd_wal_proposals_synced_total') / f:.1f} proposals per fsync; "
+          f"{1000 * d('fastetcd_wal_fsync_seconds_total') / fs:.1f} ms, "
+          f"{d('fastetcd_wal_proposals_synced_total') / fs:.1f} proposals per fsync; "
           f"{d('fastetcd_checkpoints_total'):.0f} checkpoints using {d('fastetcd_checkpoint_seconds_total'):.1f} s; "
           f"write-behind back-pressure {d('fastetcd_write_behind_backpressure_total'):.0f}")
     print(f"fastetcd since start: max WAL fsync {m1['fastetcd_wal_fsync_max_seconds']:.3f} s, "
           f"max checkpoint commit {m1['fastetcd_checkpoint_commit_max_seconds']:.3f} s, "
           f"back-pressure {m1['fastetcd_write_behind_backpressure_total']:.0f}")
+    hits, misses = d("fastetcd_value_cache_hits_total"), d("fastetcd_value_cache_misses_total")
+    print(f"fastetcd value cache over the load: {hits:.0f} hits, {misses:.0f} misses "
+          f"({100 * hits / max(hits + misses, 1):.2f}% hits)")
     with open(os.path.join(OUT, f"{TAG}.json"), "w") as fh:
         json.dump({"idle": idle, "loaded": loaded, "puts": puts, "m0": m0, "m1": m1}, fh)
-    admin.req("DELETE", f"/api/v1/namespaces/{NS}")
+    if not READ_ONLY:
+        admin.req("DELETE", f"/api/v1/namespaces/{NS}")
 
 
 if __name__ == "__main__":

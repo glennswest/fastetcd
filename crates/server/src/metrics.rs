@@ -36,6 +36,10 @@
 //!     / `fastetcd_proposals_single_total` (counters): batched log entries
 //!     this member proposed, the proposals in them, and proposals that
 //!     went alone (#75)
+//!   - `process_resident_memory_bytes`, `process_virtual_memory_bytes`,
+//!     `process_cpu_seconds_total`, `process_start_time_seconds`,
+//!     `process_open_fds`, `process_max_fds`: etcd's (Go's) process
+//!     metrics, from `/proc/self` (#84; `process_metrics.rs`)
 //!   - `fastetcd_lease_renewals_total{path=ram|raft}` (counter): lease
 //!     keep-alives this member renewed as the leader, in RAM or proposed
 //!     through raft because a member is older than 1.23 (#92);
@@ -143,6 +147,8 @@ pub struct Metrics {
     pub lease_promotions_total: Counter,
     pub cache: CacheMetrics,
     pub wal: WalMetrics,
+    /// etcd's `process_*` (fastetcd#84).
+    pub process: crate::process_metrics::ProcessMetrics,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -219,6 +225,7 @@ impl Metrics {
             lease_promotions_total: lease_promotions_total.clone(),
             cache: CacheMetrics::new(),
             wal: WalMetrics::new(),
+            process: Default::default(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -407,6 +414,7 @@ impl Metrics {
             );
             m.cache.register(&mut reg);
             m.wal.register(&mut reg);
+            m.process.register(&mut reg);
         }
         m
     }
@@ -473,6 +481,7 @@ impl Metrics {
     /// Refresh gauges from live server state. Counters are not
     /// refreshed here — they're updated only on observed edges.
     pub async fn refresh(&self, state: &ServerState) {
+        self.process.refresh();
         let raft_m = state.raft.metrics().borrow().clone();
         let leader = raft_m.current_leader.unwrap_or(0);
         let prev = self.last_leader.swap(leader, Ordering::Relaxed);

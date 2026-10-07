@@ -35,9 +35,23 @@ async fn metrics_endpoint_exposes_etcd_compatible_names() {
         "etcd_mvcc_db_total_size_in_bytes",
         "etcd_debugging_mvcc_current_revision",
         "etcd_debugging_mvcc_compact_revision",
+        // etcd's (Go's) process metrics (#84).
+        "process_resident_memory_bytes",
+        "process_virtual_memory_bytes",
+        "process_cpu_seconds_total",
+        "process_start_time_seconds",
+        "process_open_fds",
+        "process_max_fds",
     ] {
         assert!(body.contains(name), "missing metric {name} in body");
     }
+    let rss: f64 = body
+        .lines()
+        .find_map(|l| l.strip_prefix("process_resident_memory_bytes "))
+        .expect("an RSS sample")
+        .parse()
+        .unwrap();
+    assert!(rss > 1e6, "RSS {rss}");
 }
 
 // Pull the inner state out of the test handles. ServerState isn't
