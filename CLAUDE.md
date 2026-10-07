@@ -2196,3 +2196,24 @@ Tracked live in the Claude task system. Snapshot of the order:
       never fired there (fsyncs ~10 ms), the layer cap fired 28–35 times
       (0.35–0.46 s in all). Not reproducible without a slow disk: the
       issue's 1–1.7 s fsyncs (dev, retired) and its put-vs-txn-put gap.
+
+65. **/health, /livez, /readyz check what etcd's check (#69, P2).** They
+    always answered healthy. etcd release-3.5 `etcdhttp/health.go`:
+    - `/health[?serializable=true][&exclude=NOSPACE|CORRUPT]`: an alarm →
+      503 `{"health":"false","reason":"ALARM NOSPACE"}`; unless
+      serializable, no leader → `RAFT NO LEADER`; then a keys-only Range
+      (linearizable unless serializable) within 5 s + 2x election timeout
+      → `RANGE ERROR:…`. OK: 200 `{"health":"true","reason":""}`.
+    - `/livez`: `serializable_read`. `/readyz`: `data_corruption`,
+      `serializable_read`, `linearizable_read`, `non_learner`. Each also
+      at `/readyz/<check>`; `?exclude=<check>`; `?verbose` lists them;
+      503 with `[-]<check> failed: …` lines, else `ok`.
+    - Alarms are this member's (fastetcd's are not replicated). CORRUPT
+      (restored from a backup, #37) makes /health and /readyz false until
+      disarmed, as etcd's; probes can `?exclude=` it.
+    - `grpc.health.v1` follows /readyz (checked every second).
+    - `etcd_server_health_success_total` / `_failures_total`.
+    Work items:
+    - [ ] `health.rs`, routes, gRPC status task, metrics; tests of each
+      state (no leader, NOSPACE, CORRUPT, learner, excludes, timeout).
+    - [ ] Docs (README, 01, 03), changelog; release; close #69.
