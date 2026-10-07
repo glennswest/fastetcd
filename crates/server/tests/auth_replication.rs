@@ -133,10 +133,10 @@ impl RaftPeer for LaggingPeer {
     async fn auth_sync(&self, r: Request<rpb::RaftPayload>) -> R {
         let real = self.inner.auth_sync(r).await?.into_inner();
         let mut lag = self.lag.lock().unwrap();
-        let answer = match (&lag.1, lag.0) {
-            (Some(before), n) if n > 0 => {
+        let answer = match lag.1.clone() {
+            Some(before) if lag.0 > 0 => {
                 lag.0 -= 1;
-                before.clone()
+                before
             }
             _ => {
                 lag.1 = Some(real.clone());
