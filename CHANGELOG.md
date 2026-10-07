@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.20.0] — 2026-10-07
+
 ### 2026-10-07 — older members kept from a batched log (#77)
 - **feat:** A member records that its log has held a batched entry
   (`mvcc_meta` `batched`, set by the first applied batch, carried by

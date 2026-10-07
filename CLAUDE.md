@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.19.0`** — `fastetcd-migrate` works on real etcd snapshots and
+**`1.20.0`** — Members older than 1.10 are kept from a batched log
+(#77): the store marks that it has applied a batch (`mvcc_meta`
+`batched`, in snapshots; `fastetcd_log_has_batched`); with it set,
+MemberAdd refuses a member answering as older and MemberPromote needs a
+1.10+ answer (`batch_guard.rs`), and the leader's 30 s watch logs and
+counts older members (`fastetcd_members_unable_to_read_batches`).
+
+Previous: **`1.19.0`** — `fastetcd-migrate` works on real etcd snapshots and
 brings leases and auth (#60). It never could read a file etcd wrote:
 bbolt-rs needs `compat` for Go's magic and refuses freelist-less files
 (etcd's `NoFreelistSync`), so `crates/migrate/src/bolt.rs` reads BoltDB
@@ -1928,5 +1935,5 @@ Tracked live in the Claude task system. Snapshot of the order:
       `ConfirmLeader`; an older one (a downgrade) logs an error naming it
       and counts in `fastetcd_members_unable_to_read_batches`.
     Work items:
-    - [ ] storage marker; cluster guard; watch; metrics; tests.
-    - [ ] Docs (03 upgrade section), changelog; release; close #77.
+    - [x] storage marker; cluster guard; watch; metrics; tests.
+    - [x] Docs (03 upgrade section), changelog; release; close #77.
