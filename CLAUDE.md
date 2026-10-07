@@ -2162,3 +2162,25 @@ Tracked live in the Claude task system. Snapshot of the order:
     RSS was not exported: added etcd's `process_*` metrics (1.24.0).
     Left: RSS flat over a long run and cilium-operator lease renewals on
     time, once a blade runs 1.24 and writes (#138; goldens: stormcentral#362).
+
+64. **Write-behind back-pressure does not wait behind the checkpoint's
+    fsync (#93, P2).** `WriteBehind::sync` (the checkpoint) held the flush
+    lock through `base.sync()`, redb's durable commit and its fsync of
+    everything flushed, so an over-budget commit's flush (an apply, and a
+    client) waited for the whole fsync. redb 2.6.3's non-durable commit
+    writes its pages to the file (`non_durable_commit` → `write_barrier`
+    → `flush_write_buffer`), so an fdatasync of the file through another
+    fd persists them. Plan:
+    - `KvStore::presync` (default no-op; redb: `sync_data` on its file,
+      no lock). `WriteBehind::sync`: flush under the lock; presync with no
+      lock; flush what came meanwhile and commit durably under the lock
+      (little left to write). The pre-fsync #85 had before write-behind.
+    - Back-pressure also on the layer count (every commit clones the list
+      and every read walks it; a slow checkpoint let thousands pile up).
+    - `fastetcd_write_behind_backpressure_seconds_total`.
+    Work items:
+    - [ ] storage: presync, sync split, layer cap, wait time; unit test
+      (over-budget commits during a slow pre-fsync do not wait for it).
+    - [ ] bench: `put` at 1000 clients, v1.24.0 vs this (back-pressure
+      count and time from METRICS=1).
+    - [ ] Docs (00/03 write-behind, metrics), changelog; release; close #93.
