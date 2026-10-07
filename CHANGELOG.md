@@ -6,8 +6,10 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
-### 2026-10-07 — keep-alives renewed in the leader's RAM (#92)
-- **perf:** A lease keep-alive is no longer a raft proposal (a WAL fsync
+## [v1.23.0] — 2026-10-07
+
+### Changed
+- A lease keep-alive is no longer a raft proposal (a WAL fsync
   and an apply each). As etcd's lessor: the leader confirms it still
   leads and renews the lease in RAM (`crates/raft/src/lessor.rs`); a
   follower forwards it (`ForwardWrite`, renewed there by a 1.23 leader);
@@ -15,30 +17,36 @@
   a follower of an older leader answers itself, as before); expiry uses
   the later of the persisted deadline and the RAM renewal, and is still a
   `LeaseRevoke` through Raft.
-- **BREAKING (behaviour, as etcd):** a new leader, or a restarted single
+- a new leader, or a restarted single
   member, gives every lease a full TTL from when it leads (etcd's
-  `Promote`), since renewals live only in the old leader's RAM.
-- **feat:** RAM renewal waits until every member answers `ConfirmLeader`
+  `Promote`), since renewals live only in the old leader's RAM. A lease
+  can outlive its TTL by up to one TTL across a leader change, which
+  etcd's lease contract allows; it never expires early.
+
+### Added
+- RAM renewal waits until every member answers `ConfirmLeader`
   with 1.23 or later (the #56 version gate, now
   `fastetcd_raft::version_gate`): an older member made leader would
   expire every lease kept alive in RAM. Until then keep-alives go through
   Raft. Metrics `fastetcd_lease_renewals_total{path}`,
   `fastetcd_lease_promotions_total`.
-- **test:** `fastetcd-bench --mode keepalive`, `tests/keepalive_bench.sh`
+- `fastetcd-bench --mode keepalive`, `tests/keepalive_bench.sh`
   (etcd's `benchmark lease-keepalive`); `BENCH_ARGS` for
   `tests/read_latency.sh`.
-- **docs:** 00 (design rule 5), 03 (leases, mixed versions, metrics),
+- `tests/bench/blade_pods.py`, the 5-pod run against a node's
+  apiserver and fastetcd metrics.
+
+### Documentation
+- 00 (design rule 5), 03 (leases, mixed versions, metrics),
   presentation.
 
 ### 2026-10-07 — #95 measured on an X9 blade (#101)
-- **docs:** `docs/benchmarks/blade-server3.md`: the kubelet's status
+- `docs/benchmarks/blade-server3.md`: the kubelet's status
   report on server3's spinning disk with fastetcd v1.18.0 (release
   11.91), 6 runs of 5 pods: p50 39.5 ms (v1.12: 236–1,040 ms; target
   < 30 ms not met), 7 of 30 at 0.29–0.82 s, each in a window of 300–550 ms
   WAL fsyncs; fastetcd not queueing (1.0–1.4 proposals per fsync).
   Follow-up: #135. Raw data in `docs/benchmarks/data/blade-server3/`.
-- **test:** `tests/bench/blade_pods.py`, the 5-pod run against a node's
-  apiserver and fastetcd metrics.
 
 ## [v1.22.0] — 2026-10-07
 

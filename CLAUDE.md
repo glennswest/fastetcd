@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.22.0`** — A txn inside a txn runs, as in etcd (#56): nested
+**`1.23.0`** — Lease keep-alives renewed in the leader's RAM, as etcd's
+lessor (#92): `crates/raft/src/lessor.rs` (renew after a read barrier,
+promote every lease to a full TTL on a new term, effective deadline =
+max(RAM, persisted)), followers forward via `ForwardWrite`, TimeToLive
+from the leader (peer RPC `LeaseTimeToLive`). Only while every member
+answers >= 1.23 (`fastetcd_raft::version_gate`); else through Raft.
+
+Previous: **`1.22.0`** — A txn inside a txn runs, as in etcd (#56): nested
 compares judged on the pre-txn state, ops in order at one revision
 (`TxnOp::Txn`, `MvccStore::txn_ops`), precheck follows nested branches.
 Proposed only once every member answers `ConfirmLeader` with >= 1.22
