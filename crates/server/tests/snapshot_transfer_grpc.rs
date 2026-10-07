@@ -142,6 +142,12 @@ async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
 
 #[tokio::test]
 async fn a_late_learner_is_caught_up_by_a_file_backed_snapshot() {
+    // `RUST_LOG=fastetcd::snapshot=info,openraft=info` shows each
+    // member's snapshot writes, roll-offs and installs (#45).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let leader = start_node(1).await;
     let mut members = std::collections::BTreeMap::new();
     members.insert(1, openraft::BasicNode::new(leader.peer_url.clone()));
