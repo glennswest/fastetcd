@@ -10,7 +10,17 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.17.1`** — Online `Defragment` works on a member taking writes
+**`1.18.0`** — `--heartbeat-interval` / `--election-timeout` (#103):
+openraft 0.9 sends a leader's heartbeats from RaftCore, which waits for
+each append's fsync, so a WAL stall longer than the followers' election
+timeout plus the leader lease (3–4 s by default) elects again (test: a
+6 s stall on the leader); raising `--election-timeout` above the stall
+keeps the leader. A WAL fsync outlasting it is logged as such.
+`--snapshot-count` / `--max-in-snapshot-log-to-keep` count writes, not
+log entries (#80): `snapshot_policy` triggers the snapshot and the purge
+from the state machine's per-entry proposal counts.
+
+Previous: **`1.17.1`** — Online `Defragment` works on a member taking writes
 (#119): redb refuses to compact while its newest commit is non-durable
 (every apply since #71), so it failed always on 1.9–1.11 and until the
 next checkpoint since 1.12; it now makes one empty durable commit under
@@ -1829,8 +1839,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Test: 3 members, every fsync 2.5 s: the default timeout loses the
       leader (term rises); `--election-timeout` 10 s keeps it.
     Work items:
-    - [ ] Flags + validation (unit tests), WAL warning, harness test.
-    - [ ] Docs (01, 03), changelog; close #103 (released with #80).
+    - [x] Flags + validation (unit tests), WAL warning, harness test.
+    - [x] Docs (01, 03), changelog; close #103 (released with #80).
+    - Found while testing: with every member's disk stalled, the
+      outcome depends on timing (followers stuck in their own fsync do
+      not time out): no election, or 40 terms of churn with no leader.
+      Asserted: a stall on the leader alone elects at 1 s (3/3), and a
+      10 s timeout keeps the leader either way.
 
 52. **`--snapshot-count` counts writes again, as etcd's does (#80, P2).**
     Since #75 a log entry can be a batch of hundreds of proposals, and
@@ -1850,5 +1865,5 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Test: proposals batched into few entries: snapshot after N
       proposals, log purged to about K proposals.
     Work items:
-    - [ ] SM proposal log; policy task; main wiring; test.
-    - [ ] Docs (01, 04, sizing text), changelog; release 1.18.0; close #80.
+    - [x] SM proposal log; policy task; main wiring; test.
+    - [x] Docs (01, 04, sizing text), changelog; release 1.18.0; close #80.

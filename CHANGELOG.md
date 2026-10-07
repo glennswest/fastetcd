@@ -6,6 +6,8 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.18.0] — 2026-10-07
+
 ### 2026-10-07 — `--snapshot-count` counts writes (#80)
 - **fix:** `--snapshot-count` and `--max-in-snapshot-log-to-keep` count
   writes (proposals), as etcd's do, not raft log entries (#80). Since
