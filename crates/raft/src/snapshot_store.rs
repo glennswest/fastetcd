@@ -564,9 +564,10 @@ mod tests {
         let store = SnapshotStore::open(dir.path(), 1).unwrap();
         store.store(&meta_at(1), &[1u8; 16]).unwrap();
 
-        // Receiving rolls the retained snapshot off first.
+        // The retained snapshot stays while one is received (#45); it is
+        // rolled off when the received one is adopted.
         let (mut file, path) = store.begin_incoming().unwrap();
-        assert!(store.indices().is_empty());
+        assert_eq!(store.indices(), vec![1]);
         file.write_all(&[9u8; 64]).unwrap();
 
         store.adopt(&meta_at(9), &file, &path).unwrap();
