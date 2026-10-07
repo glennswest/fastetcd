@@ -156,8 +156,16 @@ exclusively and refuses if it is in use.
 ## Other binaries
 
 **`fastetcd-ctl`** — a small client. Options: `--endpoint` (default
-`http://127.0.0.1:2379`), `--user name:password`. Plaintext only: it has
-no TLS options (#59). Commands: `put <key> <value>`, `get <key>
+`http://127.0.0.1:2379`; `https://` for a TLS client port; without a
+scheme, `https://` when a TLS option is given), `--user name:password`
+(its token goes on every command), and etcdctl's TLS options (#59):
+`--cacert <pem>` (`ETCDCTL_CACERT`; the CA that signed the member's
+client-port certificate, required for `https://`: the ctl does not use
+the system's trust roots), `--cert <pem>` / `--key <pem>`
+(`ETCDCTL_CERT` / `ETCDCTL_KEY`; for a member with `--client-cert-auth`,
+where with auth on the certificate's CN is the user). TLS options with
+an `http://` endpoint, or `https://` without `--cacert`, are refused.
+Commands: `put <key> <value>`, `get <key>
 [--prefix]`, `del <key> [--prefix]`, `snapshot-save <path>` (a backup
 `fastetcd restore` restores; checks its checksum), `status`,
 `defrag`, `compact <revision>`, `alarm [--disarm]`, `auth members`,

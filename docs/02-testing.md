@@ -65,7 +65,14 @@ one is `#[ignore]`d).
 - `crates/storage/tests/two_phase_commit_cost.rs`: a measurement, not a
   pass/fail check.
 
-Known flake: `snapshot_transfer_grpc` (#45), about 1 run in 12.
+`snapshot_transfer_grpc` was flaky until 1.20.1 (#45: an abandoned
+resend rolled off the installed snapshot).
+
+`fastetcd-ctl` over TLS (#59): `sc-build tests/ctl_tls.sh` makes a CA
+and certificates with openssl, starts this tree's `fastetcd` with
+`--cert-file`, then with `--client-cert-auth` and auth on, and runs every
+ctl command over TLS: CN identity, `--user`, and the refusals (no or the
+wrong CA, plaintext against TLS, mismatched options).
 
 Read latency under write load, on a real disk (#71):
 `sc-build 'tests/read_latency.sh v1.8.0'` runs `fastetcd-bench --mode

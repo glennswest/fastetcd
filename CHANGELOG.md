@@ -6,6 +6,21 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — fastetcd-ctl over TLS (#59)
+- **feat:** `fastetcd-ctl` takes etcdctl's `--cacert`, `--cert` and
+  `--key` (and `ETCDCTL_CACERT`/`_CERT`/`_KEY`), so `status`, `defrag`,
+  `alarm`, `snapshot-save` and `auth members`/`adopt` work against a
+  member with `--cert-file`, and with `--client-cert-auth` (the
+  certificate's CN is the user when auth is on). `--cacert` is required
+  for `https://`; TLS options with `http://`, or `--cert` without
+  `--key`, are refused naming the flag. A scheme-less endpoint is
+  `https://` with TLS options, else `http://`, as in etcdctl. All
+  commands share one connection, and `--user`'s token now goes on every
+  command (it went only on `auth`). `tests/ctl_tls.sh`: real binaries,
+  an openssl CA, 31 checks.
+- **docs:** 01 (ctl options), 02 (`ctl_tls.sh`; #45 no longer a known
+  flake), 03 (TLS note), presentation.
+
 ## [v1.20.1] — 2026-10-07
 
 ### Fixed

@@ -203,8 +203,9 @@ other in plaintext, so a multi-member cluster with `--cert-file` set
 could not form (fastetcd#23).
 
 The Helm chart has a separate `peerTls` block for this (see
-`values.yaml`). Note that `fastetcd-ctl` has no TLS options and cannot
-reach a TLS client port (#59); use `etcdctl` there.
+`values.yaml`). `fastetcd-ctl` reaches a TLS client port with etcdctl's options
+(since 1.21, #59): `--endpoint https://m1:2379 --cacert ca.pem`, plus
+`--cert`/`--key` under `--client-cert-auth`.
 
 Every flag above is also settable via its env var — `FASTETCD_*` or,
 as a drop-in for existing etcd config, `ETCD_*` (e.g.
