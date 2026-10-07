@@ -1994,7 +1994,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       refusals. 31/31 at d8885f8.
     - [x] Docs (01, 02, 03), changelog; release 1.21.0; close #59.
 
-57. **A Txn inside a Txn runs, as in etcd (#56, P2).** `RequestOp.
+57. **A Txn inside a Txn runs, as in etcd (#56, P2) — done, shipped in v1.22.0.** `RequestOp.
     request_txn` was refused `Unimplemented`. etcd release-3.5
     (`apply.go`): `compareToPath` evaluates every compare, nested ones
     included (only in the branches taken), against the state *before*
@@ -2017,10 +2017,13 @@ Tracked live in the Claude task system. Snapshot of the order:
       1.22.0 (cached per membership); an older member → FailedPrecondition
       naming it, unreachable → Unavailable. Flat txns are unchanged.
     Work items:
-    - [ ] storage types + recursion; unit tests (branches, revision /
+    - [x] storage types + recursion; unit tests (branches, revision /
       sub-revision order, nested compares see pre-txn state, Range sees
       earlier nested writes, refusal inside a nested txn refuses all).
-    - [ ] raft precheck recursion; server conv/response/gate.
-    - [ ] Tests: gRPC (etcd-client) nested txn responses; 3 members
+    - [x] raft precheck recursion; server conv/response/gate.
+    - [x] Tests: gRPC (etcd-client) nested txn responses; 3 members
       (applied everywhere); gate with an older member.
-    - [ ] Docs (00/03 mixed versions), changelog; release 1.22.0; close #56.
+    - [x] Docs (00/03 mixed versions), changelog; release 1.22.0; close #56.
+    - Verified: sc-build of cce91ae, whole workspace green (387 tests);
+      with the gate forced open the older-member test fails. Filed #134
+      (MemberAdd does not refuse a member older than 1.22 afterwards).
