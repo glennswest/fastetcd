@@ -2150,3 +2150,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     stormcentral#526). Running it found #138: fastetcd on server3 wrote
     nothing from 19:09:47Z (70+ min), reads still served; asked stormblock
     (stormblock#337). Measure once #138 is understood and the node writes.
+
+63. **Verify #82 on an X9 blade (#84, P2).** server3 (fastetcd 1.18):
+    apiserver GET of the cilium-operator lease p99 2.9–6.4 ms idle, 9.4–
+    12.1 ms at ~4 500 GETs/s (read-only: #138 stalled its writes); value
+    cache 99.8% hits over the day, 99.5% of hit reads < 1 ms in the store.
+    RSS was not exported: added etcd's `process_*` metrics (1.24.0).
+    Left: RSS flat over a long run and cilium-operator lease renewals on
+    time, once a blade runs 1.24 and writes (#138; goldens: stormcentral#362).

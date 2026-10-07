@@ -531,6 +531,13 @@ metrics below give them live.
 | `fastetcd_value_cache_bytes` / `…_entries` / `…_budget_bytes` | gauge | What the cache holds (entry overhead included), and its budget. |
 | `fastetcd_key_index_keys` / `fastetcd_key_index_bytes` | gauge | Keys in the resident index, and its approximate size. |
 | `fastetcd_mvcc_get_duration_seconds{cache}` | histogram | The store's time for each single-key Range (after the read barrier): `cache="hit"` read nothing from the engine, `miss` did. |
+| `process_resident_memory_bytes` / `process_virtual_memory_bytes` | gauge | The process's RSS and virtual size (since 1.24, #84; etcd's names, from `/proc/self/status`). RSS flat over a long run, near the budgets above, is the check. |
+| `process_cpu_seconds_total`, `process_start_time_seconds`, `process_open_fds`, `process_max_fds` | counter / gauge | etcd's other process metrics. |
+
+On server3 (X9 blade, spinning disk, fastetcd 1.18) over a 7.5 h day the
+value cache answered 99.8% of lookups; 99.5% of hits took under 1 ms in
+the store, and apiserver GETs of the cilium-operator lease stayed under
+13 ms p99 at 4 300 GETs/s (`docs/benchmarks/blade-server3.md`).
 
 ## Multi-node
 

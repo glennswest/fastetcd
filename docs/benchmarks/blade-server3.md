@@ -52,3 +52,29 @@ Idle between runs: ~1.8 fsyncs/s (one proposal each), 6–29 ms average.
 How much of the stall is fastetcd's own checkpoint, and what to do about
 it (smaller durable steps, I/O priority, a disk mode in the test
 container to measure it on the blade): **#135**.
+
+## Reads: apiserver GET with the RAM cache (#84)
+
+#82 (v1.11) keeps every key's index in RAM and the latest value of hot
+keys in a cache. Its blade acceptance: an apiserver single-object GET of
+the cilium-operator lease under 20 ms p99 (on v1.10, server1's took
+0.2–0.55 s). Measured on server3 at 20:25–20:28 UTC with
+`READ_ONLY=1 tests/bench/blade_getlatency.py`: idle, 200 GETs of
+`kube-system/cilium-operator-resource-lock`; then 40 clients GETting
+kube-system's Leases in turn and listing them every fifth loop while the
+probe keeps GETting. Read-only, because this member had written nothing
+since 19:09:47Z (#138): the numbers are reads without concurrent writes.
+
+| run | idle p50 / p99 | under load p50 / p99 / max | load GETs/s | value cache over the load |
+|---|---|---|---|---|
+| ro-r1 | 1.7 / 6.4 ms | 7.6 / 12.1 / 29.8 ms | 4 315 | 424 895 hits, 0 misses |
+| ro-r2 | 1.5 / 3.8 ms | 7.6 / 9.4 / 17.6 ms | 4 340 | 427 635 hits, 0 misses |
+| ro-r3 | 1.5 / 2.9 ms | 6.9 / 9.8 / 26.4 ms | 4 734 | 466 019 hits, 0 misses |
+
+Over the member's day (12:48Z start, real cluster traffic plus #101's and
+this run's), its own counters: value cache 1 056 199 hits to 1 873 misses
+(99.8%); store time of a single-key read, hit: 99.5% under 1 ms, 99.9%
+under 5 ms; miss (22): all under 10 ms, 21 under 5 ms.
+
+RSS could not be read on the node: fastetcd did not export it before 1.24
+(`process_resident_memory_bytes`, #84).
