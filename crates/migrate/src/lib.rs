@@ -19,10 +19,12 @@
 //!   same auth operations the server applies, so its rules hold (auth is
 //!   enabled only with a `root` user).
 
+mod bolt;
+
 use std::path::Path;
 use std::sync::Arc;
 
-use bbolt_rs::{Bolt, BucketApi, DbApi, TxApi};
+use crate::bolt::BoltFile;
 use fastetcd_proto::{authpb, mvccpb};
 use fastetcd_storage::mvcc::auth::{AuthOp, PermType, StoredPermission};
 use fastetcd_storage::mvcc::{BulkKey, KvRecord, Mutation, MvccStore};
@@ -175,7 +177,7 @@ pub async fn migrate_snapshot_with_mode(
         anyhow::bail!("source snapshot {from:?} does not exist");
     }
     let db = without_snapshot_hash(from, to)?;
-    let bolt = Bolt::open_ro(db.path()).map_err(|e| anyhow::anyhow!("open bolt: {e}"))?;
+    let bolt = BoltFile::open(db.path()).map_err(|e| anyhow::anyhow!("open bolt: {e:#}"))?;
 
     // For LatestOnly mode: track latest (mod_rev, create_rev, value)
     // per user key. For PreserveRevisions mode: track every record
@@ -188,60 +190,46 @@ pub async fn migrate_snapshot_with_mode(
     let mut tombstones: u64 = 0;
     let mut max_rev: i64 = 0;
 
-    let tx = bolt
-        .begin()
-        .map_err(|e| anyhow::anyhow!("bolt begin: {e}"))?;
 
     // Leases: id -> the TTL etcd restores it with.
     let mut leases: Vec<(i64, i64)> = Vec::new();
-    if let Some(b) = tx.bucket(b"lease") {
-        #[allow(deprecated)]
-        b.for_each(|_k: &[u8], v: Option<&[u8]>| -> bbolt_rs::Result<()> {
-            if let Some(l) = v.and_then(|v| LeasePb::decode(v).ok()) {
+    if let Some(b) = bolt.bucket(b"lease")? {
+        bolt.for_each(&b, &mut |_k, v| {
+            if let Ok(l) = LeasePb::decode(v) {
                 let ttl = if l.remaining_ttl > 0 { l.remaining_ttl } else { l.ttl };
                 leases.push((l.id, ttl.max(MIN_LEASE_TTL_SECS)));
             }
             Ok(())
-        })
-        .map_err(|e| anyhow::anyhow!("bolt lease bucket: {e}"))?;
+        })?;
     }
     let lease_ids: std::collections::HashSet<i64> = leases.iter().map(|(id, _)| *id).collect();
 
     let mut auth = EtcdAuth::default();
     for (bucket, users) in [(&b"authUsers"[..], true), (&b"authRoles"[..], false)] {
-        if let Some(b) = tx.bucket(bucket) {
-            #[allow(deprecated)]
-            b.for_each(|_k: &[u8], v: Option<&[u8]>| -> bbolt_rs::Result<()> {
-                if let Some(v) = v {
-                    if users {
-                        if let Ok(u) = authpb::User::decode(v) {
-                            auth.users.push(u);
-                        }
-                    } else if let Ok(r) = authpb::Role::decode(v) {
-                        auth.roles.push(r);
+        if let Some(b) = bolt.bucket(bucket)? {
+            bolt.for_each(&b, &mut |_k, v| {
+                if users {
+                    if let Ok(u) = authpb::User::decode(v) {
+                        auth.users.push(u);
                     }
+                } else if let Ok(r) = authpb::Role::decode(v) {
+                    auth.roles.push(r);
                 }
                 Ok(())
-            })
-            .map_err(|e| anyhow::anyhow!("bolt auth bucket: {e}"))?;
+            })?;
         }
     }
-    if let Some(b) = tx.bucket(b"auth") {
-        auth.enabled = b.get(b"authEnabled").is_some_and(|v| v == [1u8]);
+    if let Some(b) = bolt.bucket(b"auth")? {
+        auth.enabled = bolt.get(&b, b"authEnabled")?.is_some_and(|v| v == [1u8]);
     }
 
-    let bucket = tx
-        .bucket(b"key")
+    let bucket = bolt
+        .bucket(b"key")?
         .ok_or_else(|| anyhow::anyhow!("snapshot has no 'key' bucket"))?;
 
     let mode_local = mode;
-    #[allow(deprecated)]
-    bucket
-        .for_each(|k: &[u8], v: Option<&[u8]>| -> bbolt_rs::Result<()> {
+    bolt.for_each(&bucket, &mut |k, value| {
             scanned += 1;
-            let Some(value) = v else {
-                return Ok(());
-            };
             let kv = match mvccpb::KeyValue::decode(value) {
                 Ok(kv) => kv,
                 Err(_) => return Ok(()),
@@ -292,9 +280,7 @@ pub async fn migrate_snapshot_with_mode(
                 }
             }
             Ok(())
-        })
-        .map_err(|e| anyhow::anyhow!("bolt for_each: {e}"))?;
-    drop(tx);
+        })?;
     drop(bolt);
 
     if to.exists() && !force {

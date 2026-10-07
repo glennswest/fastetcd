@@ -22,16 +22,16 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 prost.workspace = true
-# `compat`: Go bbolt's magic number (0xED0CDAED), which etcd's files carry.
-# Without it bbolt-rs writes and accepts only its own (0x5caff01d), so no
-# real etcd snapshot could be read (#60).
-bbolt-rs = { version = "1.3", features = ["compat"] }
 sha2.workspace = true
 
 fastetcd-storage.workspace = true
 fastetcd-proto.workspace = true
 
 [dev-dependencies]
+# Writes the tests' BoltDB fixtures. Reading is crate::bolt: bbolt-rs cannot
+# open etcd's files (no freelist, #60). `compat`: Go bbolt's magic number,
+# which etcd's files carry; without it bbolt-rs writes its own.
+bbolt-rs = { version = "1.3", features = ["compat"] }
 tempfile = "3.13"
 bcrypt = "0.15"
 bincode.workspace = true
