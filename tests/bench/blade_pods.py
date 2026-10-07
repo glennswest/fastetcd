@@ -12,6 +12,8 @@ and checkpoint metrics, writes the samples to $OUT, deletes the pods.
 Delete the namespace when done."""
 import json, os, ssl, sys, time, urllib.request
 
+if len(sys.argv) < 2:
+    sys.exit("usage: OUT=tmp/blade blade_pods.py <node address> [run tag]")
 NODE = sys.argv[1]
 TAG = sys.argv[2] if len(sys.argv) > 2 else "r1"
 API = f"https://{NODE}:6443"
