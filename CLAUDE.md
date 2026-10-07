@@ -2102,3 +2102,32 @@ Tracked live in the Claude task system. Snapshot of the order:
     on a vote change), (2) adopt 0.10 alpha, (3) leave it until 0.10 is
     stable (recommended: safety first; the gap is one fsync per lone write
     on a slow disk, hidden under load and on SSD).
+
+61. **Auth errors use etcd's codes and texts (#105, and #127).** clientv3
+    turns a status into its typed errors by message (`rpctypes.Error`),
+    and re-authenticates only on `ErrInvalidAuthToken` / `ErrUserEmpty` /
+    `ErrAuthOldRevision` (`retry_interceptor.go` `shouldRefreshToken`).
+    fastetcd answered its own texts, so a client whose token a member
+    does not know (restarted, or not applied yet) failed for good, and
+    `ErrPermissionDenied` checks never matched. From etcd release-3.5
+    (`rpctypes/error.go`, `v3rpc/util.go`, `auth/store.go`):
+    - token present, names no one: `Unauthenticated` `etcdserver: invalid
+      auth token`; no token (and no client-cert CN): `InvalidArgument`
+      `etcdserver: user name is empty` (interceptor, admin RPCs, authz);
+    - permission missing, user gone, non-root on an admin RPC:
+      `PermissionDenied` `etcdserver: permission denied`;
+    - Authenticate: auth off `FailedPrecondition` `authentication is not
+      enabled`; bad name or password `InvalidArgument` `authentication
+      failed, invalid user ID or password`; a password for a no-password
+      user `Unknown` (etcd's unmapped `ErrNoPasswordUser` text); the
+      password changing mid-Authenticate `ErrAuthOldRevision` (clientv3
+      retries);
+    - user / role not found or already existing, root user missing on
+      AuthEnable: etcd's `FailedPrecondition` texts; empty user / role
+      name, permission not given: etcd's `InvalidArgument` texts.
+    Work items:
+    - [ ] `etcd_errors.rs`; interceptor, admin, authz, Auth service,
+      apply errors; tests updated to the codes.
+    - [ ] Tests: etcd-client through a member restart (token lost) and
+      a token unknown on a member; each mapped error.
+    - [ ] Docs (03 auth), changelog; release; close #105, #127.
