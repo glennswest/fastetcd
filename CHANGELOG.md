@@ -6,6 +6,16 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — 3-member write maxima attributed (#83)
+- **docs:** The multi-second write maxima on a 3-member cluster under
+  `tests/read_latency.sh` are the shared build disk's, not fastetcd's
+  (#83). Measured on main (v1.17.1), disk vs tmpfs interleaved, twice:
+  on disk the max was 1.57–2.18 s with every member's longest WAL fsync
+  0.80–1.13 s at the same moment; on tmpfs (`DATA_ROOT=/dev/shm`) the max
+  was 32–81 ms through the leader and a follower alike, at 4–7k
+  writes/s, with no election. A write pays the leader's fsync and then a
+  follower's in series (#97), which is why a stall shows doubled.
+
 ## [v1.17.1] — 2026-10-07
 
 ### 2026-10-07 — online defragment after a non-durable commit (#119)

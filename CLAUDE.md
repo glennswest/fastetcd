@@ -1622,14 +1622,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       stalls. Maxima there are fastetcd's own.
     Work items:
     - [x] Instrumentation (0698e2f).
-    - [ ] sc-build: 3 members, main on disk and tmpfs, interleaved,
-      twice (`for r in 1 2; do MEMBERS=3 METRICS=1 tests/read_latency.sh;
-      DATA_ROOT=/dev/shm MEMBERS=3 METRICS=1 tests/read_latency.sh;
-      done`). The 0698e2f run measured nothing: the bench edit broke
-      put mode's build (#106, fixed f3a3d6b). Rerun it on main.
-    - [ ] Attribute each multi-second max (disk / election / proposer /
-      other); fix what is fastetcd's, or file it.
-    - [ ] Changelog, docs (02-testing); close #83.
+    - [x] sc-build at 818e88a (v1.17.1): 3 members, disk and tmpfs
+      interleaved, twice. Disk: write max 1.57–2.18 s, every member's
+      longest WAL fsync 0.80–1.13 s at the same moment, the slowest
+      writes all started within 1 ms of each other. tmpfs: max 32–81 ms
+      (leader and follower clients), 4–7k writes/s. One leader change
+      (bootstrap) in every run.
+    - [x] Attributed: the disk. A write pays the leader's fsync then a
+      follower's (#97), so a ~1 s stall shows as a ~2 s write. Nothing in
+      fastetcd stalls (tmpfs max < 0.1 s); no elections.
+    - [x] Changelog; close #83.
 
 45. **Bool flags take etcd's values; the chart's pods start (#53, P1).**
     `--auto-defrag`/`--upgrade-backup` (default on) were clap `SetTrue`
