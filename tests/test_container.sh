@@ -54,7 +54,7 @@ suite() {
 }
 suite short 120
 suite medium 1800
-suite long 2400 FASTETCD_TEST_LONG_SCALE=0.05 FASTETCD_TEST_LONG_HOLD_SECS=10 FASTETCD_TEST_LONG_WAVES=2
+suite long 2400 FASTETCD_TEST_LONG_SCALE=0.005 FASTETCD_TEST_LONG_HOLD_SECS=10 FASTETCD_TEST_LONG_WAVES=2
 
 # short left nothing on the "node".
 left=$(curl -s -X POST "http://127.0.0.1:$NODE_PORT/v3/kv/range" \

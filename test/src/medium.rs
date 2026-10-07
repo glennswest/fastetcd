@@ -166,13 +166,15 @@ async fn auth(env: &Env) -> anyhow::Result<Outcome> {
 
 /// A member on a small quota raises NOSPACE and refuses writes while
 /// reads and deletes still work; after delete, compact and defragment the
-/// alarm is disarmed and writes work again (#14).
+/// alarm is disarmed and writes work again (#14). The quota covers the
+/// whole footprint, the WAL's preallocated segments (~48 MiB) included
+/// (docs/04-disk-space.md), so it must be above that.
 async fn nospace(env: &Env) -> anyhow::Result<Outcome> {
-    let quota = 24 * 1024 * 1024;
+    let quota = 96 * 1024 * 1024;
     let q = format!("--quota-backend-bytes={quota}");
     let mut m = Member::single(&env.bin, &env.work, "quota", &[&q, "--space-check-interval-secs=1"]).await?;
     let mut c = m.clients().await?;
-    let value = vec![b'q'; 128 * 1024];
+    let value = vec![b'q'; 256 * 1024];
     let mut written = 0;
     let mut refused = None;
     let t = Instant::now();
@@ -188,8 +190,13 @@ async fn nospace(env: &Env) -> anyhow::Result<Outcome> {
     }
     let Some(why) = refused else {
         m.kill().await;
-        return Ok(fail(format!("{written} puts of 128 KiB on a {quota}-byte quota were never refused")));
+        return Ok(fail(format!("{written} puts of 256 KiB on a {quota}-byte quota were never refused")));
     };
+    if written == 0 {
+        let alarms = c.alarms().await?;
+        m.kill().await;
+        return Ok(fail(format!("refused before any write ({why}); alarms {alarms:?}: the empty store is over the quota")));
+    }
     let alarms = c.alarms().await?;
     let reads = c.count(b"/q/").await?;
     let deleted = c.delete_prefix(b"/q/").await?;
@@ -216,7 +223,7 @@ async fn nospace(env: &Env) -> anyhow::Result<Outcome> {
     Ok(if nospace && reads == written as i64 && deleted == reads && after.is_ok() {
         pass(format!(
             "after {written} puts ({} MiB) writes were refused ({why}); NOSPACE raised; reads and the delete worked; after compact, defragment and disarm a write succeeded",
-            written * 128 / 1024
+            written * 256 / 1024
         ))
     } else {
         fail(format!(

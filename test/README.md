@@ -65,7 +65,7 @@ suite's own members:
 | `history-watch-compaction` | a watch from an old revision replays every PUT with `prev_kv`; after compaction a read below it is `OutOfRange` and a watch below it is cancelled with `compact_revision` |
 | `lease-expiry-and-keepalive` | a key on a 2 s lease goes; one kept alive stays; a keep-alive of the lapsed lease answers TTL 0 |
 | `auth-rbac` | with auth on, a user scoped to `/app/` writes there and nowhere else, no token is refused, and revoking a lease holding a key it cannot write is denied (#47) |
-| `nospace-alarm-and-recovery` | on a 24 MiB quota, writes are refused with NOSPACE while reads and deletes work; after compact, defragment and disarm, writes work (#14) |
+| `nospace-alarm-and-recovery` | on a 96 MiB quota (above the WAL's preallocated segments), writes are refused with NOSPACE while reads and deletes work; after compact, defragment and disarm, writes work (#14) |
 | `snapshot-save-restore` | a live snapshot restores with `fastetcd restore`: keys, the lease and its key (#61, #41) |
 | `sigkill-keeps-acknowledged-writes` | 16 writers, SIGKILL mid-load: every acknowledged write is there after restart |
 | `three-members-leader-loss` | writes through a follower, a linearizable read on another, the leader SIGKILLed, a new leader, nothing acknowledged lost, the old leader rejoins and catches up |

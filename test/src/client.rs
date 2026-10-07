@@ -40,7 +40,9 @@ impl Clients {
     pub async fn connect(endpoint: &str) -> anyhow::Result<Clients> {
         let ch = Channel::from_shared(endpoint.to_string())?
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
+            // Generous: a long wave's compaction or defragment of a large
+            // file on a slow disk takes a while.
+            .timeout(Duration::from_secs(120))
             .connect()
             .await?;
         Ok(Clients {

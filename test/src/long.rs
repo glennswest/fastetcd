@@ -86,7 +86,7 @@ pub async fn run(env: &Env, rep: &mut Report) -> anyhow::Result<()> {
     let max_waves: usize = std::env::var("FASTETCD_TEST_LONG_WAVES").ok().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
     // A quarter of the pod's memory for the wave's data, ~2 KiB a key.
     let base_keys = (((cap.memory / 4 / 2048) as f64 * scale) as usize).clamp(1000, 500_000);
-    let writers = ((cap.cpus * 16) as f64 * scale.min(1.0)).clamp(4.0, 512.0) as usize;
+    let writers = (cap.cpus * 16).clamp(4, 512);
     eprintln!(
         "long: {} cpus, {} MiB, waves of up to {base_keys} keys with {writers} writers, hold {hold:?}",
         cap.cpus,
@@ -260,8 +260,12 @@ async fn wave(m: &Member, keys: usize, writers: usize, hold: Duration) -> anyhow
         t.await??;
     }
 
-    // Drain: everything the wave made goes, and the space with it.
+    // Drain: everything the wave made goes, and the space with it, in
+    // deletes of at most 10 000 keys (one raft entry each).
     let mut c = c;
+    for chunk in 0..=keys / 10_000 {
+        c.delete_prefix(format!("/w/{chunk:03}").as_bytes()).await?;
+    }
     c.delete_prefix(b"/w/").await?;
     c.delete_prefix(b"/lease/").await?;
     let rev = c.status().await?.header.map_or(0, |h| h.revision);
