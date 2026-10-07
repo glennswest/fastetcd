@@ -442,7 +442,10 @@ as that interval, the next one waits at least four times as long as the
 last took, so checkpoints use at most a fifth of the disk's time and
 the WAL's fsyncs, which clients wait on, are not queued behind them
 (#95). An apply never waits on the data file's fsync; only if more than
-`--write-behind-bytes` is held does it write them out first.
+`--write-behind-bytes` (or 1024 batches) is held does it write them out
+first, and since 1.24.1 that waits only for the write-out: the
+checkpoint fsyncs the data file with no lock held, then makes its
+durable commit, which has little left to write (#93).
 
 After a crash the data file is as of its last checkpoint, and the WAL
 replays the rest: a member re-applies up to the committed index it
@@ -475,7 +478,11 @@ proposals in them made durable by the fsyncs; the write-behind layer:
 `fastetcd_write_behind_bytes`, `fastetcd_write_behind_batches`,
 `fastetcd_write_behind_flushes_total`,
 `fastetcd_write_behind_flush_seconds_total`,
-`fastetcd_write_behind_backpressure_total`. Average fsync time is
+`fastetcd_write_behind_backpressure_total` and
+`fastetcd_write_behind_backpressure_seconds_total` (applies that had to
+write the layers out, and how long they waited),
+`fastetcd_write_behind_presync_seconds_total` (the checkpoints' fsyncs
+of the data file outside the lock). Average fsync time is
 `rate(fastetcd_wal_fsync_seconds_total) / rate(fastetcd_wal_fsyncs_total)`;
 fsyncs per second is `rate(fastetcd_wal_fsyncs_total)`, and writes per
 fsync is

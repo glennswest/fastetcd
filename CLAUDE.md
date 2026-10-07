@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.24.0`** — etcd's `process_*` metrics (#84: RSS off the node,
+**`1.24.1`** — Write-behind back-pressure does not wait behind the
+checkpoint's fsync (#93): `WriteBehind::sync` flushes under the lock,
+fsyncs the data file with no lock (`KvStore::presync`), then commits
+durably; back-pressure also past `MAX_LAYERS` (1024) layers.
+
+Previous: **`1.24.0`** — etcd's `process_*` metrics (#84: RSS off the node,
 `crates/server/src/process_metrics.rs`); the blade rig
 (`tests/bench/blade_getlatency.py`, #89/#84).
 
@@ -2164,7 +2169,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     time, once a blade runs 1.24 and writes (#138; goldens: stormcentral#362).
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
-    fsync (#93, P2).** `WriteBehind::sync` (the checkpoint) held the flush
+    fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
     lock through `base.sync()`, redb's durable commit and its fsync of
     everything flushed, so an over-budget commit's flush (an apply, and a
     client) waited for the whole fsync. redb 2.6.3's non-durable commit
@@ -2179,8 +2184,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       and every read walks it; a slow checkpoint let thousands pile up).
     - `fastetcd_write_behind_backpressure_seconds_total`.
     Work items:
-    - [ ] storage: presync, sync split, layer cap, wait time; unit test
+    - [x] storage: presync, sync split, layer cap, wait time; unit test
       (over-budget commits during a slow pre-fsync do not wait for it).
-    - [ ] bench: `put` at 1000 clients, v1.24.0 vs this (back-pressure
-      count and time from METRICS=1).
-    - [ ] Docs (00/03 write-behind, metrics), changelog; release; close #93.
+    - [x] bench: `put` on a build VM (fast disk), v1.24.0 vs this.
+    - [x] Docs (00/03 write-behind, metrics), changelog; release 1.24.1;
+      close #93.
+    - Verified: `back_pressure_does_not_wait_for_the_checkpoints_fsync`
+      (2 s modelled fsync: slowest over-budget commit < 0.5 s; the old
+      sync put back: 1.96 s). Build VM, put 256 conns x 40k, 3 rounds:
+      5 833 → 6 925, 8 407 → 9 593, 3 445 → 4 336/s; the old back-pressure
+      never fired there (fsyncs ~10 ms), the layer cap fired 28–35 times
+      (0.35–0.46 s in all). Not reproducible without a slow disk: the
+      issue's 1–1.7 s fsyncs (dev, retired) and its put-vs-txn-put gap.

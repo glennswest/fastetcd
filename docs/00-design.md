@@ -99,10 +99,14 @@ production system. We integrate by:
   times the last checkpoint's duration after it (so on a slow disk it
   leaves the WAL's fsyncs most of the disk, #95), writes the layers into
   redb as one non-durable commit (dropping them from the list in the
-  same step for readers) and then commits durably. Every redb write is
-  serialized behind one flush lock, so an apply never waits on redb's
-  writer or its fsync; past `--write-behind-bytes` (64 MiB) held, an
-  apply writes the layers out first (back-pressure). A crash loses at most the applies since
+  same step for readers), fdatasyncs the data file with no lock held
+  (redb's non-durable commit has already written its pages into the
+  file), and then commits durably, which has little left to write
+  (#93). Every redb write is serialized behind one flush lock, so an
+  apply never waits on redb's writer or its fsync; past
+  `--write-behind-bytes` (64 MiB) or 1024 layers held, an apply writes
+  the layers out first (back-pressure), and that waits for a write-out,
+  not for the checkpoint's fsync. A crash loses at most the applies since
   the last checkpoint, together with the applied position that records
   them, and openraft replays them from the WAL into the same state
   (#71, #85). Snapshot installs, migration bulk loads and startup

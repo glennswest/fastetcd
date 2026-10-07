@@ -6,6 +6,34 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.24.1] — 2026-10-07
+
+### Fixed
+- Write-behind back-pressure no longer waits behind the checkpoint's
+  fsync (#93). The checkpoint (`WriteBehind::sync`) held the flush lock
+  through redb's durable commit, an fsync of everything it had just
+  written, so an apply over `--write-behind-bytes` (and the client
+  waiting on it) waited for that whole fsync. Now it flushes the layers
+  under the lock, fdatasyncs the data file with no lock held
+  (`KvStore::presync`: redb 2.6.3's non-durable commit has already
+  written its pages into the file), then flushes what came meanwhile and
+  commits durably, which has little left to write. A commit over the
+  budget waits only for a write-out. Test: with an engine whose fsync
+  takes 1 ms per KiB written since the last (a 2 s checkpoint), the
+  slowest over-budget commit during it is well under 0.5 s; with the
+  old `sync` it waited 1.96 s.
+- Back-pressure also when more than 1024 layers are held
+  (`MAX_LAYERS`): every commit copies the layer list and every read walks
+  it, so a checkpoint that could not keep up let thousands pile up.
+
+### Added
+- Metrics `fastetcd_write_behind_backpressure_seconds_total`,
+  `fastetcd_write_behind_presync_seconds_total`; `tests/read_latency.sh`'s
+  METRICS=1 prints the write-behind lines.
+
+### Documentation
+- 00 (write-behind), 03 (writes, metrics).
+
 ## [v1.24.0] — 2026-10-07
 
 ### Added
