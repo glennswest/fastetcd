@@ -2089,3 +2089,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       clients, 50k): 1 member 4 526 → 239 358/s, p99 105 → 0.96 ms; 3
       members via a follower 1 694 → 27 256/s, via the leader 2 488 →
       99 820/s; WAL fsyncs in the run ~2 000 → 10–105.
+
+60. **3 members: a lone write pays two fsyncs in series (#97, P2) — waiting
+    on the owner.** Confirmed in openraft 0.9.24 and 0.9.25:
+    `run_command(AppendInputEntries)` awaits the leader's own `LogFlushed`
+    (`append_to_log`) before the `Replicate` commands that follow it run.
+    Not fixable in fastetcd's code: reporting the flush early lets a
+    non-durable leader count toward the commit quorum (an acknowledged
+    write can be lost); followers take AppendEntries only from openraft's
+    replication streams. Asked on #97 (2026-10-07): (1) patch a vendored
+    openraft 0.9 (leader-only: submit, report the flush via Notify, ignore
+    on a vote change), (2) adopt 0.10 alpha, (3) leave it until 0.10 is
+    stable (recommended: safety first; the gap is one fsync per lone write
+    on a slow disk, hidden under load and on SSD).
