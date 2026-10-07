@@ -1937,3 +1937,21 @@ Tracked live in the Claude task system. Snapshot of the order:
     Work items:
     - [x] storage marker; cluster guard; watch; metrics; tests.
     - [x] Docs (03 upgrade section), changelog; release; close #77.
+
+55. **An abandoned snapshot transfer keeps the retained snapshot (#45, P2).**
+    Flake in `snapshot_transfer_grpc` (learner installed a snapshot, its
+    snapshot dir empty). Cause, from logs (repro 1 in ~10 on dev): the
+    install took >1 s, the leader's InstallSnapshot timed out and resent;
+    the resend's `begin_receiving_snapshot` rolled off the snapshot just
+    installed, and openraft then dropped the duplicate ("No need to
+    install snapshot; ... <= committed"), leaving nothing retained.
+    Fix: `SnapshotStore::begin_incoming` no longer rolls off; `adopt`
+    does it before its rename. Space: a receive that hits ENOSPC already
+    discards every retained snapshot and retries (`SnapshotFile`), so a
+    full disk is still handled; with room, a receive holds one more copy.
+    Work items:
+    - [x] Fix + unit test (abandoned transfer keeps the snapshot).
+    - [x] Control: with the roll-off put back, 4 of 40 runs fail; with
+      the fix 0 of 40.
+    - [ ] Full workspace green; docs (04), changelog; release 1.20.1;
+      close #45.

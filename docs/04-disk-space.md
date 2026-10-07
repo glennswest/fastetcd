@@ -77,7 +77,7 @@ snapshot is discarded and the write is retried — openraft can always
 rebuild one, and a node with no snapshot is worth more than a node that
 cannot write one.
 
-A snapshot *received* from the leader is the exception (since 1.21,
+A snapshot *received* from the leader is the exception (since 1.20.1,
 #45): the retained one is kept until the received one is installed, and
 rolled off then. openraft resends a snapshot whose transfer timed out,
 and drops the copy if the first was installed meanwhile; rolling off

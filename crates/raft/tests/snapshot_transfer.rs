@@ -256,7 +256,7 @@ async fn a_missing_snapshot_file_is_rebuilt_on_demand() {
 /// every snapshot write does, so the volume never needs room for two.
 /// Until the new one lands, the follower still serves a snapshot.
 #[tokio::test]
-async fn receiving_rolls_off_first_and_still_serves_a_snapshot() {
+async fn receiving_keeps_the_retained_snapshot_and_still_serves_it() {
     let dir = tempdir().unwrap();
     let mut leader = leader_with_snapshot(dir.path(), 40).await;
     let mut follower = open_node(dir.path(), "follower").await;
@@ -274,9 +274,11 @@ async fn receiving_rolls_off_first_and_still_serves_a_snapshot() {
 
     let mut src = leader.sm.get_current_snapshot().await.unwrap().unwrap().snapshot;
     let mut dst = follower.sm.begin_receiving_snapshot().await.unwrap();
+    // An incoming transfer can be a resend that is then dropped, so the
+    // retained snapshot stays until the new one is installed (#45).
     assert!(
-        !files_in(&follower.snap_dir).iter().any(|f| f.ends_with(".snap")),
-        "the retained snapshot is rolled off before the incoming one is written: {:?}",
+        files_in(&follower.snap_dir).contains(&"00000000000000000005.snap".to_string()),
+        "the retained snapshot is kept while a transfer is received: {:?}",
         files_in(&follower.snap_dir)
     );
 
