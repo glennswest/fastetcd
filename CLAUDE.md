@@ -2037,3 +2037,42 @@ Tracked live in the Claude task system. Snapshot of the order:
     proposals per fsync, so no queueing. `docs/benchmarks/blade-server3.md`.
     Follow-up #135 (checkpoint vs WAL on a spindle; a disk mode for the
     test container to measure it there).
+
+59. **LeaseKeepAlive renews in the leader's RAM, as etcd's lessor (#92, P2).**
+    Every keep-alive was a `FastetcdLogEntry::LeaseKeepAlive` proposal:
+    a WAL fsync and an apply each (etcd 126k/s, v1.12 12k/s on dev).
+    etcd (release-3.5 `lessor.go`, `v3_server.go`): the leader renews in
+    memory after confirming leadership (`ensureLeadership`), followers
+    forward to it, TimeToLive is answered by the leader, and a new leader
+    `Promote`s every lease to a full TTL from then. Plan:
+    - `crates/raft/src/lessor.rs`: per-lease RAM deadlines on the leader,
+      reset to now + TTL for every lease the first time this member leads
+      a term; effective deadline = max(RAM, persisted). Renew = read
+      barrier (leadership confirmed), lease exists and is not expired,
+      RAM deadline = now + TTL. No log entry.
+    - Follower keep-alives keep going through `ForwardWrite` with the
+      `LeaseKeepAlive` entry; a leader with the lessor renews it in RAM
+      instead of proposing (an older leader proposes, as before).
+    - TimeToLive: on the leader from the lessor; a follower asks the
+      leader (new peer RPC `LeaseTimeToLive`), falling back to its own
+      state on an older leader.
+    - Expiry sweeper: the lessor's effective deadline.
+    - **Mixed versions**: a member older than this, made leader, reads
+      only persisted deadlines, which RAM renewals never update, and
+      would expire every long-lived lease at once. So RAM renewal is used
+      only while every member answers `ConfirmLeader` with >= 1.23 (the
+      #56 version gate, moved to the raft crate and shared); otherwise a
+      keep-alive is proposed through Raft as before.
+    - Behaviour change, as etcd without lease checkpointing: a restart
+      or leader change gives every lease a full TTL again.
+    Work items:
+    - [ ] raft: shared version gate; lessor; ForwardWrite intercept;
+      LeaseTimeToLive RPC + forwarder; server wiring (lease.rs,
+      lease_expiry.rs, main, harnesses).
+    - [ ] Tests: renewals add no log entries and keep a lease past its
+      persisted deadline; expiry once they stop; follower keep-alive;
+      leader change keeps a renewed lease, then expires it; an older
+      member → renewals through Raft.
+    - [ ] fastetcd-bench `--mode keepalive`; v1.22.0 vs this on dev.
+    - [ ] Docs (03 leases, mixed versions), changelog; release 1.23.0;
+      close #92.
