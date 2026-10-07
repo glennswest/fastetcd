@@ -1867,3 +1867,30 @@ Tracked live in the Claude task system. Snapshot of the order:
     Work items:
     - [x] SM proposal log; policy task; main wiring; test.
     - [x] Docs (01, 04, sizing text), changelog; release 1.18.0; close #80.
+
+53. **fastetcd-migrate imports leases and auth (#60, P2).** It read only
+    etcd's `key` bucket: keys kept etcd lease ids no lease backed (never
+    expiring), and users, roles and `auth enable` were lost. From etcd
+    release-3.5's source: `lease` bucket (key: BE lease id, value
+    `leasepb.Lease {ID, TTL, RemainingTTL}`; etcd restores with
+    RemainingTTL if set, else TTL, raised to its minimum), `authUsers` /
+    `authRoles` (authpb User / Role), `auth` (`authEnabled` = {1}/{0});
+    passwords are bcrypt hashes. Plan:
+    - Grant every lease (id kept, TTL as etcd restores it, at least 2 s,
+      fastetcd's minimum) before the keys; a key whose lease is not in the
+      bucket gets no lease, counted and warned.
+    - Auth: roles + permissions, users (their bcrypt hash as is, no_password,
+      roles), then enable if etcd had it on — through `apply_auth`, so
+      fastetcd's rules hold (enable needs root).
+    - Server: `Authenticate` also verifies bcrypt hashes (crate `bcrypt`),
+      so migrated users keep their passwords; new ones stay argon2.
+    - Storage: `bulk_load_records` attaches lease_keys only for a live
+      key's latest record (it attached every record, deleted ones too).
+    - Tests: synthetic bolt round trip (leases, orphan, auth); bcrypt
+      verify unit test; `tests/migrate_e2e.sh`: real etcd v3.5 → snapshot
+      → migrate → fastetcd: keys, leases expiring, users logging in with
+      their etcd passwords, RBAC enforced.
+    Work items:
+    - [ ] migrate leases + auth; bulk-load fix; server bcrypt; tests.
+    - [ ] e2e with real etcd; docs (00, README migration), changelog;
+      release; close #60.
