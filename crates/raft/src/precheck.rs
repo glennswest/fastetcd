@@ -28,8 +28,10 @@
 //! not refuse a live lease.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 
-use fastetcd_storage::mvcc::{LeaseId, Mutation, MvccStore, Refusal, TxnOp};
+use fastetcd_storage::mvcc::{Compare, LeaseId, Mutation, MvccStore, Refusal, TxnOp};
 use openraft::Raft;
 
 use crate::types::{FastetcdLogEntry, TypeConfig};
@@ -77,23 +79,14 @@ async fn leases_named(mvcc: &MvccStore, entry: &FastetcdLogEntry) -> Result<Vec<
         FastetcdLogEntry::Apply { mutations } => mutations.iter().filter_map(put_lease).collect(),
         FastetcdLogEntry::Txn { compares, success, failure } => {
             // Most txns name no lease; they need no compare evaluation.
-            let names_a_lease = |ops: &[TxnOp]| {
-                ops.iter()
-                    .any(|op| matches!(op, TxnOp::Mutation(m) if put_lease(m).is_some()))
-            };
-            if !names_a_lease(success) && !names_a_lease(failure) {
+            let names_a_lease = |m: &Mutation| put_lease(m).is_some();
+            if !any_mutation(success, &names_a_lease) && !any_mutation(failure, &names_a_lease) {
                 return Ok(Vec::new());
             }
-            let ops = if mvcc.txn_would_succeed(compares).await.map_err(|e| e.to_string())? {
-                success
-            } else {
-                failure
-            };
-            ops.iter()
-                .filter_map(|op| match op {
-                    TxnOp::Mutation(m) => put_lease(m),
-                    TxnOp::Range(_) => None,
-                })
+            chosen_mutations(mvcc, compares, success, failure)
+                .await?
+                .into_iter()
+                .filter_map(put_lease)
                 .collect()
         }
         _ => Vec::new(),
@@ -141,10 +134,43 @@ async fn keeps_missing_key<'a>(
     Ok(false)
 }
 
-fn mutations(ops: &[TxnOp]) -> impl Iterator<Item = &Mutation> {
-    ops.iter().filter_map(|op| match op {
-        TxnOp::Mutation(m) => Some(m),
-        TxnOp::Range(_) => None,
+/// Whether any mutation in `ops`, nested txns' branches included,
+/// satisfies `pred`.
+fn any_mutation(ops: &[TxnOp], pred: &dyn Fn(&Mutation) -> bool) -> bool {
+    ops.iter().any(|op| match op {
+        TxnOp::Mutation(m) => pred(m),
+        TxnOp::Range(_) => false,
+        TxnOp::Txn(t) => any_mutation(&t.success, pred) || any_mutation(&t.failure, pred),
+    })
+}
+
+/// The mutations a txn would run now, in order: the branch its compares
+/// choose, and inside it the branches its nested txns' compares choose
+/// (#56). Every compare is judged on the state now, as the apply judges
+/// them all on the state before the txn.
+fn chosen_mutations<'a>(
+    mvcc: &'a MvccStore,
+    compares: &'a [Compare],
+    success: &'a [TxnOp],
+    failure: &'a [TxnOp],
+) -> Pin<Box<dyn Future<Output = Result<Vec<&'a Mutation>, String>> + Send + 'a>> {
+    Box::pin(async move {
+        let ops = if mvcc.txn_would_succeed(compares).await.map_err(|e| e.to_string())? {
+            success
+        } else {
+            failure
+        };
+        let mut out = Vec::new();
+        for op in ops {
+            match op {
+                TxnOp::Mutation(m) => out.push(m),
+                TxnOp::Range(_) => {}
+                TxnOp::Txn(t) => {
+                    out.extend(chosen_mutations(mvcc, &t.compares, &t.success, &t.failure).await?)
+                }
+            }
+        }
+        Ok(out)
     })
 }
 
@@ -160,16 +186,11 @@ async fn refusal(mvcc: &MvccStore, entry: &FastetcdLogEntry) -> Result<Option<Re
             }
         }
         FastetcdLogEntry::Txn { compares, success, failure } => {
-            let any = |ops: &[TxnOp]| mutations(ops).any(ignores_prev);
-            if !any(success) && !any(failure) {
+            if !any_mutation(success, &ignores_prev) && !any_mutation(failure, &ignores_prev) {
                 return Ok(None);
             }
-            let ops = if mvcc.txn_would_succeed(compares).await.map_err(|e| e.to_string())? {
-                success
-            } else {
-                failure
-            };
-            if keeps_missing_key(mvcc, mutations(ops)).await? {
+            let ops = chosen_mutations(mvcc, compares, success, failure).await?;
+            if keeps_missing_key(mvcc, ops.into_iter()).await? {
                 Some(Refusal::KeyNotFound)
             } else {
                 None

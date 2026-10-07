@@ -57,6 +57,9 @@ pub struct ServerState {
     /// Members the leader last found older than 1.10 while the log holds
     /// batched entries they cannot read (`batch_guard`, fastetcd#77).
     pub older_members: Arc<AtomicU64>,
+    /// The membership key (+1) for which every member was found to read
+    /// nested txns (`version_gate`, fastetcd#56); 0 = not yet.
+    pub nested_txn_checked: Arc<AtomicU64>,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -91,6 +94,7 @@ impl ServerState {
             committed_index: None,
             wal: None,
             older_members: Arc::default(),
+            nested_txn_checked: Arc::default(),
             write_behind: None,
             read_index: None,
             proposer: None,

@@ -258,14 +258,25 @@ pub struct RangeOp {
     pub count_only: bool,
 }
 
-/// A single op within a `Txn` `success`/`failure` list. Nested `Txn`
-/// (etcd permits `Txn` inside `Txn`) is intentionally not represented
-/// at this layer — the gRPC service flattens nested Txns into this
-/// shape, or returns an error for unsupported nesting depth.
+/// A single op within a `Txn` `success`/`failure` list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TxnOp {
     Range(RangeOp),
     Mutation(Mutation),
+    /// A txn inside a txn (etcd's `RequestOp.request_txn`, fastetcd#56).
+    /// Appended last, so the other variants keep their bincode tags; a
+    /// member older than 1.22 cannot decode it.
+    Txn(NestedTxn),
+}
+
+/// A nested txn: its compares are evaluated against the state before
+/// the outermost txn, as etcd's `compareToPath` does; its ops run in
+/// place, in order, at the outer txn's revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NestedTxn {
+    pub compares: Vec<Compare>,
+    pub success: Vec<TxnOp>,
+    pub failure: Vec<TxnOp>,
 }
 
 /// Per-op result within a [`TxnResult`].
@@ -273,6 +284,11 @@ pub enum TxnOp {
 pub enum TxnOpResult {
     Range(RangeResult),
     Mutation(MutationResult),
+    /// A nested txn: the branch it took and one result per op in it.
+    Txn {
+        succeeded: bool,
+        op_results: Vec<TxnOpResult>,
+    },
 }
 
 /// Input for `bulk_load_records`. Each `BulkKey` carries one user
@@ -315,6 +331,14 @@ pub struct LeaseTtlResult {
     pub remaining_ttl_secs: i64,
     /// Attached keys; populated only when the caller asked for them.
     pub keys: Vec<Vec<u8>>,
+}
+
+/// Where a txn's execution is: its revision, the next sub-revision, and
+/// whether anything has changed yet.
+struct TxnExec {
+    main: i64,
+    sub: i64,
+    produced_any: bool,
 }
 
 /// Outcome of a `Txn` call.
@@ -1495,44 +1519,14 @@ impl MvccStore {
         let ops: &[TxnOp] = if succeeded { success } else { failure };
 
         let mut ctx = ApplyContext::default();
-        let mut op_results: Vec<TxnOpResult> = Vec::with_capacity(ops.len());
-        let mut produced_any = false;
-        let main = state.current_rev + 1;
-        // Sub-revisions count mutations only, as `apply` does.
-        let mut sub: i64 = 0;
-
-        for op in ops {
-            match op {
-                TxnOp::Range(r) => {
-                    let mut read_state = *state;
-                    if produced_any {
-                        read_state.current_rev = main;
-                    }
-                    let res = self
-                        .range_inner(
-                            &*snap,
-                            &ctx,
-                            read_state,
-                            &r.key,
-                            &r.range_end,
-                            r.limit,
-                            r.revision,
-                            r.keys_only,
-                            r.count_only,
-                        )
-                        .await?;
-                    op_results.push(TxnOpResult::Range(res));
-                }
-                TxnOp::Mutation(m) => {
-                    let (res, produced) = self
-                        .apply_one(&*snap, &mut ctx, Revision::new(main, sub), m)
-                        .await?;
-                    sub += 1;
-                    produced_any |= produced;
-                    op_results.push(TxnOpResult::Mutation(res));
-                }
-            }
-        }
+        let mut exec = TxnExec {
+            main: state.current_rev + 1,
+            // Sub-revisions count mutations only, as `apply` does.
+            sub: 0,
+            produced_any: false,
+        };
+        let op_results = self.txn_ops(&*snap, &mut ctx, *state, &mut exec, ops).await?;
+        let (main, produced_any) = (exec.main, exec.produced_any);
 
         if produced_any {
             self.commit_ctx(&mut state, main, ctx).await?;
@@ -1543,6 +1537,64 @@ impl MvccStore {
             succeeded,
             revision,
             op_results,
+        })
+    }
+
+    /// Run `ops` in order into `ctx` (see [`MvccStore::txn`]). A nested
+    /// txn's compares are evaluated against `snap` and the resident index,
+    /// which nothing changes before the outermost txn commits (the
+    /// write-state lock is held throughout): the state before the txn,
+    /// as etcd evaluates them (#56).
+    fn txn_ops<'a>(
+        &'a self,
+        snap: &'a dyn Snapshot,
+        ctx: &'a mut ApplyContext,
+        state: WriteState,
+        exec: &'a mut TxnExec,
+        ops: &'a [TxnOp],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MvccResult<Vec<TxnOpResult>>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut op_results: Vec<TxnOpResult> = Vec::with_capacity(ops.len());
+            for op in ops {
+                match op {
+                    TxnOp::Range(r) => {
+                        let mut read_state = state;
+                        if exec.produced_any {
+                            read_state.current_rev = exec.main;
+                        }
+                        let res = self
+                            .range_inner(
+                                snap,
+                                ctx,
+                                read_state,
+                                &r.key,
+                                &r.range_end,
+                                r.limit,
+                                r.revision,
+                                r.keys_only,
+                                r.count_only,
+                            )
+                            .await?;
+                        op_results.push(TxnOpResult::Range(res));
+                    }
+                    TxnOp::Mutation(m) => {
+                        let (res, produced) = self
+                            .apply_one(snap, ctx, Revision::new(exec.main, exec.sub), m)
+                            .await?;
+                        exec.sub += 1;
+                        exec.produced_any |= produced;
+                        op_results.push(TxnOpResult::Mutation(res));
+                    }
+                    TxnOp::Txn(t) => {
+                        let succeeded = self.evaluate_compares(snap, &t.compares).await?;
+                        let branch: &[TxnOp] = if succeeded { &t.success } else { &t.failure };
+                        let results = self.txn_ops(snap, ctx, state, exec, branch).await?;
+                        op_results.push(TxnOpResult::Txn { succeeded, op_results: results });
+                    }
+                }
+            }
+            Ok(op_results)
         })
     }
 
@@ -2830,6 +2882,123 @@ mod tests {
             range_end: range_end.to_vec(),
             ..Default::default()
         })
+    }
+
+    fn nested(compares: Vec<Compare>, success: Vec<TxnOp>, failure: Vec<TxnOp>) -> TxnOp {
+        TxnOp::Txn(NestedTxn { compares, success, failure })
+    }
+
+    fn range_values(r: &TxnOpResult) -> Vec<Vec<u8>> {
+        match r {
+            TxnOpResult::Range(rr) => rr.kvs.iter().map(|k| k.value.clone()).collect(),
+            other => panic!("expected Range, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nested_txn_runs_the_branch_its_compares_choose() {
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"v0")]).await.unwrap();
+        let before = s.current_revision().await;
+        let mut events = s.subscribe();
+        let r = s
+            .txn(
+                &[],
+                &[
+                    txn_put(b"a", b"1"),
+                    nested(vec![cmp_value_eq(b"k", b"v0")], vec![txn_put(b"b", b"yes")], vec![txn_put(b"b", b"no")]),
+                    nested(vec![cmp_value_eq(b"k", b"other")], vec![txn_put(b"c", b"yes")], vec![txn_put(b"c", b"no")]),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(r.succeeded);
+        assert_eq!(r.revision, before + 1, "one revision for the whole txn");
+        assert!(matches!(&r.op_results[1], TxnOpResult::Txn { succeeded: true, op_results } if op_results.len() == 1));
+        assert!(matches!(&r.op_results[2], TxnOpResult::Txn { succeeded: false, op_results } if op_results.len() == 1));
+        let kvs = s.range(b"a", b"d", 0, 0, false, false).await.unwrap().kvs;
+        let got: Vec<_> = kvs.iter().map(|k| (k.key.clone(), k.value.clone(), k.mod_revision)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (b"a".to_vec(), b"1".to_vec(), before + 1),
+                (b"b".to_vec(), b"yes".to_vec(), before + 1),
+                (b"c".to_vec(), b"no".to_vec(), before + 1),
+            ]
+        );
+        // One event batch, in execution order, nested ops included.
+        let batch = events.recv().await.unwrap();
+        assert_eq!(batch.revision, before + 1);
+        let keys: Vec<_> = batch.events.iter().map(|e| e.kv.key.clone()).collect();
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn nested_compares_see_the_state_before_the_txn() {
+        // etcd's compareToPath evaluates every compare before any op runs.
+        let (_d, s) = open_mvcc().await;
+        s.apply(&[put(b"k", b"old")]).await.unwrap();
+        let r = s
+            .txn(
+                &[],
+                &[
+                    txn_put(b"k", b"new"),
+                    nested(vec![cmp_value_eq(b"k", b"old")], vec![txn_put(b"seen", b"old")], vec![txn_put(b"seen", b"new")]),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(&r.op_results[1], TxnOpResult::Txn { succeeded: true, .. }));
+        let v = s.range(b"seen", b"", 0, 0, false, false).await.unwrap().kvs;
+        assert_eq!(v[0].value, b"old");
+    }
+
+    #[tokio::test]
+    async fn a_range_sees_writes_made_inside_and_outside_a_nested_txn() {
+        let (_d, s) = open_mvcc().await;
+        let r = s
+            .txn(
+                &[],
+                &[
+                    txn_put(b"x", b"outer"),
+                    nested(vec![], vec![txn_range(b"x", b""), txn_put(b"y", b"inner")], vec![]),
+                    txn_range(b"y", b""),
+                    nested(vec![], vec![nested(vec![], vec![txn_range(b"x", b"z")], vec![])], vec![]),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        let TxnOpResult::Txn { op_results: inner, .. } = &r.op_results[1] else { panic!() };
+        assert_eq!(range_values(&inner[0]), vec![b"outer".to_vec()]);
+        assert_eq!(range_values(&r.op_results[2]), vec![b"inner".to_vec()]);
+        let TxnOpResult::Txn { op_results: l1, .. } = &r.op_results[3] else { panic!() };
+        let TxnOpResult::Txn { op_results: l2, .. } = &l1[0] else { panic!() };
+        assert_eq!(range_values(&l2[0]), vec![b"outer".to_vec(), b"inner".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_inside_a_nested_txn_refuses_the_whole_txn() {
+        let (_d, s) = open_mvcc().await;
+        let before = s.current_revision().await;
+        let keep = Mutation::Put {
+            key: b"missing".to_vec(),
+            value: Vec::new(),
+            lease: 0,
+            ignore_value: true,
+            ignore_lease: false,
+            prev_kv: false,
+        };
+        let err = s
+            .txn(&[], &[txn_put(b"a", b"1"), nested(vec![], vec![TxnOp::Mutation(keep)], vec![])], &[])
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.refusal(), Some(Refusal::KeyNotFound), "{err}");
+        assert_eq!(s.current_revision().await, before);
+        assert!(s.range(b"a", b"", 0, 0, false, false).await.unwrap().kvs.is_empty());
     }
 
     #[tokio::test]

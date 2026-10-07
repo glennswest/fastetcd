@@ -93,6 +93,60 @@ async fn txn_compare_and_set_via_etcd_client() {
 }
 
 #[tokio::test]
+async fn nested_txn_via_etcd_client() {
+    // etcd has run a txn inside a txn since 3.3 (fastetcd#56).
+    use etcd_client::TxnOpResponse;
+    let h = start_test_server_full().await;
+    let mut c = client_for(&h.endpoint).await;
+    c.put("mode", "blue", None).await.unwrap();
+    c.put("old", "x", None).await.unwrap();
+
+    let inner_yes = Txn::new()
+        .when(vec![Compare::value("mode", CompareOp::Equal, "blue")])
+        .and_then(vec![TxnOp::put("color", "blue", None), TxnOp::delete("old", None)])
+        .or_else(vec![TxnOp::put("color", "other", None)]);
+    let inner_no = Txn::new()
+        .when(vec![Compare::value("mode", CompareOp::Equal, "green")])
+        .and_then(vec![TxnOp::put("never", "x", None)])
+        .or_else(vec![TxnOp::get("color", None)]);
+    let txn = Txn::new()
+        .when(vec![Compare::version("mode", CompareOp::Greater, 0)])
+        .and_then(vec![TxnOp::txn(inner_yes), TxnOp::txn(inner_no)])
+        .or_else(vec![]);
+    let resp = c.txn(txn).await.unwrap();
+    assert!(resp.succeeded());
+    let ops = resp.op_responses();
+    assert_eq!(ops.len(), 2);
+    match &ops[0] {
+        TxnOpResponse::Txn(t) => {
+            assert!(t.succeeded());
+            let inner = t.op_responses();
+            assert!(matches!(inner[0], TxnOpResponse::Put(_)));
+            match &inner[1] {
+                TxnOpResponse::Delete(d) => assert_eq!(d.deleted(), 1),
+                other => panic!("expected a delete response, got {other:?}"),
+            }
+        }
+        other => panic!("expected a txn response, got {other:?}"),
+    }
+    match &ops[1] {
+        TxnOpResponse::Txn(t) => {
+            assert!(!t.succeeded());
+            match &t.op_responses()[0] {
+                // The failure branch's Range sees the put made earlier in
+                // the same outer txn, as etcd's does.
+                TxnOpResponse::Get(g) => assert_eq!(g.kvs()[0].value(), b"blue"),
+                other => panic!("expected a get response, got {other:?}"),
+            }
+        }
+        other => panic!("expected a txn response, got {other:?}"),
+    }
+    assert_eq!(c.get("color", None).await.unwrap().kvs()[0].value(), b"blue");
+    assert!(c.get("old", None).await.unwrap().kvs().is_empty());
+    assert!(c.get("never", None).await.unwrap().kvs().is_empty());
+}
+
+#[tokio::test]
 async fn lease_grant_attach_revoke_via_etcd_client() {
     let h = start_test_server_full().await;
     let mut c = client_for(&h.endpoint).await;

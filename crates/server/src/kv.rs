@@ -264,17 +264,9 @@ impl Kv for KvService {
         if txn_consumes_space(&req) {
             self.state.space.check_write()?;
         }
-        let mut compares = Vec::with_capacity(req.compare.len());
-        for c in &req.compare {
-            compares.push(conv::compare_from_proto(c)?);
-        }
-        let mut success = Vec::with_capacity(req.success.len());
-        for op in &req.success {
-            success.push(conv::request_op_from_proto(op)?);
-        }
-        let mut failure = Vec::with_capacity(req.failure.len());
-        for op in &req.failure {
-            failure.push(conv::request_op_from_proto(op)?);
+        let (compares, success, failure) = conv::txn_request_parts(&req)?;
+        if conv::txn_nests(&req) {
+            crate::version_gate::require_nested_txn(&self.state).await?;
         }
 
         let resp = self
@@ -402,20 +394,34 @@ async fn txn_result_to_response(
     req: &pb::TxnRequest,
     txn: TxnResult,
 ) -> Result<pb::TxnResponse, Status> {
+    let header = response_header(state, txn.revision).await;
+    let ops = if txn.succeeded { &req.success } else { &req.failure };
+    Ok(pb::TxnResponse {
+        header: Some(header),
+        succeeded: txn.succeeded,
+        responses: txn_responses(header, ops, txn.op_results)?,
+    })
+}
+
+/// One `ResponseOp` per request op of the branch that ran, paired by
+/// position; a nested txn's recursively (fastetcd#56).
+fn txn_responses(
+    header: pb::ResponseHeader,
+    ops: &[pb::RequestOp],
+    results: Vec<TxnOpResult>,
+) -> Result<Vec<pb::ResponseOp>, Status> {
     use pb::request_op::Request;
     use pb::response_op::Response as Resp;
 
-    let header = response_header(state, txn.revision).await;
-    let ops = if txn.succeeded { &req.success } else { &req.failure };
-    if ops.len() != txn.op_results.len() {
+    if ops.len() != results.len() {
         return Err(Status::internal(format!(
             "txn: {} op results for {} request ops",
-            txn.op_results.len(),
+            results.len(),
             ops.len()
         )));
     }
     let mut responses = Vec::with_capacity(ops.len());
-    for (op, result) in ops.iter().zip(txn.op_results) {
+    for (op, result) in ops.iter().zip(results) {
         let response = match (&op.request, result) {
             (Some(Request::RequestRange(r)), TxnOpResult::Range(res)) => {
                 Resp::ResponseRange(range_result_to_response(header, res, r.count_only))
@@ -433,6 +439,14 @@ async fn txn_result_to_response(
                     prev_kvs: m.prev_kvs.iter().map(conv::record_to_kv).collect(),
                 })
             }
+            (Some(Request::RequestTxn(t)), TxnOpResult::Txn { succeeded, op_results }) => {
+                let branch = if succeeded { &t.success } else { &t.failure };
+                Resp::ResponseTxn(pb::TxnResponse {
+                    header: Some(header),
+                    succeeded,
+                    responses: txn_responses(header, branch, op_results)?,
+                })
+            }
             (req_op, _) => {
                 return Err(Status::internal(format!(
                     "txn: op result does not match request op {req_op:?}"
@@ -441,11 +455,7 @@ async fn txn_result_to_response(
         };
         responses.push(pb::ResponseOp { response: Some(response) });
     }
-    Ok(pb::TxnResponse {
-        header: Some(header),
-        succeeded: txn.succeeded,
-        responses,
-    })
+    Ok(responses)
 }
 
 fn mvcc_error_to_status(e: fastetcd_storage::mvcc::MvccError) -> Status {

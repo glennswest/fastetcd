@@ -5,7 +5,7 @@
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::mvccpb;
 use fastetcd_storage::mvcc::{
-    Compare, CompareOp, CompareTarget, KvRecord, Mutation, RangeOp, TxnOp,
+    Compare, CompareOp, CompareTarget, KvRecord, Mutation, NestedTxn, RangeOp, TxnOp,
 };
 use tonic::Status;
 
@@ -104,8 +104,7 @@ pub fn compare_from_proto(c: &pb::Compare) -> Result<Compare, Status> {
 }
 
 /// Translate a proto `RequestOp` (used inside a TxnRequest) into our
-/// internal `TxnOp`. Nested Txn is rejected at this layer — we'd need
-/// to flatten or refuse depth > 1. v0.1 refuses.
+/// internal `TxnOp`; a nested txn recursively (fastetcd#56).
 pub fn request_op_from_proto(op: &pb::RequestOp) -> Result<TxnOp, Status> {
     use pb::request_op::Request;
     let Some(req) = &op.request else {
@@ -115,8 +114,27 @@ pub fn request_op_from_proto(op: &pb::RequestOp) -> Result<TxnOp, Status> {
         Request::RequestRange(r) => Ok(TxnOp::Range(range_request_to_op(r))),
         Request::RequestPut(p) => Ok(TxnOp::Mutation(put_request_to_mutation(p))),
         Request::RequestDeleteRange(d) => Ok(TxnOp::Mutation(delete_request_to_mutation(d))),
-        Request::RequestTxn(_) => Err(Status::unimplemented(
-            "nested Txn in Txn ops is not yet supported",
-        )),
+        Request::RequestTxn(t) => {
+            let (compares, success, failure) = txn_request_parts(t)?;
+            Ok(TxnOp::Txn(NestedTxn { compares, success, failure }))
+        }
     }
+}
+
+/// A `TxnRequest`'s compares and its two branches, converted.
+pub fn txn_request_parts(
+    req: &pb::TxnRequest,
+) -> Result<(Vec<Compare>, Vec<TxnOp>, Vec<TxnOp>), Status> {
+    let compares = req.compare.iter().map(compare_from_proto).collect::<Result<_, _>>()?;
+    let success = req.success.iter().map(request_op_from_proto).collect::<Result<_, _>>()?;
+    let failure = req.failure.iter().map(request_op_from_proto).collect::<Result<_, _>>()?;
+    Ok((compares, success, failure))
+}
+
+/// Whether a txn has a txn inside it, in either branch.
+pub fn txn_nests(req: &pb::TxnRequest) -> bool {
+    req.success
+        .iter()
+        .chain(&req.failure)
+        .any(|op| matches!(op.request, Some(pb::request_op::Request::RequestTxn(_))))
 }

@@ -589,3 +589,98 @@ async fn an_older_member_is_kept_from_a_batched_log() {
     assert!(!mixed[1].state.sm.mvcc().has_batched());
     guard_add(&mixed[1].state, 3).await.expect("no batches: an older member may join");
 }
+
+fn nested_txn_request() -> pb::TxnRequest {
+    use pb::request_op::Request;
+    let put = |k: &str, v: &str| pb::RequestOp {
+        request: Some(Request::RequestPut(pb::PutRequest {
+            key: k.as_bytes().to_vec(),
+            value: v.as_bytes().to_vec(),
+            ..Default::default()
+        })),
+    };
+    pb::TxnRequest {
+        compare: vec![],
+        success: vec![
+            put("n/a", "1"),
+            pb::RequestOp {
+                request: Some(Request::RequestTxn(pb::TxnRequest {
+                    compare: vec![],
+                    success: vec![put("n/b", "2")],
+                    failure: vec![],
+                })),
+            },
+        ],
+        failure: vec![],
+    }
+}
+
+/// A txn inside a txn, sent to a follower, is applied on every member
+/// (fastetcd#56).
+#[tokio::test]
+async fn a_nested_txn_applies_on_every_member() {
+    let nodes = cluster(0).await;
+    let follower = a_follower_of(&nodes);
+    let mut kv = KvClient::connect(follower.client.clone()).await.unwrap();
+    let resp = kv.txn(nested_txn_request()).await.expect("nested txn").into_inner();
+    assert!(resp.succeeded);
+    assert!(matches!(
+        &resp.responses[1].response,
+        Some(pb::response_op::Response::ResponseTxn(t)) if t.succeeded && t.responses.len() == 1
+    ));
+    let rev = resp.header.unwrap().revision;
+    for n in &nodes {
+        let mut kv = KvClient::connect(n.client.clone()).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let r = kv
+                .range(pb::RangeRequest {
+                    key: b"n/".to_vec(),
+                    range_end: b"n0".to_vec(),
+                    serializable: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            if r.kvs.len() == 2 {
+                assert!(r.kvs.iter().all(|kv| kv.mod_revision == rev), "member {}: {r:?}", n.id);
+                break;
+            }
+            assert!(Instant::now() < deadline, "member {} never applied the nested txn", n.id);
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// With a member that cannot decode a nested txn, one is refused before
+/// it reaches the log, naming that member; a flat txn still goes through.
+#[tokio::test]
+async fn a_nested_txn_waits_for_every_member_to_read_it() {
+    let nodes = cluster(1).await;
+    // Member 1 serves it (the gate runs where the txn arrives, leader or
+    // not); member 3 is the older one.
+    let leader = leader_of(&nodes);
+    let mut kv = KvClient::connect(nodes[0].client.clone()).await.unwrap();
+    let err = kv.txn(nested_txn_request()).await.expect_err("an older member: refused");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("member 3"), "{err:?}");
+    let mut flat = nested_txn_request();
+    flat.success.truncate(1);
+    kv.txn(flat).await.expect("a flat txn is not gated");
+    let r = kv
+        .range(pb::RangeRequest { key: b"n/b".to_vec(), ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(r.kvs.is_empty(), "nothing of the refused txn applied");
+    // The older member keeps up with the log.
+    let older = nodes.iter().find(|n| n.id == 3).unwrap();
+    let applied = leader.raft.metrics().borrow().last_applied;
+    older
+        .raft
+        .wait(Some(Duration::from_secs(30)))
+        .applied_index_at_least(applied.map(|l| l.index), "the older member applies on")
+        .await
+        .unwrap();
+}
