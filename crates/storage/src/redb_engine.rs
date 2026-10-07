@@ -345,6 +345,13 @@ impl KvStore for RedbEngine {
         }
 
         let mut db_guard = self.inner.db.write().await;
+        // redb also refuses to compact while its newest commit is not
+        // durable, and applies commit with `Durability::None` (#71), so on
+        // a member taking writes the newest one nearly always is
+        // (fastetcd#119). One empty durable commit, under the exclusive
+        // lock so nothing commits after it, makes the state durable first.
+        let txn = db_guard.begin_write().map_err(StorageError::io)?;
+        txn.commit().map_err(StorageError::io)?;
         let _changed = db_guard.compact().map_err(StorageError::io)?;
         Ok(())
     }
@@ -523,6 +530,25 @@ mod tests {
         let path = dir.path().join("test.redb");
         let engine = RedbEngine::open(&path).expect("open redb");
         (dir, engine)
+    }
+
+    // fastetcd#119: a defragment right after a non-durable commit (every
+    // apply since #71) used to fail with "A transaction is still in
+    // progress".
+    #[tokio::test]
+    async fn defragment_right_after_a_non_durable_commit() {
+        let (_dir, eng) = open_temp();
+        let mut b = WriteBatch::new();
+        for i in 0..256u32 {
+            b.put("t", &i.to_be_bytes(), &[7u8; 2048]);
+        }
+        eng.commit(b, WriteOptions::default()).await.unwrap();
+        let mut d = WriteBatch::new();
+        d.delete_range("t", b"", &[0xFFu8; 8]);
+        eng.commit(d, WriteOptions { sync: false }).await.unwrap();
+        eng.defragment().await.expect("defragment after a non-durable commit");
+        let snap = eng.snapshot().await.unwrap();
+        assert!(snap.range("t", std::ops::Bound::Unbounded, std::ops::Bound::Unbounded, 0).await.unwrap().is_empty());
     }
 
     #[tokio::test]

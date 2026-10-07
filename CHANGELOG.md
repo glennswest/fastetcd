@@ -6,6 +6,16 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-07 — online defragment after a non-durable commit (#119)
+- **fix:** `Maintenance.Defragment` (and the space monitor's reclaim)
+  failed with "A transaction is still in progress" whenever the newest
+  redb commit was non-durable, which every apply has been since #71:
+  always on 1.9–1.11, and on a member taking writes since 1.12 (until
+  the next checkpoint). redb refuses to compact then. The defragment now
+  makes one empty durable commit under its exclusive lock before
+  compacting. Found by the new test container's `medium` and `long`
+  (#36).
+
 ### 2026-10-07 — test containers (#36)
 - **test:** fastetcd's test container per stormcentral's test standard
   (#36): `test/` (crate `fastetcd-test`, a workspace member but not a
