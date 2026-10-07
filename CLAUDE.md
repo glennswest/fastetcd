@@ -2138,3 +2138,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       member restart; v1.23.0 fails, this passes); each mapped error.
     - [x] Docs (03 auth errors), changelog; release 1.23.1; close #105,
       #127.
+
+62. **Verify #85 on an X9 blade (#89, P2) — blocked by #138.** What can
+    be done from here: server3 is reachable (apiserver anonymous, fastetcd
+    metrics on :2381); `tests/bench/blade_getlatency.py` runs rustkube's
+    get-latency / lease-churn load against a node and reads the WAL /
+    checkpoint / back-pressure metrics around it. Power cut: the owner put
+    it on the VMs (2026-10-05, stormcentral README stage 12); pve installs
+    of 11.88 / 11.91 (fastetcd >= 1.12) passed with that stage. Not doable:
+    v1.11.0 on a blade (a node runs its release's golden; test runs error,
+    stormcentral#526). Running it found #138: fastetcd on server3 wrote
+    nothing from 19:09:47Z (70+ min), reads still served; asked stormblock
+    (stormblock#337). Measure once #138 is understood and the node writes.
