@@ -11,14 +11,15 @@ async fn port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
-/// Start the binary with `extra` flags and `env`; stderr goes to a file.
+/// Start the binary with `extra` flags and `env`; its log (stdout, where
+/// tracing's fmt writes) goes to a file.
 async fn start(
     dir: &std::path::Path,
     extra: &[&str],
     env: &[(&str, &str)],
 ) -> (tokio::process::Child, String, std::path::PathBuf) {
     let (cp, pp) = (port().await, port().await);
-    let log = dir.join("stderr.log");
+    let log = dir.join("fastetcd.log");
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_fastetcd"));
     cmd.arg("--data-dir")
         .arg(dir.join("data"))
@@ -27,8 +28,8 @@ async fn start(
         .args(["--listen-metrics-url", ""])
         .args(extra)
         .env_remove("RUST_LOG")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(&log).unwrap());
+        .stdout(std::fs::File::create(&log).unwrap())
+        .stderr(std::process::Stdio::null());
     for (k, v) in env {
         cmd.env(k, v);
     }
