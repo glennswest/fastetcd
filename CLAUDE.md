@@ -2197,6 +2197,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     stormcentral#526). Running it found #138: fastetcd on server3 wrote
     nothing from 19:09:47Z (70+ min), reads still served; asked stormblock
     (stormblock#337). Measure once #138 is understood and the node writes.
+    2026-10-08: SSD vs v1.11.0 on a build VM (3 rounds, 2.9–4.4x writes,
+    p99 lower, linearizable p99 ~15x) and pvetest1 (after only) done; the
+    power cut is the pve install stage (`qm stop`, 301 of 300 survived on
+    11.95 and 11.88): `docs/benchmarks/acceptance-85.md`. Left: server3's
+    run (3 rounds of blade_getlatency.py) once it is on after 11:00Z.
 
 63. **Verify #82 on an X9 blade (#84, P2).** server3 (fastetcd 1.18):
     apiserver GET of the cilium-operator lease p99 2.9–6.4 ms idle, 9.4–
