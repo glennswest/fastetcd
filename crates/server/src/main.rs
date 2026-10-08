@@ -29,7 +29,6 @@ use fastetcd_server::maintenance::MaintenanceService;
 use fastetcd_server::watch::WatchService;
 use fastetcd_server::ServerState;
 use fastetcd_storage::mvcc::MvccStore;
-use fastetcd_storage::redb_engine::RedbEngine;
 
 /// fastetcd — a Rust implementation of the etcd v3 wire protocol.
 ///
