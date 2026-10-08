@@ -2260,7 +2260,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       (a token not yet applied on another member: own text, no
       re-authentication) means the script sets up through one member.
 
-67. **Docs say how the golden really ships (#81, P3).** 03-deploy, the
+67. **Docs say how the golden really ships (#81, P3) — done (docs; no release).** 03-deploy, the
     README and the CLAUDE.md pillar said the golden is built from
     `/root/fastetcd` on dev at whatever `main` is. Truth (stormcos
     `deploy/build-goldens.sh` and `docs/goldens.md` at 27add14, and every
@@ -2273,4 +2273,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     started first in 30-kube on sno/master. Also: dev.g8.lo is retired
     (2026-10-07): sc-build runs on build VMs (README, 02, 03).
     Work items:
-    - [ ] 03, README, 02, CLAUDE.md pillar; changelog; close #81.
+    - [x] 03, README, 02, CLAUDE.md pillar; changelog; close #81.
+    - Verified: claims against stormcos 27add14's script and goldens.md;
+      the stage's compile command on a build VM (all three static-pie,
+      tree clean); `component build fastetcd` refused; stages this
+      session recorded `fastetcd@<main's tip>`.
