@@ -244,9 +244,9 @@ done
 # The safety backup is taken before anything writes: before the raft log
 # moves into the WAL (1.12+), which clears the data file's own log.
 for j in 1 2 3; do
-    moved=$(grep -n "raft log moved from the data file into the WAL" "$WORK/log$j" | head -1 | cut -d: -f1)
+    moved=$(grep -n "raft log moved from the data file into the WAL" "$WORK/log$j" | head -1 | cut -d: -f1 || true)
     if [ -n "$moved" ]; then
-        backed=$(grep -n "took a safety backup" "$WORK/log$j" | head -1 | cut -d: -f1)
+        backed=$(grep -n "took a safety backup" "$WORK/log$j" | head -1 | cut -d: -f1 || true)
         check "member $j backed up its data file before moving its raft log into the WAL" \
             "$([ -n "$backed" ] && [ "$backed" -lt "$moved" ] && echo 1 || echo 0)"
     fi
