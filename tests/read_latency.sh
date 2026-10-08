@@ -18,6 +18,9 @@
 # DATA_ROOT=/dev/shm puts the data dirs on tmpfs instead: no fsync can
 # stall there, so a stall that remains is fastetcd's, not the disk's.
 # BENCH_ARGS replaces the bench's arguments (tests/keepalive_bench.sh).
+# CHURN=1 (several members; implies METRICS=1): CHURN_AFTER seconds (5)
+# into each bench, the leader is stopped (SIGTERM) and started again on
+# the same data dir, so the bench runs through a leader change (#104).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -38,14 +41,16 @@ BENCH=$TARGET/release/fastetcd-bench
 MEMBERS=${MEMBERS:-1}
 BENCH_FAILED=0
 
-# Start MEMBERS members of `bin`, data dirs under $1 and logs in $3;
-# print their pids.
-start_members() {
-    local dir=$1 bin=$2 logs=$3 cluster="" i
-    for i in $(seq "$MEMBERS"); do
-        cluster+="${cluster:+,}n$i=http://127.0.0.1:$((23800 + i))"
+[ "${CHURN:-0}" = 1 ] && METRICS=1
+
+# Start member $4 of `bin`, data dir under $1 and log in $3; its pid goes
+# in $3/pid$4.
+start_one() {
+    local dir=$1 bin=$2 logs=$3 i=$4 cluster="" j
+    for j in $(seq "$MEMBERS"); do
+        cluster+="${cluster:+,}n$j=http://127.0.0.1:$((23800 + j))"
     done
-    for i in $(seq "$MEMBERS"); do
+    {
         local args=(--data-dir "$dir/data$i"
             --listen-client-urls "http://127.0.0.1:$((23790 + i))"
             --listen-peer-urls "http://127.0.0.1:$((23800 + i))"
@@ -55,16 +60,38 @@ start_members() {
                 --initial-advertise-peer-urls "http://127.0.0.1:$((23800 + i))"
                 --initial-cluster-token read-latency)
         fi
-        "$bin" "${args[@]}" >"$logs/log$i" 2>&1 &
-        echo $!
+        "$bin" "${args[@]}" >>"$logs/log$i" 2>&1 &
+        echo $! >"$logs/pid$i"
+    }
+}
+
+# Start MEMBERS members of `bin`, data dirs under $1 and logs in $3.
+start_members() {
+    local i
+    for i in $(seq "$MEMBERS"); do start_one "$1" "$2" "$3" "$i"; done
+}
+
+# CHURN: restart whichever member leads, $CHURN_AFTER s from now.
+churn() {
+    local dir=$1 bin=$2 logs=$3 i
+    sleep "${CHURN_AFTER:-5}"
+    for i in $(seq "$MEMBERS"); do
+        if curl -sf "http://127.0.0.1:$((23810 + i))/metrics" | grep -q '^etcd_server_is_leader 1'; then
+            echo "-- churn: restarting the leader, member $i, at $(date -u +%H:%M:%S)"
+            kill "$(cat "$logs/pid$i")"
+            wait "$(cat "$logs/pid$i")" 2>/dev/null || true
+            sleep 1
+            start_one "$dir" "$bin" "$logs" "$i"
+            return
+        fi
     done
+    echo "-- churn: no leader found"
 }
 
 run() {
     local name=$1 bin=$2 dir=$WORK/$1 i
     mkdir -p "$dir" "$DATA/$1"
-    local pids
-    pids=$(start_members "$DATA/$1" "$bin" "$dir")
+    start_members "$DATA/$1" "$bin" "$dir"
     for i in $(seq "$MEMBERS"); do
         for _ in $(seq 100); do
             curl -sf "http://127.0.0.1:$((23790 + i))/health" >/dev/null && break
@@ -77,6 +104,11 @@ run() {
     # leader may be either, so both a leader and a follower get measured.
     for i in $(seq "$((MEMBERS > 1 ? 2 : 1))"); do
         echo "-- client port of member $i"
+        local churner=""
+        if [ "${CHURN:-0}" = 1 ] && [ "$MEMBERS" -gt 1 ]; then
+            churn "$DATA/$1" "$bin" "$dir" &
+            churner=$!
+        fi
         # shellcheck disable=SC2086
         if ! "$BENCH" --endpoint "http://127.0.0.1:$((23790 + i))" \
             ${BENCH_ARGS:---mode read-under-load --conns 40 --duration-secs 20 --probes 200} \
@@ -86,6 +118,7 @@ run() {
             grep -hiE "vote|elect|leader|WARN|ERROR|panic" "$dir"/log* | tail -n 60 || true
             BENCH_FAILED=1
         fi
+        [ -n "$churner" ] && wait "$churner"
     done
     if [ "${METRICS:-0}" = 1 ]; then
         for i in $(seq "$MEMBERS"); do
@@ -97,7 +130,8 @@ run() {
         grep -hE "slow raft WAL|vote|elect|leader" "$dir"/log* | grep -E "WARN|INFO" | tail -n 40 || true
     fi
     local pid
-    for pid in $pids; do
+    for i in $(seq "$MEMBERS"); do
+        pid=$(cat "$dir/pid$i")
         if ! kill "$pid" 2>/dev/null; then
             echo "member pid $pid had already exited; its log ends:"
             tail -n 20 "$dir"/log* || true

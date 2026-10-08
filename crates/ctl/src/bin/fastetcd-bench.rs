@@ -61,6 +61,84 @@ fn summary(mut l: Vec<u64>) -> String {
     )
 }
 
+/// Failed RPC attempts by gRPC code, and operations that never succeeded
+/// (fastetcd#104): a leader change makes forwarded writes `Unavailable`
+/// for a moment, which used to panic the whole bench.
+#[derive(Default)]
+struct Errors {
+    by_code: std::sync::Mutex<std::collections::BTreeMap<String, u64>>,
+    failed: std::sync::atomic::AtomicU64,
+}
+
+impl Errors {
+    fn add(&self, what: &str) {
+        *self.by_code.lock().unwrap().entry(what.to_string()).or_default() += 1;
+    }
+    /// `  errors: ...` for the summary, or nothing when there were none.
+    fn line(&self) -> Option<String> {
+        let by = self.by_code.lock().unwrap();
+        if by.is_empty() {
+            return None;
+        }
+        let codes: Vec<String> = by.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        Some(format!(
+            "  errors: {} attempts failed ({}); {} operations gave up",
+            by.values().sum::<u64>(),
+            codes.join(", "),
+            self.failed.load(std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+}
+
+/// Worth trying again: the cluster is between leaders, or the connection
+/// broke (a member restarting).
+fn transient(s: &tonic::Status) -> bool {
+    use tonic::Code;
+    matches!(s.code(), Code::Unavailable | Code::DeadlineExceeded | Code::Aborted)
+        || (s.code() == Code::Unknown && s.message().contains("transport error"))
+}
+
+const RETRIES: u32 = 8;
+
+/// Run `f` until it succeeds, retrying transient errors with a growing
+/// backoff (50 ms, 100 ms, ... up to `RETRIES` tries), each failed try
+/// counted by its code. `None` once it gives up, counted as failed.
+async fn retry<T, F, Fut>(errors: &Errors, mut f: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    for attempt in 1..=RETRIES {
+        match f().await {
+            Ok(v) => return Some(v),
+            Err(s) => {
+                errors.add(&format!("{:?}", s.code()));
+                if !transient(&s) || attempt == RETRIES {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+        }
+    }
+    errors.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    None
+}
+
+/// A KV client, retrying the connect as [`retry`] does.
+async fn connect_kv(endpoint: &str, errors: &Errors) -> Option<KvClient<tonic::transport::Channel>> {
+    for attempt in 1..=RETRIES {
+        match KvClient::connect(endpoint.to_string()).await {
+            Ok(c) => return Some(c),
+            Err(_) => {
+                errors.add("connect");
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+            }
+        }
+    }
+    errors.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    None
+}
+
 /// fastetcd#71's load, as rustkube's get-latency.sh makes it: `conns`
 /// clients, each looping GET + compare-and-swap Put (a Txn on
 /// mod_revision) of its own key, with a prefix Range every fifth loop.
@@ -74,25 +152,31 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // (when the write started, its latency in µs), for the stall list.
     let writes: Arc<Mutex<Vec<(std::time::SystemTime, u64)>>> = Arc::default();
+    let errors: Arc<Errors> = Arc::default();
     let mut handles = Vec::new();
     for w in 0..args.conns {
-        let (endpoint, value, stop, writes) =
-            (args.endpoint.clone(), value.clone(), stop.clone(), writes.clone());
+        let (endpoint, value, stop, writes, errors) =
+            (args.endpoint.clone(), value.clone(), stop.clone(), writes.clone(), errors.clone());
         handles.push(tokio::spawn(async move {
-            let mut c = KvClient::connect(endpoint).await.unwrap();
+            let Some(mut c) = connect_kv(&endpoint, &errors).await else { return };
             let key = format!("/load/{w}").into_bytes();
             let mut local = Vec::new();
             let mut i = 0u64;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 i += 1;
-                let got = c
-                    .range(pb::RangeRequest { key: key.clone(), ..Default::default() })
-                    .await
-                    .unwrap()
-                    .into_inner();
-                let rev = got.kvs.first().map_or(0, |kv| kv.mod_revision);
+                let get = pb::RangeRequest { key: key.clone(), ..Default::default() };
+                let Some(got) = retry(&errors, || {
+                    let mut c = c.clone();
+                    let get = get.clone();
+                    async move { c.range(get).await }
+                })
+                .await
+                else {
+                    continue;
+                };
+                let rev = got.into_inner().kvs.first().map_or(0, |kv| kv.mod_revision);
                 let (t, at) = (Instant::now(), std::time::SystemTime::now());
-                c.txn(pb::TxnRequest {
+                let txn = pb::TxnRequest {
                     compare: vec![pb::Compare {
                         result: CompareResult::Equal as i32,
                         target: CompareTarget::Mod as i32,
@@ -108,18 +192,28 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
                         })),
                     }],
                     failure: vec![],
+                };
+                let wrote = retry(&errors, || {
+                    let mut c = c.clone();
+                    let txn = txn.clone();
+                    async move { c.txn(txn).await }
                 })
-                .await
-                .unwrap();
-                local.push((at, t.elapsed().as_micros() as u64));
+                .await;
+                if wrote.is_some() {
+                    local.push((at, t.elapsed().as_micros() as u64));
+                }
                 if i % 5 == 0 {
-                    c.range(pb::RangeRequest {
+                    let list = pb::RangeRequest {
                         key: b"/load/".to_vec(),
                         range_end: b"/load0".to_vec(),
                         ..Default::default()
+                    };
+                    retry(&errors, || {
+                        let mut c = c.clone();
+                        let list = list.clone();
+                        async move { c.range(list).await }
                     })
-                    .await
-                    .unwrap();
+                    .await;
                 }
             }
             writes.lock().await.extend(local);
@@ -180,6 +274,9 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
     }
     println!("  linearizable range: {}", summary(lin));
     println!("  serializable range: {}", summary(ser));
+    if let Some(l) = errors.line() {
+        println!("{l}");
+    }
     Ok(())
 }
 
@@ -206,23 +303,68 @@ async fn keepalive(args: &Args) -> anyhow::Result<()> {
     let per = args.total / args.conns;
     let mut handles = Vec::new();
     let start = Instant::now();
+    let errors: Arc<Errors> = Arc::default();
     for _ in 0..args.conns {
-        let endpoint = args.endpoint.clone();
+        let (endpoint, errors) = (args.endpoint.clone(), errors.clone());
         handles.push(tokio::spawn(async move {
-            let mut lc = LeaseClient::connect(endpoint).await?;
-            let id = lc.lease_grant(pb::LeaseGrantRequest { ttl: 60, id: 0 }).await?.into_inner().id;
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let mut answers =
-                lc.lease_keep_alive(tokio_stream::wrappers::ReceiverStream::new(rx)).await?.into_inner();
             let mut local = Vec::with_capacity(per);
-            for _ in 0..per {
-                let t = Instant::now();
-                tx.send(pb::LeaseKeepAliveRequest { id }).await?;
-                let a = tokio_stream::StreamExt::next(&mut answers)
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("keep-alive stream ended"))??;
-                anyhow::ensure!(a.ttl > 0, "lease {id} answered TTL {}", a.ttl);
-                local.push(t.elapsed().as_micros() as u64);
+            let mut tries = 0;
+            let lc = loop {
+                match LeaseClient::connect(endpoint.clone()).await {
+                    Ok(c) => break c,
+                    Err(e) => {
+                        errors.add("connect");
+                        tries += 1;
+                        if tries >= RETRIES {
+                            return Err(anyhow::anyhow!("connect: {e}"));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+            };
+            let Some(granted) = retry(&errors, || {
+                let mut lc = lc.clone();
+                async move { lc.lease_grant(pb::LeaseGrantRequest { ttl: 60, id: 0 }).await }
+            })
+            .await
+            else {
+                return anyhow::Ok(local);
+            };
+            let id = granted.into_inner().id;
+            // A broken stream (a member restarting) is opened again.
+            let mut opens = 0;
+            while local.len() < per && opens < RETRIES {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let mut lc2 = lc.clone();
+                let mut answers = match lc2.lease_keep_alive(tokio_stream::wrappers::ReceiverStream::new(rx)).await {
+                    Ok(a) => a.into_inner(),
+                    Err(s) => {
+                        errors.add(&format!("{:?}", s.code()));
+                        opens += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * opens as u64)).await;
+                        continue;
+                    }
+                };
+                while local.len() < per {
+                    let t = Instant::now();
+                    if tx.send(pb::LeaseKeepAliveRequest { id }).await.is_err() {
+                        break;
+                    }
+                    match tokio_stream::StreamExt::next(&mut answers).await {
+                        Some(Ok(a)) if a.ttl > 0 => local.push(t.elapsed().as_micros() as u64),
+                        Some(Ok(a)) => anyhow::bail!("lease {id} answered TTL {}", a.ttl),
+                        Some(Err(s)) => {
+                            errors.add(&format!("{:?}", s.code()));
+                            opens += 1;
+                            break;
+                        }
+                        None => {
+                            errors.add("stream ended");
+                            opens += 1;
+                            break;
+                        }
+                    }
+                }
             }
             anyhow::Ok(local)
         }));
@@ -235,6 +377,9 @@ async fn keepalive(args: &Args) -> anyhow::Result<()> {
     println!("mode=keepalive conns={} ops={}", args.conns, lat.len());
     println!("  throughput: {:.0} ops/sec", lat.len() as f64 / elapsed.as_secs_f64());
     println!("  latency: {}", summary(lat));
+    if let Some(e) = errors.line() {
+        println!("{e}");
+    }
     Ok(())
 }
 
@@ -346,32 +491,40 @@ async fn main() -> anyhow::Result<()> {
     let lat: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::with_capacity(args.total)));
     let start = Instant::now();
 
+    if !matches!(args.mode.as_str(), "put" | "get-lin" | "get-ser") {
+        anyhow::bail!("unknown mode {}", args.mode);
+    }
+    let errors: Arc<Errors> = Arc::default();
     let mut handles = Vec::new();
     for w in 0..args.conns {
-        let (args, value, lat) = (args.clone(), value.clone(), lat.clone());
+        let (args, value, lat, errors) = (args.clone(), value.clone(), lat.clone(), errors.clone());
         handles.push(tokio::spawn(async move {
-            let mut c = KvClient::connect(args.endpoint.clone()).await.unwrap();
+            let Some(c) = connect_kv(&args.endpoint, &errors).await else { return };
             let mut local = Vec::with_capacity(per);
             for i in 0..per {
                 let key = format!("/bench/{}", (w * per + i) % args.keys).into_bytes();
                 let t = Instant::now();
-                match args.mode.as_str() {
+                let done = match args.mode.as_str() {
                     "put" => {
-                        c.put(pb::PutRequest { key, value: value.clone(), ..Default::default() })
-                            .await
-                            .unwrap();
+                        let req = pb::PutRequest { key, value: value.clone(), ..Default::default() };
+                        retry(&errors, || {
+                            let (mut c, req) = (c.clone(), req.clone());
+                            async move { c.put(req).await.map(|_| ()) }
+                        })
+                        .await
                     }
-                    "get-lin" => {
-                        c.range(pb::RangeRequest { key, ..Default::default() }).await.unwrap();
+                    mode => {
+                        let req = pb::RangeRequest { key, serializable: mode == "get-ser", ..Default::default() };
+                        retry(&errors, || {
+                            let (mut c, req) = (c.clone(), req.clone());
+                            async move { c.range(req).await.map(|_| ()) }
+                        })
+                        .await
                     }
-                    "get-ser" => {
-                        c.range(pb::RangeRequest { key, serializable: true, ..Default::default() })
-                            .await
-                            .unwrap();
-                    }
-                    other => panic!("unknown mode {other}"),
+                };
+                if done.is_some() {
+                    local.push(t.elapsed().as_micros() as u64);
                 }
-                local.push(t.elapsed().as_micros() as u64);
             }
             lat.lock().await.extend(local);
         }));
@@ -384,6 +537,9 @@ async fn main() -> anyhow::Result<()> {
     let mut l = Arc::try_unwrap(lat).unwrap().into_inner();
     l.sort_unstable();
     let n = l.len();
+    if n == 0 {
+        anyhow::bail!("no operation succeeded{}", errors.line().map(|e| format!(":\n{e}")).unwrap_or_default());
+    }
     let pct = |p: f64| l[((n as f64 * p) as usize).min(n - 1)] as f64 / 1000.0;
     println!(
         "mode={} conns={} ops={} val={}B",
@@ -397,5 +553,44 @@ async fn main() -> anyhow::Result<()> {
         pct(0.99),
         l[n - 1] as f64 / 1000.0
     );
+    if let Some(e) = errors.line() {
+        println!("{e}");
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_counts_transient_errors_and_goes_on() {
+        let errors = Errors::default();
+        let mut n = 0;
+        let got = retry(&errors, || {
+            n += 1;
+            let k = n;
+            async move {
+                if k <= 2 {
+                    Err(tonic::Status::unavailable("forwarded write to leader 3: has to forward"))
+                } else {
+                    Ok(k)
+                }
+            }
+        })
+        .await;
+        assert_eq!(got, Some(3));
+        assert_eq!(errors.line().unwrap(), "  errors: 2 attempts failed (Unavailable 2); 0 operations gave up");
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_on_a_lasting_or_final_error() {
+        let errors = Errors::default();
+        let got: Option<()> = retry(&errors, || async { Err(tonic::Status::permission_denied("no")) }).await;
+        assert_eq!(got, None, "not transient: no retry");
+        let got: Option<()> = retry(&errors, || async { Err(tonic::Status::unavailable("down")) }).await;
+        assert_eq!(got, None);
+        let line = errors.line().unwrap();
+        assert_eq!(line, format!("  errors: {} attempts failed (PermissionDenied 1, Unavailable {RETRIES}); 2 operations gave up", RETRIES + 1));
+    }
 }
