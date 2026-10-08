@@ -6,6 +6,12 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-08 — the test container on a test machine (#36)
+- **docs:** 02-testing: the first run through stormcentral's pipeline on
+  a test machine (3070765391, pvetest2) passed; the node checks skip
+  while the client port is mutual TLS and the Job has no client pair
+  (stormcentral#555).
+
 ### 2026-10-08 — how the golden ships (#81)
 - **docs:** 03-deploy § How fastetcd reaches a StormCOS node, the README
   and the CLAUDE.md pillar said the golden is built from `/root/fastetcd`

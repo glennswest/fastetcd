@@ -118,7 +118,12 @@ as `/test short|medium|long` (`stormcentral test run fastetcd short`).
 NOSPACE, snapshot restore, SIGKILL, leader loss) on members it starts
 itself; `long` runs night waves with a trend. `test/README.md` lists every
 check. `sc-build tests/test_container.sh` runs all three in a build job,
-against a local member standing in for the node.
+against a local member standing in for the node. On a test machine
+(`stormcentral test run fastetcd short --tag pvetest2 --commit <sha>`;
+blades only outside their 19:00–06:00 Chicago power-off window), run
+3070765391 passed on 2026-10-08: `commit-binary-serves` ran, and the five
+node checks skip, saying why, while the node's client port is mutual TLS
+(stormcos#146) and the Job gets no client pair (stormcentral#555).
 
 Against upstream etcd (#90): `tests/bench/compare.sh <etcd-version>`
 downloads the etcd release (sha256-checked), builds etcd's own

@@ -1849,7 +1849,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       caught up 2/2 (~47 s); replication bound disabled: never.
     - Not verified: the issue's slow-VM bench (benchslow is gone).
 
-50. **Test containers per the stormcos test standard (#36, P1).** One
+50. **Test containers per the stormcos test standard (#36, P1) — done.** One
     image from `test/Containerfile` (`FROM scratch`: the static
     `fastetcd-test` as `/test`, and the commit's static `fastetcd` as
     `/fastetcd`), built by `test/build.sh` on the build box (musl), run by
@@ -1882,8 +1882,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] sc-build: build.sh stages static binaries; run `medium` and a
       short-against-a-local-member in the job (`tests/test_container.sh`:
       short 7/7, medium 7/7, long 2 waves + trend, at c2ef8cb).
-    - [ ] `stormcentral test run fastetcd short` on a test machine: run
-      61d20de68e queued on pvetest1 (2026-10-07; fleet backed up).
+    - [x] `stormcentral test run fastetcd short` on a test machine: run
+      3070765391 on pvetest2 (2026-10-08, a5d8834) passed through the
+      whole pipeline (build VM, test/build.sh, the machine's registry, a
+      Job): `commit-binary-serves` pass; the five node checks skip, the
+      node's client port being mutual TLS with no client pair given to
+      the Job (stormcentral#555).
     - [x] Docs (02-testing), changelog.
     - Found: online defragment broken after any non-durable commit
       (#119, fixed in 1.17.1).
