@@ -6,6 +6,19 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-08 — how the golden ships (#81)
+- **docs:** 03-deploy § How fastetcd reaches a StormCOS node, the README
+  and the CLAUDE.md pillar said the golden is built from `/root/fastetcd`
+  on dev at whatever `main` is. It is a special golden staged by
+  stormcentral (`stormcentral component stage fastetcd`, stormcos's
+  `build-goldens.sh` in stage mode, on a build VM, from fetched trees at
+  `main`'s tip; no `/root`). Rewritten from stormcos 27add14: the stormd
+  argv (mutual TLS on 2379, metrics on 0.0.0.0:2381, `FASTETCD_DATA_DIR`),
+  the TCP liveness probe, the `fastetcd-data` (1G) and `fastetcd-backup`
+  (2G) volumes with `FASTETCD_BACKUP_DIR`, the 30-kube start on
+  sno/master. dev.g8.lo is retired: sc-build runs on build VMs (README,
+  02, 03).
+
 ## [v1.25.1] — 2026-10-08
 
 ### Fixed

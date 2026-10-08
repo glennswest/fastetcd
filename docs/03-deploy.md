@@ -5,44 +5,61 @@ runs see `README.md`.
 
 ## How fastetcd reaches a StormCOS node
 
-On the StormCOS platform fastetcd is a **golden**, built from source by
-stormcos's `deploy/build-goldens.sh`. That script and its document,
-[stormcos `docs/goldens.md`](https://github.com/glennswest/stormcos/blob/main/docs/goldens.md),
-are the one authority for the process. What it does with this repo
-(section "control plane" of the script, as of 2026-09-29):
+On the StormCOS platform fastetcd is a **special golden**, made by
+stormcos's `deploy/build-goldens.sh` in **stage mode**, which stormcentral
+drives. That script and
+[stormcos `docs/goldens.md`](https://github.com/glennswest/stormcos/blob/main/docs/goldens.md)
+are the authority; as of stormcos 27add14 (2026-10-07):
 
-- **Source.** The checkout on the build box (`/root/fastetcd` on
-  `dev.g8.lo`, or `FASTETCD_SRC`), fast-forwarded to `origin/main`. The
-  golden is built from whatever `main` is at that moment. Nothing is
-  downloaded from a GitHub release or a registry (owner, 2026-09-28).
+- **Built by** `stormcentral component stage fastetcd --url
+  http://stormcentral.g8.lo`, the one way to make a fastetcd golden.
+  fastetcd has no stormcentral component entry (`component build
+  fastetcd` is refused: "no component fastetcd").
+- **From the pushed commit.** The stage runs on a build VM of its own,
+  fetches stormcos and fastetcd from GitHub at `main`'s tip at that
+  moment (the stage takes no commit argument) and runs the script with
+  `ONLY=fastetcd`. Stage mode reads only fetched trees, never a checkout
+  in `/root`, and nothing is downloaded from a release or a registry
+  (owner, 2026-09-28). The golden's manifest records the commit
+  (`fastetcd@<sha>`), and the stage files, or adds to, the stormcos
+  release request.
 - **Compile.** `cargo build --release --locked --target
-  x86_64-unknown-linux-musl`, and it must produce `fastetcd`,
-  `fastetcd-ctl` and `fastetcd-migrate`. fastetcd is a *required*
-  component: if it does not build, the image build stops.
-- **Golden `fastetcd`** (64M, a stormd base): the three binaries in
-  `/usr/bin`, run and restarted by stormd (its API on port 9081), with a
-  TCP liveness probe on 2379, as
-  `fastetcd --data-dir /data/fastetcd --listen-client-urls
-  http://0.0.0.0:2379 --listen-peer-urls http://0.0.0.0:2380
-  --advertise-client-urls http://${NODE_IP}:2379
-  --initial-advertise-peer-urls http://${NODE_IP}:2380`.
-- **Golden `fastetcd-data`** (1G, blank): the `/data/fastetcd` volume.
-  1G is headroom on top of fastetcd's own bounded growth (see
-  [Disk space](#disk-space)).
+  x86_64-unknown-linux-musl`, producing `fastetcd`, `fastetcd-ctl` and
+  `fastetcd-migrate` (all three required).
+- **Golden `fastetcd`** (64M, a stormdbase golden): the three binaries in
+  `/usr/bin`; PID 1 is stormd (API on 9081), which runs and restarts
+  fastetcd as
+  `fastetcd --data-dir /data/fastetcd --listen-client-urls https://0.0.0.0:2379
+  --listen-peer-urls http://0.0.0.0:2380
+  --advertise-client-urls https://${NODE_IP}:2379
+  --initial-advertise-peer-urls http://${NODE_IP}:2380
+  --cert-file /etc/stormcert/fastetcd.crt --key-file /etc/stormcert/fastetcd.key
+  --trusted-ca-file /etc/stormcert/ca.crt --client-cert-auth
+  --listen-metrics-url 0.0.0.0:2381`.
+  The client port is mutual TLS (a pair from the node CA, read-only at
+  `/etc/stormcert`); the peer port is plaintext (one member per node);
+  `/metrics` is readable off the node on 2381. The data dir may come from
+  `FASTETCD_DATA_DIR` (stormcluster sets it for a node that joins or is
+  promoted). Liveness is a TCP probe on 2379 (first after 5 s, restart
+  after 3 misses): an HTTP probe cannot present a client certificate.
+- **Volumes:** `/data/fastetcd` from the blank golden `fastetcd-data`
+  (1G, headroom on top of fastetcd's own bounded growth, see
+  [Disk space](#disk-space)); `/data/backup` from `fastetcd-backup` (2G),
+  where `FASTETCD_BACKUP_DIR` points the periodic backups (#37); logs.
+- **Started** by stormpump's `30-kube`, first, before the apiserver, on
+  nodes whose role is sno or master.
+- **Reaches nodes** in a stormcos release composed by the master; the
+  data directory converts itself in place on a new version's first start.
 
 What that asks of this repo:
 
-- **`main` is what ships.** A change is in the next image as soon as it
-  is pushed to `main`. A tag marks a version; it is not what the image
-  build picks.
+- **What is pushed to `main` is what a stage builds.** Stage once the
+  release commit is pushed, and push nothing in between: a stage takes
+  `main`'s tip, not the tag.
 - **`Cargo.lock` must be committed and current.** `--locked` fails
-  rather than update it, so a dependency added without its lock entry
-  breaks the golden (as #52 did). Check with `sc-build 'cargo build
-  --locked --workspace'`.
+  rather than update it (as in #52). `sc-build 'cargo build --locked'`
+  checks it.
 - **Every binary must build for musl** (no glibc-only dependency).
-- fastetcd has no stormcentral component entry, so `stormcentral
-  component build fastetcd` is refused. Its golden comes from the stormcos
-  image build.
 
 ## Container images
 
@@ -61,8 +78,9 @@ docker run --rm -p 2379:2379 -p 2380:2380 \
 ```
 
 GitHub Actions is disabled for this repo (a repo-level setting, off
-since 2026-05-24). Builds and tests run on `dev.g8.lo` through
-`sc-build`. Packages are built there by hand (below).
+since 2026-05-24). Builds and tests run through `sc-build`, each job on a
+fresh build VM (dev.g8.lo, which used to run them, was retired on
+2026-10-07). Packages are built by hand (below).
 
 ## Helm chart
 

@@ -726,8 +726,9 @@ Version locations (keep in sync):
   **Metrics port**: hyper, `/metrics`.
 - **Async runtime**: `tokio`.
 - **Logging/tracing**: `tracing` + `tracing-subscriber`, `RUST_LOG`.
-- **Ships as**: a stormd golden built by stormcos from `main`
-  (`docs/03-deploy.md`); no stormcentral component entry.
+- **Ships as**: a special golden, `stormcentral component stage
+  fastetcd` (stormcos `build-goldens.sh` in stage mode, at main's tip;
+  `docs/03-deploy.md`); no stormcentral component entry.
 - **Docs**: `docs/01-configuration.md` is the flag reference, generated
   by hand from the binaries' `--help`. Keep it in step when adding a
   flag.
@@ -2258,3 +2259,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       first, and the script checks the order. Old versions' own #105 bug
       (a token not yet applied on another member: own text, no
       re-authentication) means the script sets up through one member.
+
+67. **Docs say how the golden really ships (#81, P3).** 03-deploy, the
+    README and the CLAUDE.md pillar said the golden is built from
+    `/root/fastetcd` on dev at whatever `main` is. Truth (stormcos
+    `deploy/build-goldens.sh` and `docs/goldens.md` at 27add14, and every
+    stage run this session): a special golden staged by stormcentral,
+    `stormcentral component stage fastetcd`, on a build VM of its own,
+    from fetched trees at main's tip at that moment (no `/root`; the
+    stage takes no commit); stormd config: mutual TLS on 2379, metrics
+    on 0.0.0.0:2381, backups to /data/backup (FASTETCD_BACKUP_DIR), TCP
+    liveness; blank goldens fastetcd-data 1G and fastetcd-backup 2G;
+    started first in 30-kube on sno/master. Also: dev.g8.lo is retired
+    (2026-10-07): sc-build runs on build VMs (README, 02, 03).
+    Work items:
+    - [ ] 03, README, 02, CLAUDE.md pillar; changelog; close #81.

@@ -6,9 +6,10 @@ cheaper-to-run and faster-to-fail than the next outer ring.
 ## How tests run
 
 GitHub Actions is off for this repo. On the StormCOS setup nothing is
-built on the session VM: every push is built and tested on `dev.g8.lo`
-with `sc-build` (`cargo build && cargo test`, or any command:
-`sc-build 'cargo test -p fastetcd-server --test gateway'`). Each job gets
+built on the session VM: every push is built and tested with `sc-build`,
+each job on a fresh build VM (dev.g8.lo until its retirement on
+2026-10-07): `cargo build && cargo test`, or any command
+(`sc-build 'cargo test -p fastetcd-server --test gateway'`). Each job gets
 its own scratch drive, deleted afterwards. The golden build compiles with
 `--locked`, so `sc-build 'cargo build --locked --workspace'` checks the
 lock too.

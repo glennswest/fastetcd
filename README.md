@@ -36,7 +36,7 @@ etcd are listed under [Compatibility boundary](#compatibility-boundary).
 ```
 cargo run --release -p fastetcd-server --bin fastetcd
 # (on the StormCOS build setup: never build on the session VM; push and
-#  run `sc-build`, which builds and tests on dev.g8.lo)
+#  run `sc-build`, which builds and tests on a fresh build VM)
 # in another terminal:
 etcdctl --endpoints=127.0.0.1:2379 put hello world
 etcdctl --endpoints=127.0.0.1:2379 get hello
@@ -214,7 +214,7 @@ fastetcd-migrate --from snap.db --to data-dir --preserve-revisions
 including 3-member clusters over the real gRPC transport and the
 third-party `etcd-client` crate (`crates/server/tests/etcd_client_compat.rs`).
 GitHub Actions is off for this repo: on the StormCOS setup every push is
-built and tested with `sc-build` on `dev.g8.lo`. See
+built and tested with `sc-build`, on a fresh build VM per job. See
 `docs/02-testing.md`.
 
 ## Backups and a corrupt data file
@@ -297,8 +297,9 @@ Metrics: [docs/03-deploy.md § Metrics](docs/03-deploy.md#metrics).
 
 See `docs/03-deploy.md` for the full guide. Quick paths:
 
-- **StormCOS**: fastetcd ships as a golden that stormcos builds from
-  `main`; see [docs/03-deploy.md § How fastetcd reaches a StormCOS
+- **StormCOS**: fastetcd ships as a special golden that stormcentral
+  stages at the pushed `main` (`stormcentral component stage fastetcd`,
+  stormcos's `build-goldens.sh` in stage mode); see [docs/03-deploy.md § How fastetcd reaches a StormCOS
   node](docs/03-deploy.md#how-fastetcd-reaches-a-stormcos-node).
 - **Container**: no image is published (GHCR is not used); `docker build
   -t fastetcd:dev .` and run or push that.
