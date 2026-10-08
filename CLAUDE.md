@@ -10,7 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.27.0`** — A stuck WAL fdatasync or checkpoint names itself (#138):
+**`1.27.1`** — fastetcd-bench retries transient RPC errors and counts
+them by code instead of panicking (#104); `CHURN=1 tests/read_latency.sh`.
+
+Previous: **`1.27.0`** — A stuck WAL fdatasync or checkpoint names itself (#138):
 `fastetcd_wal_fsync_inflight_seconds`, `fastetcd_checkpoint_inflight_seconds`,
 and a watchdog (`spawn_stall_watchdog`, target `fastetcd::stall`) warning
 every 10 s once one has run 10 s.
@@ -2332,7 +2335,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] The cause: waits on stormblock#337 (a flush outstanding on
       server3's volume?) and a look at server3 when it is on again.
 
-70. **fastetcd-bench counts failed RPCs instead of panicking (#104, P3).**
+70. **fastetcd-bench counts failed RPCs instead of panicking (#104, P3) — done, shipped in v1.27.1.**
     Every RPC was `unwrap()`ed, so a leader change in a 3-member run
     (`Unavailable` on a forwarded write) panicked the bench with no
     numbers (#88), and #93's 1000-connection runs died on "transport
@@ -2343,6 +2346,6 @@ Tracked live in the Claude task system. Snapshot of the order:
     mode keeps stopping at the first failure (by design).
     `CHURN=1 tests/read_latency.sh` restarts the leader mid-run.
     Work items:
-    - [ ] bench retry + counts (put/get, read-under-load, keepalive);
+    - [x] bench retry + counts (put/get, read-under-load, keepalive);
       unit test; CHURN in read_latency.sh; run it on 3 members.
-    - [ ] Docs (01 bench, 02), changelog; release; close #104.
+    - [x] Docs (01 bench, 02), changelog; release 1.27.1; close #104.

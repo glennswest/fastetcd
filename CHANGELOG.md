@@ -6,6 +6,28 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.27.1] — 2026-10-08
+
+### Fixed
+- `fastetcd-bench` no longer panics on the first failed RPC (#104): every
+  RPC was `unwrap()`ed, so a leader change in a 3-member run, or a broken
+  connection at 1000 clients, ended the run with no numbers. Errors are
+  counted by gRPC code; transient ones (`Unavailable`,
+  `DeadlineExceeded`, `Aborted`, `Unknown` "transport error") are retried
+  with a growing backoff (50 ms × try, up to 8); connects too; an
+  operation that never succeeds counts as given up. The summary prints
+  `errors: N attempts failed (…); M operations gave up` (put / get,
+  read-under-load, keepalive; a broken keep-alive stream is opened again).
+
+### Added
+- `CHURN=1` for `tests/read_latency.sh`: the leader is restarted
+  `CHURN_AFTER` seconds into each bench. Two 3-member put runs with it:
+  416–1 547 puts/s, 320–448 `Unavailable` and 64 `Unknown` attempts
+  retried, 0 given up.
+
+### Documentation
+- 01 (the bench's errors), 02 (`CHURN`).
+
 ## [v1.27.0] — 2026-10-08
 
 ### Added

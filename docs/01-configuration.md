@@ -188,4 +188,10 @@ Range every fifth loop) for `--duration-secs 20` while a probe makes
 prints write rate and latency and both probes' percentiles. `keepalive`
 (#92): `--conns` clients, each with its own lease (TTL 60 s) and
 keep-alive stream, `--total` keep-alives in all, each awaited; prints
-throughput and latency (etcd's `benchmark lease-keepalive`).
+throughput and latency (etcd's `benchmark lease-keepalive`). A failed RPC
+does not stop the bench (#104): transient errors (`Unavailable` during a
+leader change, a broken connection) are retried with a growing backoff,
+up to 8 tries, and the summary adds `errors: N attempts failed (by
+code); M operations gave up`; latency counts the successful operations,
+retries included. `durability-write` still stops at the first failure,
+which is its point.

@@ -93,6 +93,10 @@ disk. The other scripts: `tests/clientv3_reauth.sh` (etcd's Go client
 across a member restart, #105), `tests/chart_args.sh`,
 `tests/migrate_e2e.sh`.
 
+`CHURN=1 MEMBERS=3 tests/read_latency.sh` restarts the leader a few
+seconds into each bench (`CHURN_AFTER`, 5), so the numbers include a
+leader change; the bench counts and retries the failed RPCs (#104).
+
 Read latency under write load, on a real disk (#71):
 `sc-build 'tests/read_latency.sh v1.8.0'` runs `fastetcd-bench --mode
 read-under-load` (40 clients looping GET + CAS Txn, a prefix Range every
