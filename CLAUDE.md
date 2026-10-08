@@ -2317,7 +2317,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       working, an idle one is refused with etcd's error, a new login works).
     - [x] Docs (01, 03 auth), changelog; release 1.26.0; close #46.
 
-69. **A stall names the stuck operation (#138, P1).** server3 wrote
+69. **A stall names the stuck operation (#138, P1) — done, shipped in v1.27.0; cause stormblock#334.** server3 wrote
     nothing for 70+ min; which operation hung could not be told. From the
     metrics captured during it: write-behind layers 0 and
     `checkpoint_durable_applied_index` 38495 vs applied 38500, so the
@@ -2339,8 +2339,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       `set_sync_delay` and a slow checkpoint each show in flight and are
       named; `a_stuck_fsync_or_checkpoint_says_which_it_is`).
     - [x] Docs (03 disk stalls, metrics), changelog; release 1.27.0.
-    - [ ] The cause: waits on stormblock#337 (a flush outstanding on
-      server3's volume?) and a look at server3 when it is on again.
+    - [x] The cause (stormblock#337, answered 2026-10-08): stormblock#334.
+      server3 ran stormblock 11.91, whose stall watchdog dumped each ublk
+      device's runtime under mint/clone load and lost a wake there, so
+      that one device's requests (fastetcd's FLUSH) never completed while
+      other volumes and health stayed fine. Fixed since
+      golden-stormblock-65b6578787be; its health now lists `ublk_stuck`
+      (golden-stormblock-5739be2a34ac). server3 was powered off and could
+      not be read again. Docs (03 disk stalls) point at `ublk_stuck`.
 
 70. **fastetcd-bench counts failed RPCs instead of panicking (#104, P3) — done, shipped in v1.27.1.**
     Every RPC was `unwrap()`ed, so a leader change in a 3-member run

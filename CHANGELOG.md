@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-10-08
+- **docs:** disk stalls (03-deploy): a fsync stuck on a stormblock ublk
+  volume shows in the engine's `GET /api/v1/health` `ublk_stuck`; #138's
+  stall on server3 was stormblock#334 (fixed in stormblock) (#138)
+
 ### 2026-10-06
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->

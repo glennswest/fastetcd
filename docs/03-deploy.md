@@ -492,7 +492,12 @@ file (through applied index I) has not returned for S s"), and
 `fastetcd_wal_fsync_inflight_seconds` / `fastetcd_checkpoint_inflight_seconds`
 show it on `/metrics`. Either one stuck for minutes is the device or the
 filesystem below fastetcd (on server3, #138, a checkpoint's fsync never
-returned and the WAL's stopped with it).
+returned and the WAL's stopped with it). On a StormCOS node whose volume
+is a stormblock ublk device, the engine's open `GET /api/v1/health`
+lists `ublk_stuck` (every request a device has held for 30 s or more,
+with its op): a `flush` there is fastetcd's fsync not answered by the
+storage (server3's was stormblock#334, a lost wake on the device's
+runtime, fixed since golden-stormblock-65b6578787be).
 
 Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_wal_bytes_appended_total`, `fastetcd_wal_segments`,
