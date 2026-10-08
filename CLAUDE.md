@@ -2360,3 +2360,21 @@ Tracked live in the Claude task system. Snapshot of the order:
     warnings"` (sc-build, build VM). The check is documented for releases
     (02-testing), not made the default: a lint a newer compiler adds must
     not stop the golden build.
+
+72. **`--log-level` and `--max-request-bytes` do what etcd's do (#54, P3).**
+    Both were accepted and ignored. etcd release-3.5: `--log-level`
+    debug|info|warn|error|panic|fatal; `--max-request-bytes` refuses a
+    proposal larger than it (`v3_server.go`: `InvalidArgument`
+    `etcdserver: request is too large`) and caps gRPC receives at it +
+    512 KiB (`grpcOverheadBytes`). Plan:
+    - logging set up after parsing: `RUST_LOG` wins; else `--log-level`
+      (panic/fatal → error); an unknown level refused.
+    - `--max-request-bytes` set: client-port gRPC decode limit = value +
+      512 KiB; `ServerState::propose` refuses an encoded entry larger
+      than the value with etcd's error (gateway included).
+    - Unset: today's limits (tonic's 4 MiB decode, no proposal check).
+      Whether the default becomes etcd's 1.5 MiB (it could refuse writes
+      that work today) is asked on #54.
+    Work items:
+    - [ ] flags, logging, decode limit, proposal check; tests.
+    - [ ] Docs (01), changelog; release; ask the default.
