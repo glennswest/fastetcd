@@ -2301,3 +2301,26 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] server flag; gRPC test (a token used within the TTL keeps
       working, an idle one is refused with etcd's error, a new login works).
     - [x] Docs (01, 03 auth), changelog; release 1.26.0; close #46.
+
+69. **A stall names the stuck operation (#138, P1).** server3 wrote
+    nothing for 70+ min; which operation hung could not be told. From the
+    metrics captured during it: write-behind layers 0 and
+    `checkpoint_durable_applied_index` 38495 vs applied 38500, so the
+    checkpoint had flushed its layers into redb and was in its durable
+    commit, an fsync of the data file that never returned; the WAL's
+    fdatasync on the same filesystem stopped completing as well. Nothing
+    was over the write-behind budget, so no apply waited on fastetcd's
+    flush lock: the likely cause is below fastetcd (asked: stormblock#337).
+    Plan (fastetcd's part):
+    - `WalStats`: start time of the WAL fdatasync in flight and of the
+      checkpoint in flight (0 = none); gauges
+      `fastetcd_wal_fsync_inflight_seconds`,
+      `fastetcd_checkpoint_inflight_seconds`.
+    - A watchdog (with the checkpointer): while either has run >= 10 s,
+      WARN every 10 s naming it, how long, and the index/target, so the
+      next stall says which.
+    Work items:
+    - [ ] stats, watchdog, metrics; test (a WAL fdatasync held by
+      `set_sync_delay` shows in flight and is reported).
+    - [ ] Docs (03 disk stalls, metrics), changelog; release; then #138
+      stays open for the cause (stormblock#337) unless it is fastetcd's.
