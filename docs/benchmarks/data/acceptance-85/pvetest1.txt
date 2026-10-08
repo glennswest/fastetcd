@@ -1,0 +1,24 @@
+== pvetest1-r1 on 192.168.31.172 at 06:39:27Z, load 60 s
+idle  GET lease              n   200  p50     1.1 ms  p99     5.4 ms  max     5.5 ms
+load  GET lease              n 11050  p50     5.0 ms  p99    14.8 ms  max    48.4 ms
+load  renewal (PUT lease)    n 103459  p50    14.3 ms  p99    34.9 ms  max   104.3 ms
+load  renewals 1721/s by 40 clients
+fastetcd over 60 s: 17662 WAL fsyncs, mean 1.6 ms, 5.9 proposals per fsync; 536 checkpoints using 11.4 s; write-behind back-pressure 0
+fastetcd since start: max WAL fsync 0.086 s, max checkpoint commit 0.085 s, back-pressure 0
+fastetcd value cache over the load: 1279881 hits, 754 misses (99.94% hits)
+== pvetest1-r2 on 192.168.31.172 at 06:40:37Z, load 60 s
+idle  GET lease              n   200  p50     0.5 ms  p99     1.1 ms  max     4.3 ms
+load  GET lease              n  9050  p50     5.8 ms  p99    25.7 ms  max    99.8 ms
+load  renewal (PUT lease)    n 71397  p50    19.6 ms  p99    84.6 ms  max   229.5 ms
+load  renewals 1184/s by 40 clients
+fastetcd over 60 s: 11636 WAL fsyncs, mean 2.2 ms, 6.1 proposals per fsync; 191 checkpoints using 12.0 s; write-behind back-pressure 2
+fastetcd since start: max WAL fsync 0.179 s, max checkpoint commit 0.225 s, back-pressure 2
+fastetcd value cache over the load: 885791 hits, 426 misses (99.95% hits)
+== pvetest1-r3 on 192.168.31.172 at 06:41:43Z, load 60 s
+idle  GET lease              n   200  p50     1.0 ms  p99     3.6 ms  max     4.3 ms
+load  GET lease              n  9700  p50     5.4 ms  p99    28.9 ms  max   103.8 ms
+load  renewal (PUT lease)    n 74091  p50    18.4 ms  p99    91.5 ms  max   192.4 ms
+load  renewals 1229/s by 40 clients
+fastetcd over 60 s: 11592 WAL fsyncs, mean 1.9 ms, 6.4 proposals per fsync; 122 checkpoints using 12.0 s; write-behind back-pressure 29
+fastetcd since start: max WAL fsync 0.179 s, max checkpoint commit 0.225 s, back-pressure 31
+fastetcd value cache over the load: 916715 hits, 328 misses (99.96% hits)

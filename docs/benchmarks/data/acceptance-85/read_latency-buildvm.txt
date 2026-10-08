@@ -1,0 +1,24 @@
+== baseline v1.11.0 (fastetcd 1.11.0), 1 member(s)
+  writes: 545/s, n=12013 mean=58.06 p50=52.49 p99=141.09 max=205.08 ms
+  linearizable range: n=200 mean=2.30 p50=0.23 p99=16.22 max=30.20 ms
+  serializable range: n=200 mean=2.17 p50=0.19 p99=27.48 max=31.13 ms
+== this tree b064120 (fastetcd 1.29.0), 1 member(s)
+  writes: 1718/s, n=37860 mean=22.16 p50=14.52 p99=92.83 max=163.76 ms
+  linearizable range: n=200 mean=0.21 p50=0.16 p99=1.04 max=1.23 ms
+  serializable range: n=200 mean=0.18 p50=0.09 p99=2.37 max=6.40 ms
+== baseline v1.11.0 (fastetcd 1.11.0), 1 member(s)
+  writes: 627/s, n=13848 mean=50.52 p50=41.72 p99=126.60 max=163.40 ms
+  linearizable range: n=200 mean=2.08 p50=0.26 p99=13.02 max=13.58 ms
+  serializable range: n=200 mean=2.17 p50=0.25 p99=14.08 max=30.20 ms
+== this tree b064120 (fastetcd 1.29.0), 1 member(s)
+  writes: 2776/s, n=61096 mean=13.77 p50=9.64 p99=55.58 max=97.95 ms
+  linearizable range: n=200 mean=0.11 p50=0.08 p99=0.58 max=0.61 ms
+  serializable range: n=200 mean=0.18 p50=0.09 p99=1.24 max=5.70 ms
+== baseline v1.11.0 (fastetcd 1.11.0), 1 member(s)
+  writes: 744/s, n=16387 mean=42.28 p50=35.78 p99=117.90 max=180.07 ms
+  linearizable range: n=200 mean=1.88 p50=0.30 p99=14.53 max=14.80 ms
+  serializable range: n=200 mean=2.11 p50=0.28 p99=20.74 max=30.11 ms
+== this tree b064120 (fastetcd 1.29.0), 1 member(s)
+  writes: 2150/s, n=47939 mean=17.87 p50=10.51 p99=82.81 max=543.21 ms
+  linearizable range: n=200 mean=0.14 p50=0.09 p99=0.92 max=1.07 ms
+  serializable range: n=200 mean=0.16 p50=0.09 p99=1.11 max=3.41 ms
