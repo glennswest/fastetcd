@@ -483,7 +483,16 @@ durable past every entry in it.
 
 An fdatasync of the WAL that takes 1 s or more (etcd's threshold) is
 logged at WARN as `slow raft WAL fdatasync` with `took_ms`: a write
-stall at that time was the disk's.
+stall at that time was the disk's. One that has not returned at all is
+reported while it runs (since 1.27, #138): every 10 s once a WAL
+fdatasync or a checkpoint has been running for 10 s, a WARN under target
+`fastetcd::stall` names which ("a raft WAL fdatasync (N entries) has not
+returned for S s: every write waits on it", or "a checkpoint of the data
+file (through applied index I) has not returned for S s"), and
+`fastetcd_wal_fsync_inflight_seconds` / `fastetcd_checkpoint_inflight_seconds`
+show it on `/metrics`. Either one stuck for minutes is the device or the
+filesystem below fastetcd (on server3, #138, a checkpoint's fsync never
+returned and the WAL's stopped with it).
 
 Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_wal_bytes_appended_total`, `fastetcd_wal_segments`,
@@ -493,7 +502,10 @@ Metrics: `fastetcd_wal_fsyncs_total`, `fastetcd_wal_fsync_seconds_total`,
 `fastetcd_wal_fsync_max_seconds`, `fastetcd_checkpoint_max_seconds`,
 `fastetcd_checkpoint_commit_max_seconds`,
 `fastetcd_checkpoint_pace_seconds` (the least time before the next
-checkpoint, 4x the last one's duration); group commit (#95):
+checkpoint, 4x the last one's duration);
+`fastetcd_wal_fsync_inflight_seconds` and
+`fastetcd_checkpoint_inflight_seconds` (how long the one in flight has
+run, 0 when none: a stuck one climbs, #138); group commit (#95):
 `fastetcd_wal_entries_synced_total` and
 `fastetcd_wal_proposals_synced_total`, the raft entries and the client
 proposals in them made durable by the fsyncs; the write-behind layer:

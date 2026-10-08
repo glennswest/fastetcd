@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.26.0`** — Auth tokens expire `--auth-token-ttl` (300 s) after their
+**`1.27.0`** — A stuck WAL fdatasync or checkpoint names itself (#138):
+`fastetcd_wal_fsync_inflight_seconds`, `fastetcd_checkpoint_inflight_seconds`,
+and a watchdog (`spawn_stall_watchdog`, target `fastetcd::stall`) warning
+every 10 s once one has run 10 s.
+
+Previous: **`1.26.0`** — Auth tokens expire `--auth-token-ttl` (300 s) after their
 last use on a member, as etcd's simple tokens (#46; `AuthMemory`).
 
 Previous: **`1.25.1`** — `tests/rolling_upgrade.sh` (#65): real rolling upgrades
@@ -2320,7 +2325,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       WARN every 10 s naming it, how long, and the index/target, so the
       next stall says which.
     Work items:
-    - [ ] stats, watchdog, metrics; test (a WAL fdatasync held by
-      `set_sync_delay` shows in flight and is reported).
-    - [ ] Docs (03 disk stalls, metrics), changelog; release; then #138
-      stays open for the cause (stormblock#337) unless it is fastetcd's.
+    - [x] stats, watchdog, metrics; test (a WAL fdatasync held by
+      `set_sync_delay` and a slow checkpoint each show in flight and are
+      named; `a_stuck_fsync_or_checkpoint_says_which_it_is`).
+    - [x] Docs (03 disk stalls, metrics), changelog; release 1.27.0.
+    - [ ] The cause: waits on stormblock#337 (a flush outstanding on
+      server3's volume?) and a look at server3 when it is on again.

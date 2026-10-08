@@ -6,6 +6,22 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.27.0] — 2026-10-08
+
+### Added
+- On server3 fastetcd wrote nothing for 70+ minutes and nothing
+  said which operation had hung. Now a WAL fdatasync or a checkpoint that
+  has run for 10 s is reported every 10 s at WARN (target
+  `fastetcd::stall`), naming which and for how long, with the entries or
+  applied index, and `fastetcd_wal_fsync_inflight_seconds` /
+  `fastetcd_checkpoint_inflight_seconds` show it on `/metrics`. From the
+  metrics captured during the stall (write-behind layers empty, the
+  checkpoint's durable index 5 behind applied): a checkpoint's fsync of
+  the data file was the one that never returned.
+
+### Documentation
+- 03 (a stuck fsync, the metrics).
+
 ## [v1.26.0] — 2026-10-08
 
 ### Added
