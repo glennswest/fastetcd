@@ -2331,3 +2331,18 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (03 disk stalls, metrics), changelog; release 1.27.0.
     - [ ] The cause: waits on stormblock#337 (a flush outstanding on
       server3's volume?) and a look at server3 when it is on again.
+
+70. **fastetcd-bench counts failed RPCs instead of panicking (#104, P3).**
+    Every RPC was `unwrap()`ed, so a leader change in a 3-member run
+    (`Unavailable` on a forwarded write) panicked the bench with no
+    numbers (#88), and #93's 1000-connection runs died on "transport
+    error". Plan: errors counted by gRPC code; transient ones
+    (Unavailable, DeadlineExceeded, Unknown "transport error") retried
+    with a growing backoff, up to 8 tries; connects too; an op that never
+    succeeds is counted as failed; the summary prints both. Durability
+    mode keeps stopping at the first failure (by design).
+    `CHURN=1 tests/read_latency.sh` restarts the leader mid-run.
+    Work items:
+    - [ ] bench retry + counts (put/get, read-under-load, keepalive);
+      unit test; CHURN in read_latency.sh; run it on 3 members.
+    - [ ] Docs (01 bench, 02), changelog; release; close #104.
