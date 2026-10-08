@@ -132,14 +132,21 @@ Details: [05-backup-and-recovery](05-backup-and-recovery.md).
 
 ## Logging and accepted-but-ignored etcd flags
 
-Logging goes to stderr and is set by **`RUST_LOG`** (tracing
-`EnvFilter` syntax; default `info`), e.g. `RUST_LOG=debug` or
-`RUST_LOG=info,openraft=warn`.
+Logging goes to stdout. Its level is **`--log-level`** (`FASTETCD_LOG_LEVEL`
+/ `ETCD_LOG_LEVEL`; etcd's values `debug`, `info` (default), `warn`,
+`error`, and `panic`/`fatal`, which log errors; another value stops
+startup), unless **`RUST_LOG`** is set, which wins and takes tracing's
+`EnvFilter` syntax, e.g. `RUST_LOG=info,openraft=warn` (#54).
+
+**`--max-request-bytes`** (`FASTETCD_MAX_REQUEST_BYTES` /
+`ETCD_MAX_REQUEST_BYTES`), as etcd's: a write whose log entry is larger is
+refused with `InvalidArgument` `etcdserver: request is too large`, and the
+client port receives gRPC messages up to it plus 512 KiB. Unset, requests
+are limited only by the 4 MiB gRPC receive limit; etcd's default is 1.5
+MiB (#54).
 
 These are accepted so etcd command lines and config files start, and do
-nothing: `--log-level` (`ETCD_LOG_LEVEL`) and `--max-request-bytes`
-(`ETCD_MAX_REQUEST_BYTES`; gRPC keeps tonic's 4 MiB limit), see #54;
-`--log-outputs`, `--logger`, `--metrics`, `--enable-pprof`.
+nothing: `--log-outputs`, `--logger`, `--metrics`, `--enable-pprof`.
 
 ## Offline subcommands
 

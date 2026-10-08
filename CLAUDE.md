@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.27.2`** — Warning-free build (#78): the unused `RedbEngine` import
+**`1.28.0`** — `--log-level` and `--max-request-bytes` work as etcd's
+(#54); unset `--max-request-bytes` keeps the 4 MiB limit (default asked
+on #54).
+
+Previous: **`1.27.2`** — Warning-free build (#78): the unused `RedbEngine` import
 and a needless `mut` gone; `RUSTFLAGS="-D warnings"` check in 02-testing.
 
 Previous: **`1.27.1`** — fastetcd-bench retries transient RPC errors and counts
@@ -2376,5 +2380,6 @@ Tracked live in the Claude task system. Snapshot of the order:
       Whether the default becomes etcd's 1.5 MiB (it could refuse writes
       that work today) is asked on #54.
     Work items:
-    - [ ] flags, logging, decode limit, proposal check; tests.
-    - [ ] Docs (01), changelog; release; ask the default.
+    - [x] flags, logging, decode limit, proposal check; tests
+      (`compat_flags.rs` on the binary; parse tests).
+    - [x] Docs (01), changelog; release 1.28.0; ask the default.

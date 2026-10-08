@@ -6,6 +6,23 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.28.0] — 2026-10-08
+
+### Added
+- `--log-level` and `--max-request-bytes` do what etcd's do (#54); both
+  were accepted and ignored. `--log-level` (`ETCD_LOG_LEVEL`): debug,
+  info, warn, error, panic / fatal (logged as error); an unknown value
+  stops startup; `RUST_LOG`, when set, still wins (logging is now set up
+  after the flags are parsed). `--max-request-bytes`
+  (`ETCD_MAX_REQUEST_BYTES`): a write whose log entry is larger is refused
+  with `InvalidArgument` `etcdserver: request is too large` (gRPC and the
+  v3 gateway), and the client port's gRPC receive limit is it + 512 KiB,
+  as etcd's (`grpcOverheadBytes`). Unset: as before (the 4 MiB receive
+  limit, no proposal check).
+
+### Documentation
+- 01 (logging goes to stdout, not stderr; the two flags), README.
+
 ## [v1.27.2] — 2026-10-08
 
 ### Fixed
