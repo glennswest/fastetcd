@@ -2389,3 +2389,22 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] flags, logging, decode limit, proposal check; tests
       (`compat_flags.rs` on the binary; parse tests).
     - [x] Docs (01), changelog; release 1.28.0; ask the default.
+
+73. **Watch fragments large responses when asked (#58, P3).** Every
+    `WatchResponse` went out whole with `fragment: false`; a create's
+    `fragment` was not read. etcd release-3.5 (`v3rpc/watch.go`
+    `sendFragments`): for a watcher created with `fragment`, a response
+    of `Size() >= maxRequestBytes` with 2+ events is split into
+    responses of whole events, each under the limit (a single event over
+    it goes alone), all but the last `fragment: true`; clientv3 joins
+    them. Plan:
+    - `Watcher.fragment`; one `send_events` used by live delivery and
+      history replay/resync; limit = `--max-request-bytes` if set, else
+      etcd's default 1.5 MiB (only splits; refuses nothing, so not the
+      #54 default question).
+    - Unfragmented watchers unchanged.
+    Work items:
+    - [ ] watch.rs; unit test of the split (sizes, flags, order, one big
+      event); gRPC test (etcd-client watch with fragment over a txn of
+      large values: fragments arrive, joined events complete).
+    - [ ] Docs (00 design), changelog; release; close #58.
