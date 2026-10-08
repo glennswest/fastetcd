@@ -2181,7 +2181,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (03 auth errors), changelog; release 1.23.1; close #105,
       #127.
 
-62. **Verify #85 on an X9 blade (#89, P2) — blocked by #138.** What can
+62. **Verify #85 on an X9 blade (#89, P2) — #138 resolved (stormblock#334); measure on a blade running the fixed stormblock.** What can
     be done from here: server3 is reachable (apiserver anonymous, fastetcd
     metrics on :2381); `tests/bench/blade_getlatency.py` runs rustkube's
     get-latency / lease-churn load against a node and reads the WAL /
