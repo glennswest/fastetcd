@@ -93,7 +93,8 @@ client. Run as v1.9.0 → tree (crosses 1.10's batching, 1.12's WAL
 migration and the later version gates), v1.24.1 → tree, and tree →
 v1.24.1 when a release changes anything that crosses the wire or the
 disk. The other scripts: `tests/clientv3_reauth.sh` (etcd's Go client
-across a member restart, #105), `tests/chart_args.sh`,
+across a member restart, #105), `tests/clientv3_fragment.sh` (etcd's Go
+client joins watch fragments, #58), `tests/chart_args.sh`,
 `tests/migrate_e2e.sh`.
 
 `CHURN=1 MEMBERS=3 tests/read_latency.sh` restarts the leader a few
