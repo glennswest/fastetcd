@@ -158,7 +158,7 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
         let (endpoint, value, stop, writes, errors) =
             (args.endpoint.clone(), value.clone(), stop.clone(), writes.clone(), errors.clone());
         handles.push(tokio::spawn(async move {
-            let Some(mut c) = connect_kv(&endpoint, &errors).await else { return };
+            let Some(c) = connect_kv(&endpoint, &errors).await else { return };
             let key = format!("/load/{w}").into_bytes();
             let mut local = Vec::new();
             let mut i = 0u64;
