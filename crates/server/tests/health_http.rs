@@ -39,14 +39,17 @@ async fn client_port_serves_http_health_alongside_grpc() {
     // Poll for the listener to come up — under a loaded test runner
     // (many test binaries running in parallel) a fixed short sleep
     // flakes.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // /health checks the member since #69: until it has a leader it
+    // answers 503 `RAFT NO LEADER`, so wait for a healthy answer.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let health = loop {
         match client.get(format!("{base}/health")).send().await {
-            Ok(resp) => break resp,
-            Err(e) if tokio::time::Instant::now() < deadline => {
+            Ok(resp) if resp.status().is_success() => break resp,
+            other if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                let _ = e;
+                let _ = other;
             }
+            Ok(resp) => panic!("/health never healthy: {} {}", resp.status(), resp.text().await.unwrap_or_default()),
             Err(e) => panic!("GET /health did not come up in time: {e}"),
         }
     };
