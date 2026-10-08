@@ -30,6 +30,17 @@ func main() {
 		fail("connect: %v", err)
 	}
 	defer cli.Close()
+	// The writer has no receive limit to prove; clientv3's send limit
+	// (2 MiB by default) must take the 3.2 MiB txn.
+	writer, err := clientv3.New(clientv3.Config{
+		Endpoints:          []string{ep},
+		DialTimeout:        5 * time.Second,
+		MaxCallSendMsgSize: 8 << 20,
+	})
+	if err != nil {
+		fail("connect: %v", err)
+	}
+	defer writer.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -42,7 +53,7 @@ func main() {
 	for i := range ops {
 		ops[i] = clientv3.OpPut(fmt.Sprintf("big/%d", i), value)
 	}
-	tr, err := cli.Txn(ctx).Then(ops...).Commit()
+	tr, err := writer.Txn(ctx).Then(ops...).Commit()
 	if err != nil {
 		fail("txn: %v", err)
 	}
