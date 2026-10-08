@@ -291,7 +291,10 @@ a raft snapshot, which carries the auth tables. `Authenticate` is
 replicated too: a token issued by one member is accepted by every
 member. Tokens are held in memory only (etcd's "simple" tokens). A
 restarted member has none, and clients authenticate again, as they do
-with etcd. Reads (`user list`, `role get`, `auth status`) answer from
+with etcd. A token expires `--auth-token-ttl` seconds (300) after its
+last use on a member, as etcd's do; each use renews it, each member times
+its own copy, and an expired one is refused with `etcdserver: invalid auth
+token`, on which clients authenticate again (since 1.26, #46). Reads (`user list`, `role get`, `auth status`) answer from
 the member's own applied state.
 
 Two checks run before the first auth change after a member starts, and
@@ -361,7 +364,9 @@ or its stream ends (restart the client after narrowing its role).
 While auth is on, these calls need the caller to be `root` or to hold
 the `root` role. The rules are etcd's (`needAdminPermission`, the
 maintenance and membership checks); a non-root caller gets
-`PermissionDenied`, a caller with no valid token `Unauthenticated`:
+`PermissionDenied`, a caller with no token `InvalidArgument` (`etcdserver:
+user name is empty`), and one with an unknown or expired token
+`Unauthenticated` (`etcdserver: invalid auth token`), as in etcd (#105):
 
 | Service | Root only | Any logged-in user |
 |---|---|---|
@@ -392,8 +397,7 @@ with no keys needs only a login.
 | `Put` naming a lease, and every put in either branch of a `Txn` | write, besides the put's own key |
 | `LeaseGrant` | a login |
 
-**Limits.** No authorization gap is known, but: tokens never expire
-(#46), and every check runs on the member serving the call against its
+**Limits.** No authorization gap is known, but every check runs on the member serving the call against its
 applied auth state at that moment (etcd checks a put and a revoke again
 at apply), so a permission revoked a moment earlier can still be honoured
 by a member a moment behind.

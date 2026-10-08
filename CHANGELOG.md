@@ -6,6 +6,20 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+### 2026-10-08 — auth tokens expire (#46)
+- **feat:** `--auth-token-ttl` (seconds, default 300, as etcd;
+  `FASTETCD_AUTH_TOKEN_TTL` / `ETCD_AUTH_TOKEN_TTL`; 0 refused). A token
+  expires that long after its last use on a member, as etcd's simple
+  tokens do (`simpleTokenKeeper`): each use renews it, each member times
+  its own copy (the token is replicated, its timer is not), expiry needs
+  no raft entry, and expired tokens are purged at most once a second, so
+  memory no longer grows with every login. An expired token gets
+  `etcdserver: invalid auth token` (#105), on which clients authenticate
+  again. They used to live until the user was deleted, its password
+  changed, or the member restarted.
+- **docs:** 01 (the flag), 03 (auth: token lifetime; the no-token /
+  bad-token codes since #105).
+
 ### 2026-10-08 — the test container on a test machine (#36)
 - **docs:** 02-testing: the first run through stormcentral's pipeline on
   a test machine (3070765391, pvetest2) passed; the node checks skip
