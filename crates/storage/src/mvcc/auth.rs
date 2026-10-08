@@ -90,6 +90,7 @@ use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -212,13 +213,58 @@ impl AuthTables {
 /// The in-memory half of auth: whether it is on (read by the request
 /// interceptor on every call, so an atomic) and the token set. Cheaply
 /// clonable; every clone is the same state.
-#[derive(Clone, Default)]
+///
+/// A token expires `token_ttl` after its last use on this member, as
+/// etcd's simple tokens do (`simpleTokenKeeper`, `--auth-token-ttl`,
+/// fastetcd#46): the token is replicated (every member adds it when it
+/// applies the `Authenticate`), its timer is each member's own, and
+/// expiring it needs no raft entry. An expired token names no one, so the
+/// request gets `etcdserver: invalid auth token` and the client
+/// authenticates again.
+#[derive(Clone)]
 pub struct AuthMemory {
     enabled: Arc<AtomicBool>,
-    tokens: Arc<StdMutex<HashMap<String, String>>>,
+    tokens: Arc<StdMutex<Tokens>>,
     /// Bumped each time an `Adopt` applies here, so a "members differ"
     /// verdict from before it can be recognised as stale.
     adoptions: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// etcd's default `--auth-token-ttl`.
+pub const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(300);
+
+struct Tokens {
+    /// token → (user, last use on this member).
+    map: HashMap<String, (String, Instant)>,
+    ttl: Duration,
+    last_purge: Instant,
+}
+
+impl Tokens {
+    /// Drop every expired token, at most once a second, so tokens that
+    /// are never used again do not pile up.
+    fn purge(&mut self, now: Instant) {
+        if now.duration_since(self.last_purge) < Duration::from_secs(1) {
+            return;
+        }
+        let ttl = self.ttl;
+        self.map.retain(|_, (_, used)| now.duration_since(*used) < ttl);
+        self.last_purge = now;
+    }
+}
+
+impl Default for AuthMemory {
+    fn default() -> Self {
+        Self {
+            enabled: Arc::default(),
+            tokens: Arc::new(StdMutex::new(Tokens {
+                map: HashMap::new(),
+                ttl: DEFAULT_TOKEN_TTL,
+                last_purge: Instant::now(),
+            })),
+            adoptions: Arc::default(),
+        }
+    }
 }
 
 impl AuthMemory {
@@ -228,13 +274,37 @@ impl AuthMemory {
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
+    /// How long a token lives after its last use (`--auth-token-ttl`).
+    pub fn set_token_ttl(&self, ttl: Duration) {
+        if let Ok(mut g) = self.tokens.lock() {
+            g.ttl = ttl;
+        }
+    }
+    /// The user a live token names, renewing it; `None` for an unknown or
+    /// expired one (an expired one is dropped).
     pub fn user_for_token(&self, token: &str) -> Option<String> {
-        self.tokens.lock().ok()?.get(token).cloned()
+        let mut g = self.tokens.lock().ok()?;
+        let now = Instant::now();
+        g.purge(now);
+        let ttl = g.ttl;
+        let (user, used) = g.map.get_mut(token)?;
+        if now.duration_since(*used) >= ttl {
+            g.map.remove(token);
+            return None;
+        }
+        *used = now;
+        Some(user.clone())
     }
     pub fn insert_token(&self, token: &str, user: &str) {
         if let Ok(mut g) = self.tokens.lock() {
-            g.insert(token.to_string(), user.to_string());
+            let now = Instant::now();
+            g.purge(now);
+            g.map.insert(token.to_string(), (user.to_string(), now));
         }
+    }
+    /// Live tokens this member holds (for tests and metrics).
+    pub fn token_count(&self) -> usize {
+        self.tokens.lock().map(|g| g.map.len()).unwrap_or(0)
     }
     /// How many `Adopt` entries this member has applied since it started.
     pub fn adoptions(&self) -> u64 {
@@ -242,12 +312,12 @@ impl AuthMemory {
     }
     pub fn revoke_user_tokens(&self, user: &str) {
         if let Ok(mut g) = self.tokens.lock() {
-            g.retain(|_, u| u != user);
+            g.map.retain(|_, (u, _)| u != user);
         }
     }
     fn retain_users(&self, keep: impl Fn(&str) -> bool) {
         if let Ok(mut g) = self.tokens.lock() {
-            g.retain(|_, u| keep(u));
+            g.map.retain(|_, (u, _)| keep(u));
         }
     }
 }
@@ -544,6 +614,28 @@ mod tests {
             AuthApplyError::NotFound(_)
         ));
         assert_eq!(s.auth_tables().await.unwrap(), before);
+    }
+
+    #[test]
+    fn a_token_expires_its_ttl_after_its_last_use() {
+        let m = AuthMemory::default();
+        m.set_token_ttl(Duration::from_millis(300));
+        m.insert_token("t1", "alice");
+        m.insert_token("t2", "bob");
+        // t1 used every 150 ms keeps living past the TTL; t2 is idle.
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(m.user_for_token("t1").as_deref(), Some("alice"));
+        }
+        assert_eq!(m.user_for_token("t2"), None, "an idle token expired");
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(m.user_for_token("t1"), None, "and so does t1 once idle");
+        assert_eq!(m.token_count(), 0, "expired tokens are dropped");
+        // A token never looked up again is purged by the next insert.
+        m.insert_token("t3", "carol");
+        std::thread::sleep(Duration::from_millis(1100));
+        m.insert_token("t4", "dave");
+        assert_eq!(m.token_count(), 1);
     }
 
     #[tokio::test]

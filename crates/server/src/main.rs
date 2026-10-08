@@ -271,6 +271,14 @@ struct Args {
     #[arg(long, env = "FASTETCD_ELECTION_TIMEOUT", default_value_t = 1000)]
     election_timeout: u64,
 
+    /// Seconds an auth token lives after its last use on this member
+    /// (etcd's `--auth-token-ttl`, fastetcd#46). A use renews it; an
+    /// expired one is refused with `etcdserver: invalid auth token`, on
+    /// which clients authenticate again. At least 1.
+    #[arg(long, env = "FASTETCD_AUTH_TOKEN_TTL", default_value_t = 300,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    auth_token_ttl: u64,
+
     /// Take a raft snapshot (and then purge the log) every N applied
     /// writes (proposals; a batched log entry counts each one, #80).
     /// Lower keeps the log smaller; higher lets a lagging follower catch
@@ -651,6 +659,7 @@ fn apply_etcd_env_compat() {
         ("FASTETCD_SNAPSHOT_COUNT", "ETCD_SNAPSHOT_COUNT"),
         ("FASTETCD_HEARTBEAT_INTERVAL", "ETCD_HEARTBEAT_INTERVAL"),
         ("FASTETCD_ELECTION_TIMEOUT", "ETCD_ELECTION_TIMEOUT"),
+        ("FASTETCD_AUTH_TOKEN_TTL", "ETCD_AUTH_TOKEN_TTL"),
         ("FASTETCD_QUOTA_BACKEND_BYTES", "ETCD_QUOTA_BACKEND_BYTES"),
         ("FASTETCD_MAX_SNAPSHOTS", "ETCD_MAX_SNAPSHOTS"),
         (
@@ -960,6 +969,7 @@ async fn main() -> anyhow::Result<()> {
         index_bytes = cache_stats.index_bytes,
         "RAM cache: every key's index is resident; latest values cached up to the budget"
     );
+    sm_auth_token_ttl(&mvcc, args.auth_token_ttl);
     let sm = FastetcdStateMachine::open_with_retention(
         mvcc,
         args.data_dir.join("snapshots"),
@@ -1532,6 +1542,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tokens expire this long after their last use (#46).
+fn sm_auth_token_ttl(mvcc: &MvccStore, secs: u64) {
+    mvcc.auth_memory().set_token_ttl(std::time::Duration::from_secs(secs));
+}
+
 /// openraft's heartbeat interval and election range from etcd's
 /// `--heartbeat-interval` and `--election-timeout` (fastetcd#103): the
 /// election timeout t becomes [t, 2t). etcd wants t >= 5x the heartbeat;
@@ -1558,6 +1573,13 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("fastetcd").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn auth_token_ttl_defaults_to_etcds_and_refuses_zero() {
+        assert_eq!(parse(&[]).unwrap().auth_token_ttl, 300);
+        assert_eq!(parse(&["--auth-token-ttl", "30"]).unwrap().auth_token_ttl, 30);
+        assert!(parse(&["--auth-token-ttl", "0"]).is_err());
     }
 
     // fastetcd#53: default-on flags could not be turned off, and

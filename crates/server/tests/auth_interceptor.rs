@@ -145,3 +145,39 @@ async fn auth_disable_lets_unauthenticated_requests_through_again() {
     .await
     .unwrap();
 }
+
+/// fastetcd#46: a token expires `--auth-token-ttl` after its last use,
+/// as etcd's simple tokens do. Used within the TTL it keeps working; idle
+/// past it, it is refused with etcd's `invalid auth token` (on which
+/// clients authenticate again), and a new login works.
+#[tokio::test]
+async fn a_token_expires_its_ttl_after_its_last_use() {
+    use std::time::Duration;
+    let h = start_test_server_full().await;
+    h.state.sm.mvcc().auth_memory().set_token_ttl(Duration::from_secs(2));
+    enable_auth_with_user(&h.endpoint, "alice", "alice-pw").await; // not a secret: test fixture
+    let mut auth = AuthClient::connect(h.endpoint.clone()).await.unwrap();
+    let login = || pb::AuthenticateRequest { name: "alice".into(), password: "alice-pw".into() }; // not a secret: test fixture
+    let token = auth.authenticate(login()).await.unwrap().into_inner().token;
+    let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
+    let get = |token: &str| {
+        let mut r = Request::new(pb::RangeRequest { key: b"k".to_vec(), ..Default::default() });
+        r.metadata_mut().insert("token", MetadataValue::try_from(token).unwrap());
+        r
+    };
+    // Used every second for five seconds: past the TTL, still good.
+    for _ in 0..5 {
+        kv.range(get(&token)).await.expect("a token in use keeps working");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // Idle for longer than the TTL: gone.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let err = kv.range(get(&token)).await.expect_err("an idle token expires");
+    assert_eq!(
+        (err.code(), err.message()),
+        (tonic::Code::Unauthenticated, "etcdserver: invalid auth token"),
+        "{err:?}"
+    );
+    let fresh = auth.authenticate(login()).await.unwrap().into_inner().token;
+    kv.range(get(&fresh)).await.expect("a new login works");
+}
