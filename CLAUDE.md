@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.28.0`** — `--log-level` and `--max-request-bytes` work as etcd's
+**`1.29.0`** — A watch created with `fragment` gets a large response in
+parts, as etcd's `sendFragments` (#58): split at `--max-request-bytes`
+(unset: 1.5 MiB) into whole events, `fragment: true` on all but the
+last (`watch::fragments`); clientv3 joins them (`tests/clientv3_fragment.sh`).
+
+Previous: **`1.28.0`** — `--log-level` and `--max-request-bytes` work as etcd's
 (#54); unset `--max-request-bytes` keeps the 4 MiB limit (default asked
 on #54).
 
@@ -2390,7 +2395,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       (`compat_flags.rs` on the binary; parse tests).
     - [x] Docs (01), changelog; release 1.28.0; ask the default.
 
-73. **Watch fragments large responses when asked (#58, P3).** Every
+73. **Watch fragments large responses when asked (#58, P3) — done, shipped in v1.29.0.** Every
     `WatchResponse` went out whole with `fragment: false`; a create's
     `fragment` was not read. etcd release-3.5 (`v3rpc/watch.go`
     `sendFragments`): for a watcher created with `fragment`, a response
@@ -2404,7 +2409,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       #54 default question).
     - Unfragmented watchers unchanged.
     Work items:
-    - [ ] watch.rs; unit test of the split (sizes, flags, order, one big
-      event); gRPC test (etcd-client watch with fragment over a txn of
-      large values: fragments arrive, joined events complete).
-    - [ ] Docs (00 design), changelog; release; close #58.
+    - [x] watch.rs; unit test of the split (sizes, flags, order, one big
+      event); gRPC test (fragments arrive 3/3/2, live and in replay; a
+      watcher without fragment gets 8 whole); `tests/clientv3_fragment.sh`.
+    - [x] Docs (00, 01, 02, README, deck), changelog; release 1.29.0;
+      close #58.
+    - Verified: sc-build of 6b63989, workspace 417 pass 0 fail.
+      clientv3 v3.5.17 with a 2 MiB receive limit: with `WithFragment`
+      the 3.2 MiB response arrives as one joined response of 8 events;
+      without, `received message larger than max (3277020 vs. 2097152)`.

@@ -2,22 +2,30 @@
 
 ## [Unreleased]
 
-### 2026-10-08
-- **feat:** a watch created with `fragment` gets a large response in
-  parts, as etcd's `sendFragments`: a response of `--max-request-bytes`
-  (unset: 1.5 MiB) or more with two or more events is split into whole
-  events, in order, each part under it (an event over it alone), all but
-  the last `fragment: true`; clientv3 joins them. Live events and history
-  replay alike; watchers without `fragment` unchanged (#58)
-
-### 2026-10-08
-- **docs:** disk stalls (03-deploy): a fsync stuck on a stormblock ublk
-  volume shows in the engine's `GET /api/v1/health` `ublk_stuck`; #138's
-  stall on server3 was stormblock#334 (fixed in stormblock) (#138)
-
-### 2026-10-06
-- **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
+
+## [v1.29.0] — 2026-10-08
+
+### Added
+- A watch created with `fragment` gets a large response in parts, as
+  etcd's `sendFragments` (#58): a response of `--max-request-bytes`
+  (unset: 1.5 MiB) or more with two or more events is split into whole
+  events, in order, each part under it (an event over it goes alone), all
+  but the last `fragment: true`; clientv3 joins them. Live events and
+  history replay alike; watchers without `fragment` unchanged.
+  `tests/clientv3_fragment.sh`: clientv3 v3.5.17 with a 2 MiB receive
+  limit gets a 3.2 MiB response joined (without `fragment`: received
+  message larger than max).
+
+### Documentation
+- Disk stalls (03-deploy): a fsync stuck on a stormblock ublk volume
+  shows in the engine's `GET /api/v1/health` `ublk_stuck`; #138's stall
+  on server3 was stormblock#334 (fixed in stormblock) (#138).
+
+### Changed
+- Test-fixture credentials marked `not a secret` (inline, or
+  `.github/secret_scanning.yml` for files that cannot hold a comment) —
+  owner.
 
 ## [v1.28.0] — 2026-10-08
 
