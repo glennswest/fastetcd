@@ -6,8 +6,10 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
-### 2026-10-08 — auth tokens expire (#46)
-- **feat:** `--auth-token-ttl` (seconds, default 300, as etcd;
+## [v1.26.0] — 2026-10-08
+
+### Added
+- `--auth-token-ttl` (seconds, default 300, as etcd;
   `FASTETCD_AUTH_TOKEN_TTL` / `ETCD_AUTH_TOKEN_TTL`; 0 refused). A token
   expires that long after its last use on a member, as etcd's simple
   tokens do (`simpleTokenKeeper`): each use renews it, each member times
@@ -17,17 +19,19 @@
   `etcdserver: invalid auth token` (#105), on which clients authenticate
   again. They used to live until the user was deleted, its password
   changed, or the member restarted.
-- **docs:** 01 (the flag), 03 (auth: token lifetime; the no-token /
+
+### Documentation
+- 01 (the flag), 03 (auth: token lifetime; the no-token /
   bad-token codes since #105).
 
 ### 2026-10-08 — the test container on a test machine (#36)
-- **docs:** 02-testing: the first run through stormcentral's pipeline on
+- 02-testing: the first run through stormcentral's pipeline on
   a test machine (3070765391, pvetest2) passed; the node checks skip
   while the client port is mutual TLS and the Job has no client pair
   (stormcentral#555).
 
 ### 2026-10-08 — how the golden ships (#81)
-- **docs:** 03-deploy § How fastetcd reaches a StormCOS node, the README
+- 03-deploy § How fastetcd reaches a StormCOS node, the README
   and the CLAUDE.md pillar said the golden is built from `/root/fastetcd`
   on dev at whatever `main` is. It is a special golden staged by
   stormcentral (`stormcentral component stage fastetcd`, stormcos's

@@ -10,7 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.25.1`** — `tests/rolling_upgrade.sh` (#65): real rolling upgrades
+**`1.26.0`** — Auth tokens expire `--auth-token-ttl` (300 s) after their
+last use on a member, as etcd's simple tokens (#46; `AuthMemory`).
+
+Previous: **`1.25.1`** — `tests/rolling_upgrade.sh` (#65): real rolling upgrades
 and a downgrade of three member processes. Fixed what it found: a lagging
 member's auth digest taken for divergence (`AuthGate::check` re-surveys
 for 3 s); the pre-version safety backup taken after the WAL migration.
@@ -2283,7 +2286,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       tree clean); `component build fastetcd` refused; stages this
       session recorded `fastetcd@<main's tip>`.
 
-68. **Auth tokens expire: `--auth-token-ttl` (#46, P3).** Simple tokens
+68. **Auth tokens expire: `--auth-token-ttl` (#46, P3) — done, shipped in v1.26.0.** Simple tokens
     lived in memory until the user was deleted or changed password, or the
     process restarted. etcd (`simpleTokenKeeper`, release-3.5): a token
     expires `--auth-token-ttl` (300 s) after its last use, each member on
@@ -2294,7 +2297,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     purged at most once a second. `--auth-token-ttl` (secs, 300,
     `ETCD_AUTH_TOKEN_TTL`); 0 rejected, as etcd.
     Work items:
-    - [ ] storage: last use, TTL, purge; unit test.
-    - [ ] server flag; gRPC test (a token used within the TTL keeps
+    - [x] storage: last use, TTL, purge; unit test.
+    - [x] server flag; gRPC test (a token used within the TTL keeps
       working, an idle one is refused with etcd's error, a new login works).
-    - [ ] Docs (01, 03 auth), changelog; release; close #46.
+    - [x] Docs (01, 03 auth), changelog; release 1.26.0; close #46.
