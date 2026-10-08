@@ -27,7 +27,7 @@ single- and multi-member, with linearizable reads by default:
 - Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
 
 Not implemented (each has an issue): MoveLeader and
-Downgrade (#57), watch response fragmentation (#58), raising an alarm by
+Downgrade (#57), raising an alarm by
 hand (deliberate), the etcd v2 API (out of scope). Differences from
 etcd are listed under [Compatibility boundary](#compatibility-boundary).
 

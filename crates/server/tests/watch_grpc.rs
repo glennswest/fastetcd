@@ -342,3 +342,111 @@ async fn watch_at_compacted_revision_returns_canceled() {
     assert!(resp.canceled);
     assert_eq!(resp.compact_revision, 2);
 }
+
+/// #58: a watcher created with `fragment` gets a large response as
+/// etcd's `sendFragments` splits it (whole events, each part under the
+/// 1.5 MiB default, all but the last `fragment: true`), live and in
+/// history replay; one created without it gets the response whole.
+#[tokio::test]
+async fn a_fragmenting_watcher_gets_large_responses_in_parts() {
+    let h = start_test_server_full().await;
+    let mut watch_client = WatchClient::connect(h.endpoint.clone()).await.unwrap();
+    let mut kv_client = KvClient::connect(h.endpoint.clone()).await.unwrap();
+
+    let (tx, rx) = mpsc::channel::<pb::WatchRequest>(8);
+    let mut stream = watch_client
+        .watch(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut ids = Vec::new();
+    for fragment in [true, false] {
+        let mut req = create_req(b"big/", b"big0");
+        if let Some(pb::watch_request::RequestUnion::CreateRequest(c)) = &mut req.request_union {
+            c.fragment = fragment;
+        }
+        tx.send(req).await.unwrap();
+        let ack = stream.next().await.unwrap().unwrap();
+        assert!(ack.created);
+        ids.push(ack.watch_id);
+    }
+    let (fragmenting, whole) = (ids[0], ids[1]);
+
+    // One revision, 8 events of 400 KiB: 3.2 MiB in one response.
+    let value = vec![b'x'; 400 * 1024];
+    let puts = (0..8)
+        .map(|i| pb::RequestOp {
+            request: Some(pb::request_op::Request::RequestPut(pb::PutRequest {
+                key: format!("big/{i}").into_bytes(),
+                value: value.clone(),
+                ..Default::default()
+            })),
+        })
+        .collect();
+    let rev = kv_client
+        .txn(pb::TxnRequest { success: puts, ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner()
+        .header
+        .unwrap()
+        .revision;
+
+    // Collect until the fragmenting watcher's last part and the whole one.
+    let mut parts = Vec::new();
+    let mut whole_resp = None;
+    while whole_resp.is_none() || parts.last().map_or(true, |p: &pb::WatchResponse| p.fragment) {
+        let r = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("watch responses within 10 s")
+            .unwrap()
+            .unwrap();
+        if r.watch_id == fragmenting {
+            parts.push(r);
+        } else {
+            assert_eq!(r.watch_id, whole);
+            whole_resp = Some(r);
+        }
+    }
+    let whole_resp = whole_resp.unwrap();
+    assert!(!whole_resp.fragment);
+    assert_eq!(whole_resp.events.len(), 8);
+
+    let check = |parts: &[pb::WatchResponse]| {
+        let sizes: Vec<_> = parts.iter().map(|p| p.events.len()).collect();
+        assert_eq!(sizes, vec![3, 3, 2], "events per part");
+        let flags: Vec<_> = parts.iter().map(|p| p.fragment).collect();
+        assert_eq!(flags, vec![true, true, false]);
+        let keys: Vec<_> = parts
+            .iter()
+            .flat_map(|p| p.events.iter().map(|e| e.kv.as_ref().unwrap().key.clone()))
+            .collect();
+        let want: Vec<_> = (0..8).map(|i| format!("big/{i}").into_bytes()).collect();
+        assert_eq!(keys, want);
+        for p in parts {
+            assert_eq!(p.header.as_ref().unwrap().revision, rev);
+        }
+    };
+    check(&parts);
+
+    // History replay of the same revision splits the same way.
+    let mut req = create_req(b"big/", b"big0");
+    if let Some(pb::watch_request::RequestUnion::CreateRequest(c)) = &mut req.request_union {
+        c.fragment = true;
+        c.start_revision = rev;
+    }
+    tx.send(req).await.unwrap();
+    let ack = stream.next().await.unwrap().unwrap();
+    assert!(ack.created);
+    let mut replayed = Vec::new();
+    while replayed.last().map_or(true, |p: &pb::WatchResponse| p.fragment) {
+        let r = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("replay within 10 s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.watch_id, ack.watch_id);
+        replayed.push(r);
+    }
+    check(&replayed);
+}

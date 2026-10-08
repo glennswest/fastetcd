@@ -170,6 +170,8 @@ struct Watcher {
     filter_no_put: bool,
     filter_no_delete: bool,
     prev_kv: bool,
+    /// The client asked for large responses to be split (#58).
+    fragment: bool,
     /// First revision this watcher has not yet been given. Live batches
     /// below it are already covered (by replay or resync) and skipped.
     next_rev: i64,
@@ -287,7 +289,7 @@ async fn replay_history(
         let rev = e.kv.mod_revision;
         if chunk_bytes >= REPLAY_CHUNK_BYTES && rev != chunk_rev {
             let resp = events_response(header, watch_id, std::mem::take(&mut chunk));
-            tx.send(Ok(resp)).await.map_err(|_| ())?;
+            send_events(state, tx, watcher.fragment, resp).await?;
             chunk_bytes = 0;
         }
         chunk_rev = rev;
@@ -300,11 +302,62 @@ async fn replay_history(
         chunk.push(watcher.to_pb(e));
     }
     if !chunk.is_empty() {
-        tx.send(Ok(events_response(header, watch_id, chunk)))
-            .await
-            .map_err(|_| ())?;
+        send_events(state, tx, watcher.fragment, events_response(header, watch_id, chunk)).await?;
     }
     Ok(Replay::Done)
+}
+
+/// etcd's `--max-request-bytes` default (`embed.DefaultMaxRequestBytes`),
+/// the fragment size when the flag is not set.
+pub const DEFAULT_FRAGMENT_BYTES: usize = 3 * 512 * 1024;
+
+/// Send an events response, split as etcd's `sendFragments` does when
+/// the watcher asked for fragments (#58).
+async fn send_events(
+    state: &Arc<ServerState>,
+    tx: &mpsc::Sender<Result<pb::WatchResponse, Status>>,
+    fragment: bool,
+    resp: pb::WatchResponse,
+) -> Result<(), ()> {
+    if !fragment {
+        return tx.send(Ok(resp)).await.map_err(|_| ());
+    }
+    let max = state
+        .max_request_bytes
+        .map_or(DEFAULT_FRAGMENT_BYTES, |m| m as usize);
+    for part in fragments(resp, max) {
+        tx.send(Ok(part)).await.map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// etcd's `sendFragments` (release-3.5 `v3rpc/watch.go`): a response of
+/// `max` encoded bytes or more with two or more events becomes responses
+/// of whole events, in order, each under `max` unless one event alone is
+/// over it; every one but the last has `fragment: true`, and clientv3
+/// joins them back into one.
+pub fn fragments(resp: pb::WatchResponse, max: usize) -> Vec<pb::WatchResponse> {
+    use prost::Message;
+    if resp.encoded_len() < max || resp.events.len() < 2 {
+        return vec![resp];
+    }
+    let mut empty = resp;
+    let mut events: std::collections::VecDeque<_> = std::mem::take(&mut empty.events).into();
+    empty.fragment = true;
+    let mut out = Vec::new();
+    while !events.is_empty() {
+        let mut cur = empty.clone();
+        while let Some(ev) = events.pop_front() {
+            cur.events.push(ev);
+            if cur.events.len() > 1 && cur.encoded_len() >= max {
+                events.push_front(cur.events.pop().expect("just pushed"));
+                break;
+            }
+        }
+        cur.fragment = !events.is_empty();
+        out.push(cur);
+    }
+    out
 }
 
 fn events_response(
@@ -393,6 +446,7 @@ async fn handle_create(
         filter_no_put,
         filter_no_delete,
         prev_kv: create.prev_kv,
+        fragment: create.fragment,
         next_rev,
         _counted: GaugeHold::new(&state.traffic.watchers, 1),
     };
@@ -653,7 +707,7 @@ async fn forward_events(
             continue;
         }
         // Collect (watch_id, events) per watcher, advancing cursors.
-        let mut deliveries: Vec<(i64, Vec<mvccpb::Event>)> = Vec::new();
+        let mut deliveries: Vec<(i64, bool, Vec<mvccpb::Event>)> = Vec::new();
         for (watch_id, w) in ss.watchers.iter_mut() {
             if batch.revision < w.next_rev {
                 continue;
@@ -666,7 +720,7 @@ async fn forward_events(
                 .map(|e| w.to_pb(e))
                 .collect();
             if !evts.is_empty() {
-                deliveries.push((*watch_id, evts));
+                deliveries.push((*watch_id, w.fragment, evts));
             }
         }
 
@@ -681,12 +735,9 @@ async fn forward_events(
         let _behind = (tx.capacity() < deliveries.len())
             .then(|| GaugeHold::new(&state.traffic.slow_watchers, ss.watchers.len() as i64));
         let header = response_header(&state, batch.revision).await;
-        for (watch_id, events) in deliveries {
-            if tx
-                .send(Ok(events_response(header, watch_id, events)))
-                .await
-                .is_err()
-            {
+        for (watch_id, fragment, events) in deliveries {
+            let resp = events_response(header, watch_id, events);
+            if send_events(&state, &tx, fragment, resp).await.is_err() {
                 return; // client disconnected
             }
         }
@@ -775,5 +826,62 @@ async fn progress_notify_ticker(
         if tx.send(Ok(resp)).await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    fn event(i: usize, value_len: usize) -> mvccpb::Event {
+        mvccpb::Event {
+            r#type: mvccpb::event::EventType::Put as i32,
+            kv: Some(mvccpb::KeyValue {
+                key: format!("k{i:04}").into_bytes(),
+                value: vec![b'v'; value_len],
+                mod_revision: 7,
+                ..Default::default()
+            }),
+            prev_kv: None,
+        }
+    }
+
+    fn response(events: Vec<mvccpb::Event>) -> pb::WatchResponse {
+        events_response(pb::ResponseHeader { revision: 7, ..Default::default() }, 3, events)
+    }
+
+    #[test]
+    fn a_response_under_the_limit_or_with_one_event_is_sent_whole() {
+        let small = response((0..10).map(|i| event(i, 10)).collect());
+        assert_eq!(fragments(small.clone(), 1 << 20), vec![small]);
+        let one = response(vec![event(0, 4096)]);
+        assert_eq!(fragments(one.clone(), 100), vec![one]);
+    }
+
+    #[test]
+    fn a_large_response_splits_into_whole_events_in_order() {
+        let events: Vec<_> = (0..100).map(|i| event(i, 1000)).collect();
+        let whole = response(events.clone());
+        let max = 10_000;
+        let parts = fragments(whole.clone(), max);
+        assert!(parts.len() >= 10, "{} parts", parts.len());
+        for (n, p) in parts.iter().enumerate() {
+            assert_eq!(p.fragment, n + 1 < parts.len(), "part {n}");
+            assert!(p.encoded_len() < max, "part {n}: {}", p.encoded_len());
+            assert_eq!((p.watch_id, p.header.clone()), (whole.watch_id, whole.header.clone()));
+        }
+        let joined: Vec<_> = parts.into_iter().flat_map(|p| p.events).collect();
+        assert_eq!(joined, events);
+    }
+
+    #[test]
+    fn an_event_over_the_limit_goes_alone() {
+        let events = vec![event(0, 10), event(1, 50_000), event(2, 10), event(3, 10)];
+        let parts = fragments(response(events.clone()), 1000);
+        let sizes: Vec<_> = parts.iter().map(|p| p.events.len()).collect();
+        assert_eq!(sizes, vec![1, 1, 2]);
+        assert_eq!(parts.iter().map(|p| p.fragment).collect::<Vec<_>>(), vec![true, true, false]);
+        assert_eq!(parts.into_iter().flat_map(|p| p.events).collect::<Vec<_>>(), events);
     }
 }

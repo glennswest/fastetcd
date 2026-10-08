@@ -143,7 +143,8 @@ startup), unless **`RUST_LOG`** is set, which wins and takes tracing's
 refused with `InvalidArgument` `etcdserver: request is too large`, and the
 client port receives gRPC messages up to it plus 512 KiB. Unset, requests
 are limited only by the 4 MiB gRPC receive limit; etcd's default is 1.5
-MiB (#54).
+MiB (#54). It is also the size a watch created with `fragment` splits its
+responses at (#58); unset, those split at etcd's default, 1.5 MiB.
 
 These are accepted so etcd command lines and config files start, and do
 nothing: `--log-outputs`, `--logger`, `--metrics`, `--enable-pprof`.

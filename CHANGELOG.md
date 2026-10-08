@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-08
+- **feat:** a watch created with `fragment` gets a large response in
+  parts, as etcd's `sendFragments`: a response of `--max-request-bytes`
+  (unset: 1.5 MiB) or more with two or more events is split into whole
+  events, in order, each part under it (an event over it alone), all but
+  the last `fragment: true`; clientv3 joins them. Live events and history
+  replay alike; watchers without `fragment` unchanged (#58)
+
+### 2026-10-08
 - **docs:** disk stalls (03-deploy): a fsync stuck on a stormblock ublk
   volume shows in the engine's `GET /api/v1/health` `ublk_stuck`; #138's
   stall on server3 was stormblock#334 (fixed in stormblock) (#138)
