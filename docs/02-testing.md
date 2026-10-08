@@ -12,7 +12,10 @@ each job on a fresh build VM (dev.g8.lo until its retirement on
 (`sc-build 'cargo test -p fastetcd-server --test gateway'`). Each job gets
 its own scratch drive, deleted afterwards. The golden build compiles with
 `--locked`, so `sc-build 'cargo build --locked --workspace'` checks the
-lock too.
+lock too. The build is warning-free (#78); keep it so with
+`sc-build 'RUSTFLAGS="-D warnings" cargo build --locked --all-targets'`
+before a release. It is not the default, so a lint a newer compiler adds
+cannot stop the golden build.
 
 ## Ring 1 — Workspace unit + integration tests
 

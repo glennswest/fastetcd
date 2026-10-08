@@ -6,6 +6,18 @@
 - **chore:** test-fixture credentials marked `not a secret` (inline, or `.github/secret_scanning.yml` for files that cannot hold a comment) — owner
 <!-- New unreleased changes go here -->
 
+## [v1.27.2] — 2026-10-08
+
+### Fixed
+- The build is warning-free (#78): the unused `RedbEngine` import in
+  `crates/server/src/main.rs`, there in every build log since 1.8, is gone,
+  and so is a needless `mut` in fastetcd-bench (from #104). A standing
+  warning hid new ones, and sc-build's failure extraction had taken
+  warnings for issue titles (stormcentral#40).
+
+### Documentation
+- 02-testing: the `-D warnings` check before a release.
+
 ## [v1.27.1] — 2026-10-08
 
 ### Fixed

@@ -10,7 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.27.1`** — fastetcd-bench retries transient RPC errors and counts
+**`1.27.2`** — Warning-free build (#78): the unused `RedbEngine` import
+and a needless `mut` gone; `RUSTFLAGS="-D warnings"` check in 02-testing.
+
+Previous: **`1.27.1`** — fastetcd-bench retries transient RPC errors and counts
 them by code instead of panicking (#104); `CHURN=1 tests/read_latency.sh`.
 
 Previous: **`1.27.0`** — A stuck WAL fdatasync or checkpoint names itself (#138):
@@ -2349,3 +2352,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] bench retry + counts (put/get, read-under-load, keepalive);
       unit test; CHURN in read_latency.sh; run it on 3 members.
     - [x] Docs (01 bench, 02), changelog; release 1.27.1; close #104.
+
+71. **A warning-free build (#78, P3) — done, shipped in v1.27.2.** The
+    unused `RedbEngine` import in server main.rs (every build since 1.8)
+    and a needless `mut` in fastetcd-bench (#104) removed; `cargo build
+    --all-targets` gives 0 warnings and passes with `RUSTFLAGS="-D
+    warnings"` (sc-build, build VM). The check is documented for releases
+    (02-testing), not made the default: a lint a newer compiler adds must
+    not stop the golden build.
