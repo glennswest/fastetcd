@@ -616,3 +616,44 @@ async fn snapshots_and_purges_are_counted_in_proposals() {
 async fn sleep_ms(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
+
+/// fastetcd#138: a WAL fdatasync or a checkpoint that does not return is
+/// shown in flight (and so on /metrics) and named by `stalls`, which the
+/// watchdog logs; once it returns, nothing is in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_fsync_or_checkpoint_says_which_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let (raft, log, sm) = slow_node(dir.path(), Duration::ZERO, Duration::from_millis(2500)).await;
+    let stats = log.stats();
+    assert!(stats.stalls(Duration::ZERO).is_empty(), "nothing in flight at rest");
+
+    // The WAL's fdatasync, held 2.5 s.
+    log.set_sync_delay(Duration::from_millis(2500));
+    let w = {
+        let raft = raft.clone();
+        tokio::spawn(async move { raft.client_write(put(1)).await.map(|_| ()) })
+    };
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(stats.fsync_inflight().is_some_and(|d| d >= Duration::from_secs(1)), "{:?}", stats.fsync_inflight());
+    let s = stats.stalls(Duration::from_secs(1));
+    assert!(s.iter().any(|l| l.contains("raft WAL fdatasync") && l.contains("every write waits")), "{s:?}");
+    w.await.unwrap().unwrap();
+    log.set_sync_delay(Duration::ZERO);
+    assert!(stats.fsync_inflight().is_none());
+
+    // The data file's checkpoint, whose durable commit takes 2.5 s.
+    fastetcd_raft::wal_log_store::spawn_checkpointer(log.clone(), sm.applied_index(), Default::default());
+    raft.client_write(put(2)).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !stats.checkpoint_inflight().is_some_and(|d| d >= Duration::from_secs(1)) {
+        assert!(tokio::time::Instant::now() < deadline, "no checkpoint in flight");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let s = stats.stalls(Duration::from_secs(1));
+    assert!(s.iter().any(|l| l.contains("checkpoint of the data file")), "{s:?}");
+    while stats.checkpoint_inflight().is_some() {
+        assert!(tokio::time::Instant::now() < deadline, "the checkpoint never returned");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    raft.shutdown().await.unwrap();
+}

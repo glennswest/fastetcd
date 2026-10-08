@@ -139,6 +139,62 @@ pub struct WalStats {
     /// `index + 1` of the last applied entry a checkpoint made durable
     /// in the data file (0 = none yet in this process).
     pub durable_applied: AtomicU64,
+    /// When the WAL fdatasync in flight started ([`mark`]; 0 = none), and
+    /// how many raft entries it carries (fastetcd#138).
+    pub fsync_inflight_since: AtomicU64,
+    pub fsync_inflight_entries: AtomicU64,
+    /// When the checkpoint in flight started (0 = none), and the applied
+    /// index + 1 it makes durable.
+    pub checkpoint_inflight_since: AtomicU64,
+    pub checkpoint_inflight_target: AtomicU64,
+}
+
+/// A point in time as nanoseconds since this process's first call, plus
+/// one, so 0 can mean "none".
+pub fn mark() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+}
+
+fn since(m: u64) -> Option<Duration> {
+    (m != 0).then(|| Duration::from_nanos(mark().saturating_sub(m)))
+}
+
+/// A WAL fdatasync or checkpoint running at least this long is reported,
+/// and again every time this much more has passed (fastetcd#138).
+pub const STALL_WARN: Duration = Duration::from_secs(10);
+
+impl WalStats {
+    /// How long the WAL fdatasync in flight has been running.
+    pub fn fsync_inflight(&self) -> Option<Duration> {
+        since(self.fsync_inflight_since.load(Ordering::Relaxed))
+    }
+    /// How long the checkpoint in flight has been running.
+    pub fn checkpoint_inflight(&self) -> Option<Duration> {
+        since(self.checkpoint_inflight_since.load(Ordering::Relaxed))
+    }
+    /// What has been running at least `after`: one line for each, naming
+    /// it, so a stall says which operation it is (the WAL's fdatasync,
+    /// which every write waits on, or the data file's checkpoint fsync).
+    pub fn stalls(&self, after: Duration) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(d) = self.fsync_inflight().filter(|d| *d >= after) {
+            out.push(format!(
+                "a raft WAL fdatasync ({} entries) has not returned for {} s: every write waits on it",
+                self.fsync_inflight_entries.load(Ordering::Relaxed),
+                d.as_secs()
+            ));
+        }
+        if let Some(d) = self.checkpoint_inflight().filter(|d| *d >= after) {
+            out.push(format!(
+                "a checkpoint of the data file (through applied index {}) has not returned for {} s: \
+                 its fsync is stuck below fastetcd, and the WAL on the same filesystem may be too",
+                self.checkpoint_inflight_target.load(Ordering::Relaxed).saturating_sub(1),
+                d.as_secs()
+            ));
+        }
+        out
+    }
 }
 
 type Done = Box<dyn FnOnce(io::Result<()>) + Send>;
@@ -286,6 +342,8 @@ fn writer(
         }
         if failed.is_none() && sync {
             let t = Instant::now();
+            stats.fsync_inflight_entries.store(entries, Ordering::Relaxed);
+            stats.fsync_inflight_since.store(mark(), Ordering::Relaxed);
             let sync_delay = Duration::from_nanos(stats.sync_delay_nanos.load(Ordering::Relaxed));
             if !sync_delay.is_zero() {
                 std::thread::sleep(sync_delay);
@@ -294,6 +352,7 @@ fn writer(
                 tracing::error!(error = %e, "raft WAL fdatasync failed");
                 failed = Some((e.kind(), format!("raft WAL fdatasync: {e}")));
             }
+            stats.fsync_inflight_since.store(0, Ordering::Relaxed);
             let took = t.elapsed().as_nanos() as u64;
             stats.fsyncs.fetch_add(1, Ordering::Relaxed);
             stats.fsync_nanos.fetch_add(took, Ordering::Relaxed);
@@ -916,6 +975,32 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
     }
 }
 
+/// Every 5 s, report a WAL fdatasync or a checkpoint that has been
+/// running for [`STALL_WARN`] or more, and again each further
+/// [`STALL_WARN`] (fastetcd#138: on server3 one never returned, and
+/// nothing said which).
+pub fn spawn_stall_watchdog(stats: Arc<WalStats>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut last: Option<Instant> = None;
+        loop {
+            tick.tick().await;
+            let stalls = stats.stalls(STALL_WARN);
+            if stalls.is_empty() {
+                last = None;
+                continue;
+            }
+            if last.is_some_and(|t| t.elapsed() < STALL_WARN) {
+                continue;
+            }
+            for s in stalls {
+                tracing::warn!(target: "fastetcd::stall", "{s}");
+            }
+            last = Some(Instant::now());
+        }
+    })
+}
+
 /// A checkpoint that took `d` lets the next start no sooner than
 /// `CHECKPOINT_PACE * d` after it ended, so checkpoints take at most
 /// 1 / (1 + CHECKPOINT_PACE) of the disk's time (fastetcd#95). On a slow
@@ -952,6 +1037,7 @@ pub fn spawn_checkpointer(
     applied: watch::Receiver<u64>,
     cfg: CheckpointConfig,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_stall_watchdog(store.stats.clone());
     tokio::spawn(async move {
         let mut applied = applied;
         let mut ticker = tokio::time::interval(cfg.interval.max(Duration::from_millis(1)));
@@ -984,7 +1070,11 @@ pub fn spawn_checkpointer(
             }
             let t = Instant::now();
             let locked = Instant::now();
-            if let Err(e) = store.engine.sync().await {
+            store.stats.checkpoint_inflight_target.store(target, Ordering::Relaxed);
+            store.stats.checkpoint_inflight_since.store(mark(), Ordering::Relaxed);
+            let synced = store.engine.sync().await;
+            store.stats.checkpoint_inflight_since.store(0, Ordering::Relaxed);
+            if let Err(e) = synced {
                 store.stats.checkpoint_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(error = %e, "checkpoint of the data file failed; retrying");
                 continue;

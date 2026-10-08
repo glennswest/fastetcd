@@ -719,6 +719,8 @@ pub struct WalMetrics {
     wb_flush_seconds: Counter<f64, AtomicU64>,
     wb_backpressure: Counter,
     wb_backpressure_seconds: Counter<f64, AtomicU64>,
+    fsync_inflight_seconds: Gauge<f64, AtomicU64>,
+    checkpoint_inflight_seconds: Gauge<f64, AtomicU64>,
     wb_presync_seconds: Counter<f64, AtomicU64>,
 }
 
@@ -747,6 +749,8 @@ impl WalMetrics {
             wb_flush_seconds: Counter::default(),
             wb_backpressure: Counter::default(),
             wb_backpressure_seconds: Counter::default(),
+            fsync_inflight_seconds: Gauge::default(),
+            checkpoint_inflight_seconds: Gauge::default(),
             wb_presync_seconds: Counter::default(),
         }
     }
@@ -849,6 +853,16 @@ impl WalMetrics {
             self.wb_backpressure.clone(),
         );
         reg.register(
+            "fastetcd_wal_fsync_inflight_seconds",
+            "How long the raft WAL fdatasync in flight has been running (0: none); every write waits on it (fastetcd#138)",
+            self.fsync_inflight_seconds.clone(),
+        );
+        reg.register(
+            "fastetcd_checkpoint_inflight_seconds",
+            "How long the checkpoint of the data file in flight has been running (0: none)",
+            self.checkpoint_inflight_seconds.clone(),
+        );
+        reg.register(
             "fastetcd_write_behind_backpressure_seconds",
             "Time those applies waited for their write-out",
             self.wb_backpressure_seconds.clone(),
@@ -884,6 +898,8 @@ impl WalMetrics {
         catch_up_seconds(&self.checkpoint_seconds, load(&s.checkpoint_nanos));
         catch_up(&self.checkpoint_failures, load(&s.checkpoint_failures));
         self.durable_applied.set(load(&s.durable_applied) as i64);
+        self.fsync_inflight_seconds.set(s.fsync_inflight().map_or(0.0, |d| d.as_secs_f64()));
+        self.checkpoint_inflight_seconds.set(s.checkpoint_inflight().map_or(0.0, |d| d.as_secs_f64()));
     }
 }
 
