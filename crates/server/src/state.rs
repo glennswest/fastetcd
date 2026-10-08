@@ -70,6 +70,9 @@ pub struct ServerState {
     /// The leader's lease deadlines: keep-alives renewed in RAM
     /// (fastetcd#92). The peer service shares it.
     pub lessor: fastetcd_raft::lessor::Lessor,
+    /// etcd's `--max-request-bytes` (fastetcd#54): a proposal whose
+    /// encoded entry is larger is refused. `None`: no such check.
+    pub max_request_bytes: Option<u64>,
 }
 
 impl ServerState {
@@ -99,6 +102,7 @@ impl ServerState {
             committed_index: None,
             wal: None,
             older_members: Arc::default(),
+            max_request_bytes: None,
             nested_txn_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
                 crate::version_gate::NESTED_TXN_SINCE,
             )),
@@ -106,6 +110,13 @@ impl ServerState {
             read_index: None,
             proposer: None,
         }
+    }
+
+    /// Refuse proposals larger than `max` (etcd's `--max-request-bytes`,
+    /// #54).
+    pub fn with_max_request_bytes(mut self, max: Option<u64>) -> Self {
+        self.max_request_bytes = max;
+        self
     }
 
     /// Report the write-behind layer's counters on `/metrics` (fastetcd#85).
@@ -225,6 +236,14 @@ impl ServerState {
         &self,
         entry: FastetcdLogEntry,
     ) -> Result<FastetcdLogResponse, Status> {
+        // etcd's `ErrRequestTooLarge`: the request, as the log would hold
+        // it, over `--max-request-bytes` (#54).
+        if let Some(max) = self.max_request_bytes {
+            let size = bincode::serialized_size(&entry).unwrap_or(0);
+            if size > max {
+                return Err(Status::invalid_argument("etcdserver: request is too large"));
+            }
+        }
         let _pending = GaugeHold::new(&self.traffic.proposals_pending, 1);
         // On the leader, refuse a put naming a lease that does not exist
         // (#19), and a request the state machine would refuse (#49),

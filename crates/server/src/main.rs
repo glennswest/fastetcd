@@ -507,14 +507,19 @@ struct Args {
     )]
     on_corruption: fastetcd_server::recovery::OnCorruption,
 
-    /// (etcd compat) Maximum gRPC request size. Accepted and ignored
-    /// (fastetcd#54): requests are limited by tonic's 4 MiB default.
-    #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES")]
+    /// Largest client request, in bytes, as etcd's `--max-request-bytes`
+    /// (fastetcd#54): a write whose log entry is larger is refused with
+    /// `etcdserver: request is too large`, and the client port receives
+    /// gRPC messages up to this plus 512 KiB. Unset: requests are limited
+    /// only by the 4 MiB gRPC receive limit (etcd's default is 1.5 MiB).
+    #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES",
+          value_parser = clap::value_parser!(u64).range(1..))]
     max_request_bytes: Option<u64>,
 
-    /// (etcd compat) Log level. Accepted and ignored (fastetcd#54): set
-    /// `RUST_LOG` (e.g. `RUST_LOG=debug`); the default is `info`.
-    #[arg(long, env = "FASTETCD_LOG_LEVEL")]
+    /// Log level, as etcd's `--log-level`: debug, info (default), warn,
+    /// error, panic or fatal (the last two log errors). `RUST_LOG`, when
+    /// set, wins and can name modules (`RUST_LOG=fastetcd_raft=debug`).
+    #[arg(long, env = "FASTETCD_LOG_LEVEL", value_parser = parse_log_level)]
     log_level: Option<String>,
 
     /// (etcd compat) Log outputs: stderr, stdout, or a list of files.
@@ -783,17 +788,33 @@ async fn run_subcommand(
     }
 }
 
+/// etcd's `--log-level` values, as a tracing level (#54).
+fn parse_log_level(v: &str) -> Result<String, String> {
+    match v.to_ascii_lowercase().as_str() {
+        "debug" => Ok("debug".into()),
+        "info" => Ok("info".into()),
+        "warn" | "warning" => Ok("warn".into()),
+        "error" | "panic" | "fatal" => Ok("error".into()),
+        other => Err(format!("unknown log level {other:?}: debug, info, warn, error, panic or fatal")),
+    }
+}
+
+/// gRPC's own overhead on top of `--max-request-bytes` (etcd's
+/// `grpcOverheadBytes`).
+const GRPC_OVERHEAD_BYTES: u64 = 512 * 1024;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     apply_etcd_env_compat();
     let args = Args::parse();
+    // `RUST_LOG` wins, as before; else `--log-level` (#54); else info.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(args.log_level.as_deref().unwrap_or("info"))
+            }),
+        )
+        .init();
     let node_id = args.node_id.unwrap_or_else(|| derive_node_id(&args.name));
 
     // Offline data-directory subcommands. These run and exit; the server
@@ -865,14 +886,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Log the no-op compat flags we received so operators can see
     // them in startup output even though we don't act on them.
-    if let Some(v) = &args.max_request_bytes {
-        tracing::debug!(max_request_bytes = v, "etcd-compat flag accepted (no-op)");
-    }
     if args.enable_pprof {
         tracing::debug!("etcd-compat flag accepted (no-op): --enable-pprof");
     }
     let _ = (
-        &args.log_level,
         &args.log_outputs,
         &args.logger,
         &args.metrics,
@@ -1274,7 +1291,8 @@ async fn main() -> anyhow::Result<()> {
         .with_write_behind_stats(write_behind_stats)
         // Linearizable reads and batched writes without queueing in
         // openraft's RaftCore, on one member (#71) or several (#75).
-        .with_peer_read_index_and_batching(log_progress.clone()),
+        .with_peer_read_index_and_batching(log_progress.clone())
+        .with_max_request_bytes(args.max_request_bytes),
     );
 
     // Periodic backups to a separate volume (fastetcd#37).
@@ -1464,6 +1482,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let decode_limit = args
+        .max_request_bytes
+        .map_or(4 * 1024 * 1024, |m| (m + GRPC_OVERHEAD_BYTES) as usize);
     let client_handle = {
         tokio::spawn(async move {
             tracing::info!(
@@ -1472,19 +1493,36 @@ async fn main() -> anyhow::Result<()> {
             );
             let mut grpc_routes = tonic::service::Routes::builder();
             grpc_routes.add_service(health_service);
-            grpc_routes.add_service(KvServer::with_interceptor(kv, interceptor.clone()));
-            grpc_routes.add_service(ClusterServer::with_interceptor(
-                cluster,
+            // The largest gRPC message a client may send: etcd's
+            // `--max-request-bytes` + its 512 KiB overhead, else tonic's
+            // 4 MiB as before (#54).
+            use tonic::service::interceptor::InterceptedService;
+            let d = decode_limit;
+            grpc_routes.add_service(InterceptedService::new(
+                KvServer::new(kv).max_decoding_message_size(d),
                 interceptor.clone(),
             ));
-            grpc_routes.add_service(MaintenanceServer::with_interceptor(
-                maintenance,
+            grpc_routes.add_service(InterceptedService::new(
+                ClusterServer::new(cluster).max_decoding_message_size(d),
                 interceptor.clone(),
             ));
-            grpc_routes.add_service(WatchServer::with_interceptor(watch, interceptor.clone()));
-            grpc_routes.add_service(LeaseServer::with_interceptor(lease, interceptor.clone()));
-            grpc_routes.add_service(FastetcdAdminServer::with_interceptor(admin, interceptor));
-            grpc_routes.add_service(AuthServer::new(auth));
+            grpc_routes.add_service(InterceptedService::new(
+                MaintenanceServer::new(maintenance).max_decoding_message_size(d),
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(InterceptedService::new(
+                WatchServer::new(watch).max_decoding_message_size(d),
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(InterceptedService::new(
+                LeaseServer::new(lease).max_decoding_message_size(d),
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(InterceptedService::new(
+                FastetcdAdminServer::new(admin).max_decoding_message_size(d),
+                interceptor,
+            ));
+            grpc_routes.add_service(AuthServer::new(auth).max_decoding_message_size(d));
 
             // Same port also answers etcd's plain-HTTP health probes
             // (load balancers / k8s httpGet probes already pointed
@@ -1572,6 +1610,17 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("fastetcd").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn log_level_takes_etcds_values() {
+        assert_eq!(parse(&[]).unwrap().log_level, None);
+        assert_eq!(parse(&["--log-level", "debug"]).unwrap().log_level.as_deref(), Some("debug"));
+        assert_eq!(parse(&["--log-level", "WARN"]).unwrap().log_level.as_deref(), Some("warn"));
+        assert_eq!(parse(&["--log-level", "fatal"]).unwrap().log_level.as_deref(), Some("error"));
+        assert!(parse(&["--log-level", "loud"]).is_err());
+        assert_eq!(parse(&["--max-request-bytes", "1572864"]).unwrap().max_request_bytes, Some(1572864));
+        assert!(parse(&["--max-request-bytes", "0"]).is_err());
     }
 
     #[test]
