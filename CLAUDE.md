@@ -2282,3 +2282,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       the stage's compile command on a build VM (all three static-pie,
       tree clean); `component build fastetcd` refused; stages this
       session recorded `fastetcd@<main's tip>`.
+
+68. **Auth tokens expire: `--auth-token-ttl` (#46, P3).** Simple tokens
+    lived in memory until the user was deleted or changed password, or the
+    process restarted. etcd (`simpleTokenKeeper`, release-3.5): a token
+    expires `--auth-token-ttl` (300 s) after its last use, each member on
+    its own (the token is replicated, its timer is not); no raft entry.
+    Plan: `AuthMemory` keeps each token's last use; a lookup past the TTL
+    drops it and answers no one (so `etcdserver: invalid auth token`,
+    #105, and clients re-authenticate); a use renews it; expired tokens are
+    purged at most once a second. `--auth-token-ttl` (secs, 300,
+    `ETCD_AUTH_TOKEN_TTL`); 0 rejected, as etcd.
+    Work items:
+    - [ ] storage: last use, TTL, purge; unit test.
+    - [ ] server flag; gRPC test (a token used within the TTL keeps
+      working, an idle one is refused with etcd's error, a new login works).
+    - [ ] Docs (01, 03 auth), changelog; release; close #46.
