@@ -1,0 +1,24 @@
+== server3-89-r1 on 192.168.16.105 at 11:56:31Z, load 60 s
+idle  GET lease              n   200  p50     1.3 ms  p99     2.1 ms  max     5.2 ms
+load  GET lease              n 32850  p50     1.4 ms  p99     8.3 ms  max   462.3 ms
+load  renewal (PUT lease)    n 16669  p50    32.5 ms  p99  4039.6 ms  max 13543.5 ms
+load  renewals 278/s by 40 clients
+fastetcd over 60 s: 1286 WAL fsyncs, mean 37.9 ms, 13.0 proposals per fsync; 20 checkpoints using 28.4 s; write-behind back-pressure 0
+fastetcd since start: max WAL fsync 9.588 s, max checkpoint commit 22.498 s, back-pressure 0
+fastetcd value cache over the load: 239919 hits, 16 misses (99.99% hits)
+== server3-89-r2 on 192.168.16.105 at 11:58:15Z, load 60 s
+idle  GET lease              n   200  p50     1.4 ms  p99     2.0 ms  max     6.5 ms
+load  GET lease              n 28950  p50     1.4 ms  p99     9.7 ms  max   427.4 ms
+load  renewal (PUT lease)    n 27948  p50    36.8 ms  p99  1488.2 ms  max  2490.0 ms
+load  renewals 465/s by 40 clients
+fastetcd over 60 s: 1870 WAL fsyncs, mean 22.6 ms, 15.0 proposals per fsync; 13 checkpoints using 4.0 s; write-behind back-pressure 3
+fastetcd since start: max WAL fsync 27.816 s, max checkpoint commit 22.498 s, back-pressure 3
+fastetcd value cache over the load: 373874 hits, 21 misses (99.99% hits)
+== server3-89-r3 on 192.168.16.105 at 11:59:25Z, load 60 s
+idle  GET lease              n   200  p50     1.4 ms  p99     2.5 ms  max     5.6 ms
+load  GET lease              n 33950  p50     1.4 ms  p99     8.1 ms  max   272.1 ms
+load  renewal (PUT lease)    n 19866  p50    32.1 ms  p99  2536.8 ms  max  5999.7 ms
+load  renewals 329/s by 40 clients
+fastetcd over 60 s: 1351 WAL fsyncs, mean 36.9 ms, 14.8 proposals per fsync; 8 checkpoints using 11.9 s; write-behind back-pressure 5
+fastetcd since start: max WAL fsync 27.816 s, max checkpoint commit 22.498 s, back-pressure 8
+fastetcd value cache over the load: 280692 hits, 11 misses (100.00% hits)
