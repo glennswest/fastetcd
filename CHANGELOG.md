@@ -4,6 +4,14 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-09
+- **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
+  SSD vs v1.11.0: writes 2.9–4.4x, linearizable p99 ~15x better. pve hard
+  power cut: 301 of 300 committed objects survived. X9 blade (server3,
+  1.18): apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms,
+  p99 1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
+  (#89)
+
 ## [v1.29.0] — 2026-10-08
 
 ### Added

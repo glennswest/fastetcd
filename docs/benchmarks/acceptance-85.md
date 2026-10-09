@@ -100,7 +100,8 @@ slowest WAL fsync took 27.8 s, during r2, and the slowest checkpoint commit
   sequential fsyncs share one spindle (with stormblock's journal, the
   sandboxes and other volumes). That is #135, which now has these numbers.
 - **No before.** v1.11 cannot run on a blade: a node runs its release's
-  golden, and the oldest release on these blades already carries #85. The
+  golden, and no blade runs a release with v1.11 (nor could one be
+  installed for this without an old release on the blade). The
   nearest blade reference for writes is #101 (the kubelet's status report on
   server3: p50 39.5 ms, slow ones 0.3–0.8 s at ~4 writes/s). For reads it is
   server1 on v1.10 (GET p99 about 45 ms).

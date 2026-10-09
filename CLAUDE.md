@@ -2186,7 +2186,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (03 auth errors), changelog; release 1.23.1; close #105,
       #127.
 
-62. **Verify #85 on an X9 blade (#89, P2) — #138 resolved (stormblock#334); measure on a blade running the fixed stormblock.** What can
+62. **Verify #85 on an X9 blade (#89, P2) — done (docs; no release): `docs/benchmarks/acceptance-85.md`.** What can
     be done from here: server3 is reachable (apiserver anonymous, fastetcd
     metrics on :2381); `tests/bench/blade_getlatency.py` runs rustkube's
     get-latency / lease-churn load against a node and reads the WAL /
@@ -2202,6 +2202,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     power cut is the pve install stage (`qm stop`, 301 of 300 survived on
     11.95 and 11.88): `docs/benchmarks/acceptance-85.md`. Left: server3's
     run (3 rounds of blade_getlatency.py) once it is on after 11:00Z.
+    2026-10-09, server3 (1.18): GET p99 8–10 ms under load (met);
+    renewals 278–465/s, p50 32–37 ms, p99 1.5–4 s, max 13.5 s; checkpoints
+    up to 28 s of 60, WAL fsync up to 27.8 s: the write tail is #135.
 
 63. **Verify #82 on an X9 blade (#84, P2).** server3 (fastetcd 1.18):
     apiserver GET of the cilium-operator lease p99 2.9–6.4 ms idle, 9.4–
