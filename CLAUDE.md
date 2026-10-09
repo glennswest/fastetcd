@@ -2213,6 +2213,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     RSS was not exported: added etcd's `process_*` metrics (1.24.0).
     Left: RSS flat over a long run and cilium-operator lease renewals on
     time, once a blade runs 1.24 and writes (#138; goldens: stormcentral#362).
+    2026-10-09: release 11.99 (fastetcd 73eb6ec, 1.29) installed on server3;
+    `tests/bench/blade_rss.py` samples RSS and the cache budgets every 60 s
+    and every kube-system Lease's renewals each second over hours, with
+    `blade_getlatency.py` rounds (writes on) for load and for GET p99 with
+    concurrent writes.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
