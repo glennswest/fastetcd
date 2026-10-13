@@ -10,7 +10,13 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.30.0`** — `/health`, `/livez`, `/readyz` on the metrics listener
+**`1.31.0`** — Writes at etcd's rate (#142): a batch's puts, deletes and
+txns that cannot be refused half-way apply up to 256 per commit
+(`MvccStore::apply_many`), and a key's index is written once per commit,
+not per put (a hot key cost O(history) per write). 1000 clients, build
+VM: put ~6k → 29–32k/s (etcd 24–26k).
+
+Previous: **`1.30.0`** — `/health`, `/livez`, `/readyz` on the metrics listener
 too, plain HTTP, as etcd's `--listen-metrics-urls` (#133): probes with
 no client certificate reach them while the client port is mutual TLS
 (stormcos#192). `tests/metrics_health.sh`.
@@ -2490,6 +2496,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] apply_many + index once per commit; equivalence test
       (`apply_many_is_the_same_as_applying_one_by_one`).
     - [x] txns in the shared commit; compare targets.
-    - [ ] Bench again (put, txn-put, 1 and 3 members) vs etcd.
-    - [ ] Full workspace; docs (benchmarks doc, 00), changelog; release;
-      close #142.
+    - [x] Bench again (put, txn-put, 1 and 3 members) vs etcd.
+    - [x] Runs capped at 256 per commit, yielding between: an uncapped
+      run of 4096 failed `multinode_fastpath` 1 in 4 (a leader change
+      while a learner applied ~24 MiB of batches; the old code 0 in 4);
+      capped, 5 of 5 pass.
+    - [x] Full workspace (5416050: 421 pass, 0 fail); docs (benchmarks
+      doc, 00), changelog; release 1.31.0; close #142.
+    - Open: 3-member put p99 579 ms vs etcd's 183 ms; slow disk not
+      measured (no bench VM; stormblock#409).

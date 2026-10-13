@@ -4,20 +4,6 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-13
-- **perf:** Writes at etcd's rate (#142). A batch's puts, deletes and
-  txns that cannot be refused half-way are applied up to 256 per commit
-  (`MvccStore::apply_many`), each at its own revision with its own
-  events, and a key's index (its whole history) is written once per
-  commit instead of on every put; compares read only the key's current
-  revision. Build VM, 1000 clients, etcd v3.7.2 `benchmark`: put
-  1.5–6.3k → 31.7k / 28.7k/s (etcd 25.5k / 23.8k), txn-put 3.0–20.5k →
-  20.2k / 25.6k/s (etcd 26.8k / 22.2k); 3 members put 9.8k (etcd 9.2k),
-  txn-put 9.0k (etcd 8.4k). `docs/benchmarks/etcd-vs-fastetcd.md`.
-- **test:** `tests/bench/compare.sh`: `FASTETCD_TAGS=tree` benches this
-  checkout, `WORKLOADS` picks workloads, `PERF=1` records a profile
-  around the 1000-client put.
-
 ### 2026-10-09
 - **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
 - **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
@@ -26,6 +12,26 @@
   1.18): apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms,
   p99 1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
   (#89)
+
+## [v1.31.0] — 2026-10-13
+
+### Changed
+- Writes at etcd's rate (#142). A batch's puts, deletes and txns that
+  cannot be refused half-way are applied up to 256 per commit
+  (`MvccStore::apply_many`), each at its own revision with its own
+  events, and a key's index (its whole history) is written once per
+  commit instead of on every put; compares read only the key's current
+  revision. Before, a hot key cost O(its history) per write and each of
+  a batch's proposals was its own write-behind commit. Build VM, 1000
+  clients, etcd v3.7.2 `benchmark`: put 1.5–6.3k → 31.7k / 28.7k/s
+  (etcd 25.5k / 23.8k), txn-put 3.0–20.5k → 20.2k / 25.6k/s (etcd
+  26.8k / 22.2k); 3 members put 9.8k (etcd 9.2k), txn-put 9.0k (etcd
+  8.4k). `docs/benchmarks/etcd-vs-fastetcd.md`.
+
+### Added
+- `tests/bench/compare.sh`: `FASTETCD_TAGS=tree` benches this checkout,
+  `WORKLOADS` picks workloads, `PERF=1` records a profile around the
+  1000-client put.
 
 ## [v1.30.0] — 2026-10-13
 
