@@ -386,7 +386,10 @@ impl FastetcdStateMachine {
             // started: one engine commit for all of them (fastetcd#142),
             // each still its own revision. The progress is staged for the
             // run's end and commits with it.
-            let run: Vec<ApplyItem<'_>> = subs[j..].iter().map_while(groupable).collect();
+            // At most MAX_RUN per commit, yielding between them: one
+            // commit (and the write lock it holds) stays short, so reads
+            // and this runtime's other tasks (heartbeats) get in.
+            let run: Vec<ApplyItem<'_>> = subs[j..].iter().take(MAX_RUN).map_while(groupable).collect();
             if run.len() > 1 {
                 let end = j + run.len();
                 self.mvcc.stage_batch_progress(encode_progress(index, end)).await;
@@ -407,6 +410,7 @@ impl FastetcdStateMachine {
                     });
                 }
                 j = end;
+                tokio::task::yield_now().await;
                 continue;
             }
             self.mvcc.stage_batch_progress(encode_progress(index, j + 1)).await;
@@ -887,6 +891,9 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
 }
 
 // ---------- helpers ----------
+
+/// Most sub-entries of a batch applied in one commit (fastetcd#142).
+const MAX_RUN: usize = 256;
 
 /// A sub-entry [`MvccStore::apply_many`] may apply with others.
 fn groupable(entry: &FastetcdLogEntry) -> Option<ApplyItem<'_>> {
