@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.29.0`** — A watch created with `fragment` gets a large response in
+**`1.30.0`** — `/health`, `/livez`, `/readyz` on the metrics listener
+too, plain HTTP, as etcd's `--listen-metrics-urls` (#133): probes with
+no client certificate reach them while the client port is mutual TLS
+(stormcos#192). `tests/metrics_health.sh`.
+
+Previous: **`1.29.0`** — A watch created with `fragment` gets a large response in
 parts, as etcd's `sendFragments` (#58): split at `--max-request-bytes`
 (unset: 1.5 MiB) into whole events, `fragment: true` on all but the
 last (`watch::fragments`); clientv3 joins them (`tests/clientv3_fragment.sh`).
@@ -2442,4 +2447,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] metrics.rs `router`; tests in `health_checks.rs` (healthy and
       leaderless member over the metrics listener).
     - [x] Docs (01, 03, README, deck), changelog.
-    - [ ] sc-build green; release 1.30.0; close #133.
+    - [x] sc-build green; release 1.30.0; close #133.
+    - Verified: sc-build of 4733765: `tests/metrics_health.sh`
+      15/15 (a certless probe is refused on the mTLS client port and
+      answered on 2381, same bodies), workspace 419 pass 0 fail.
