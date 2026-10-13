@@ -447,7 +447,13 @@ leader, and the moment it is answered they are proposed together as
 one raft entry, written and synced once. A
 burst of writes pays about one fsync, not one each; a lone write pays
 one. (openraft 0.9 appends one entry at a time and waits for its fsync,
-so the batch is where writes are grouped.) A batch takes everything that
+so the batch is where writes are grouped.) On a multi-member cluster the
+leader sends an entry to the followers while its own fsync runs (since
+1.32, #97, a patch to the vendored openraft, `vendor/openraft/
+FASTETCD.md`): a lone write costs about one fsync, as in etcd, not the
+leader's and then a follower's in series (3 members, every fsync 200 ms:
+~230 ms, was ~435 ms). A write still commits only on a quorum of durable
+copies, and no member applies an entry before its own log holds it. A batch takes everything that
 queued, up to 4096 writes or 512 KiB, so with a thousand clients waiting
 one fsync carries hundreds of writes, not at most 256 as before 1.17
 (#94). A follower behind is sent the log in AppendEntries of at most
@@ -698,10 +704,12 @@ follower cannot decode the refusal); the write is refused either way.
 
 ### Timeouts and slow disks
 
-A leader writes every log entry to its WAL and waits for the fsync before
-it does anything else, heartbeats included (openraft 0.9 sends them from
-the same loop, #103). If one fsync takes longer than the followers'
-election timeout, plus openraft's leader lease, they elect a new leader.
+A leader whose WAL fsync has been running for a heartbeat interval sends
+nothing to its followers, heartbeats included, until it completes (#103;
+since 1.32 a shorter fsync no longer holds replication back, #97, but a
+longer one is treated as a stall, as every fsync was before). If one fsync
+takes longer than the followers' election timeout, plus openraft's leader
+lease, they elect a new leader.
 With the defaults (`--heartbeat-interval 250`, `--election-timeout 1000`)
 that is a stall of about 3–4 s. Each election pauses writes for a few
 seconds. etcd behaves the same way and has the same remedy:

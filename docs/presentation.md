@@ -202,7 +202,7 @@ ahead, #94).
 | | Issue |
 |---|---|
 | P1 | #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
-| P2 | #69 `/health` always healthy · #97 3 members: a lone write pays two fsyncs in series · #103 leadership lost under heavy load (fixed election timeouts) · #92 keepalive through Raft · #105 unknown-token error text breaks clientv3 re-auth · #84 #89 #101 verify on an X9 spinning disk |
+| P2 | #69 `/health` always healthy · #103 leadership lost under heavy load (fixed election timeouts) · #92 keepalive through Raft · #105 unknown-token error text breaks clientv3 re-auth · #84 #89 #101 verify on an X9 spinning disk |
 
 Auth: no known authorization gap; tokens never expire (#46).
 `gh issue list` for everything.
@@ -220,7 +220,6 @@ Auth: no known authorization gap; tokens never expire (#46).
   (#64), WebSocket gateway streams (#66), a real `/health` (#69),
   `--auto-compaction-mode` (#21, an owner decision).
 - **Writes on slow disks and 3 members**: more writes per fsync (#94),
-  replicate before the leader's own fsync (#97),
   (#92), configurable election timeouts (#103).
 - **Operations**: a rolling-upgrade test (#65), test containers on the
   test machines (#36).

@@ -217,7 +217,13 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
    `FastetcdLogEntry::Batch` — one RaftCore message, one log append, one
    fsync (up to 4096 proposals or 512 KiB, #94), each applied at its own
    revision with its own answer (#75). RaftCore appends one entry at a
-   time and waits for its fsync, so group commit happens here (#95):
+   time and waits for its fsync, so group commit happens here (#95). On
+   the leader that wait is patched out (vendored openraft, #97,
+   `vendor/openraft/FASTETCD.md`): the leader submits its append and
+   replicates at once, counts itself in the quorum when its fsync
+   returns, and holds replication only if that fsync outlasts a
+   heartbeat interval; the state machine applies an entry only once the
+   local log holds it durably. Batching still works as follows:
    one batch is in RaftCore at a time, and the next is formed the
    moment it is answered, from everything that arrived meanwhile (a
    write waits about two fsyncs under load, one when alone). Replication

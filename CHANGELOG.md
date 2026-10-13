@@ -4,6 +4,19 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-13
+- **perf:** On a multi-member cluster a lone write costs about one fsync,
+  as in etcd, not the leader's then a follower's (#97). openraft 0.9.24
+  is vendored (`vendor/openraft`, crates.io sha256 checked, used through
+  `[patch.crates-io]`) with one change: the leader submits its own log
+  append and replicates at once, counts itself in the commit quorum when
+  its flush returns (at most 16 unflushed), and holds all replication
+  and heartbeats while a flush is a heartbeat interval old, as before, so
+  a stalled leader still loses the leadership. The state machine applies
+  an entry only once the local log holds it durably
+  (`LogProgress::wait_durable`). 3 members, every fsync 200 ms: lone
+  write median 215–246 ms (was 433–438). `vendor/openraft/FASTETCD.md`.
+
 ### 2026-10-09
 - **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
 - **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
