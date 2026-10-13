@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# openraft 0.9.24 with fastetcd's patch (#97, vendor/openraft/FASTETCD.md),
+# used through [patch.crates-io] below; not a member of this workspace.
+exclude = ["vendor/openraft"]
 members = [
     "crates/proto",
     "crates/storage",
@@ -88,3 +91,7 @@ strip = "debuginfo"
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+[patch.crates-io]
+# The leader replicates without waiting for its own log fsync (#97).
+openraft = { path = "vendor/openraft" }

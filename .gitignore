@@ -20,6 +20,8 @@ credentials/
 data/
 # ...but benchmark results are published (fastetcd#90)
 !docs/benchmarks/data/
+# ...and the vendored openraft's docs module (#97)
+!vendor/openraft/src/docs/data/
 *.db
 *.redb
 *.wal
