@@ -1,8 +1,8 @@
 use crate::core::sm;
 use crate::raft::VoteResponse;
 use crate::replication;
-use crate::MessageSummary;
 use crate::LogId;
+use crate::MessageSummary;
 use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::Vote;

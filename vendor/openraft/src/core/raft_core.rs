@@ -857,7 +857,7 @@ where
                     Err(e) => Err(StorageIOError::write_logs(AnyError::error(e)).into()),
                 };
                 // Counted even when it failed: RaftCore may be waiting for
-                // it (`wait_leader_flushes`), and stops on the error.
+                // it (`wait_if_leader_flush_stalled`), and stops on the error.
                 flushed.send_modify(|n| *n += 1);
                 let sent = tx_notify.send(Notify::LocalLogFlushed {
                     vote: p.vote,
