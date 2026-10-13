@@ -2554,4 +2554,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Measured (build VM, side by side, 3 rounds, every fsync 200 ms):
       lone write median 215-246 ms vs 433-438 ms unpatched.
     - [x] Docs (00, 03, deck, vendor/openraft/FASTETCD.md), changelog;
-      release 1.32.0; upstream PR; close #97.
+      release 1.32.0 (golden-fastetcd-d5852f07b743); upstream PR
+      databendlabs/openraft#2163 (upstream's tests crate passes on it as
+      on its base); close #97. When it ships in an openraft release,
+      drop `vendor/openraft` (FASTETCD.md § Dropping it).

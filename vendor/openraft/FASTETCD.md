@@ -59,6 +59,12 @@ durably (`LogProgress::wait_durable`, `FastetcdStateMachine::
 follow_log_durability`), so the data file is never made durable ahead of
 the log.
 
+## Upstream
+
+Offered to openraft's `release-0.9` as
+https://github.com/databendlabs/openraft/pull/2163 (2026-10-13), the same
+change with fastetcd's references taken out of its comments.
+
 ## Dropping it
 
 When an openraft release does this itself (0.10's IO pipeline separates
