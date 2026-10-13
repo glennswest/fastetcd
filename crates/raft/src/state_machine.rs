@@ -66,6 +66,10 @@ pub struct FastetcdStateMachine {
     /// Proposals per applied entry, for snapshots counted in proposals
     /// (fastetcd#80, `crate::snapshot_policy`).
     proposals: Arc<crate::snapshot_policy::ProposalLog>,
+    /// The log store's durability, once [`follow_log_durability`]
+    /// (Self::follow_log_durability) is called: an entry is applied only
+    /// once this member's log holds it durably (fastetcd#97).
+    log_durable: Arc<std::sync::OnceLock<crate::kv_log_store::LogProgress>>,
 }
 
 /// `LogId` → the value [`FastetcdStateMachine::applied_index`] carries.
@@ -266,6 +270,7 @@ impl FastetcdStateMachine {
             mvcc,
             snapshots,
             proposals: Arc::default(),
+            log_durable: Arc::default(),
         })
     }
 
@@ -425,6 +430,18 @@ impl FastetcdStateMachine {
             self.mvcc.stage_raft_meta(applied_bytes, None).await;
         }
         Ok(FastetcdLogResponse::Batch(out))
+    }
+
+    /// Apply an entry only once `progress` (this member's log store's)
+    /// says it is durable in the log (fastetcd#97). The patched openraft
+    /// lets a leader commit an entry on a quorum of followers before its
+    /// own fsync of it returns; without this wait it could apply it, a
+    /// checkpoint could make that durable in the data file, and a crash
+    /// would leave the data file ahead of the log. Followers append
+    /// before they acknowledge, so they never wait here. Call before
+    /// starting Raft; later calls are ignored.
+    pub fn follow_log_durability(&self, progress: crate::kv_log_store::LogProgress) {
+        let _ = self.log_durable.set(progress);
     }
 
     /// Proposals per applied entry (fastetcd#80): what
@@ -595,6 +612,9 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
 
         for entry in entries {
             let log_id = entry.log_id;
+            if let Some(progress) = self.log_durable.get() {
+                progress.wait_durable(log_id.index).await;
+            }
             let applied_bytes = bincode::serialize(&Some(log_id)).map_err(|e| {
                 StorageIOError::new(
                     ErrorSubject::StateMachine,

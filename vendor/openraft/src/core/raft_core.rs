@@ -89,6 +89,7 @@ use crate::storage::RaftLogReaderExt;
 use crate::storage::RaftLogStorage;
 use crate::storage::RaftStateMachine;
 use crate::type_config::alias::InstantOf;
+use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::ResponderOf;
 use crate::type_config::TypeConfigExt;
 use crate::AsyncRuntime;
@@ -104,6 +105,36 @@ use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::StorageIOError;
 use crate::Vote;
+
+/// fastetcd patch (fastetcd#97): most appends a leader may have submitted
+/// but not yet seen flushed. Past it, the next append waits, as every
+/// append did before the patch, so a stuck disk stops the leader instead
+/// of queueing entries without bound.
+pub(crate) const MAX_UNFLUSHED_LEADER_APPENDS: usize = 16;
+
+/// fastetcd patch (fastetcd#97): a leader's appends submitted without
+/// waiting for their flush, and the task that reports the flushes back
+/// to RaftCore, one by one in submission order.
+pub(crate) struct LeaderFlush<C: RaftTypeConfig> {
+    permits: Arc<tokio::sync::Semaphore>,
+    tx: Option<mpsc::UnboundedSender<PendingFlush<C>>>,
+}
+
+impl<C: RaftTypeConfig> Default for LeaderFlush<C> {
+    fn default() -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(MAX_UNFLUSHED_LEADER_APPENDS)),
+            tx: None,
+        }
+    }
+}
+
+struct PendingFlush<C: RaftTypeConfig> {
+    vote: Vote<C::NodeId>,
+    last_log_id: LogId<C::NodeId>,
+    rx: OneshotReceiverOf<C, Result<LogIOId<C::NodeId>, std::io::Error>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
 
 /// A temp struct to hold the data for a node that is being applied.
 #[derive(Debug)]
@@ -205,6 +236,9 @@ where
     pub(crate) tx_server_metrics: watch::Sender<RaftServerMetrics<C::NodeId, C::Node>>,
 
     pub(crate) command_state: CommandState,
+
+    /// fastetcd patch (fastetcd#97).
+    pub(crate) leader_flush: LeaderFlush<C>,
 
     pub(crate) span: Span,
 
@@ -727,6 +761,79 @@ where
         rx.await
             .map_err(|e| StorageIOError::write_logs(AnyError::error(e)))?
             .map_err(|e| StorageIOError::write_logs(AnyError::error(e)))?;
+        Ok(())
+    }
+
+    /// fastetcd patch (fastetcd#97): append as leader without waiting
+    /// for the flush, so the `Replicate` commands that follow go out at
+    /// once and the followers' fsyncs overlap the leader's. The flush is
+    /// reported later as [`Notify::LocalLogFlushed`], and only then does
+    /// the leader count itself in the commit quorum, so a commit still
+    /// needs a quorum of durable copies.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub(crate) async fn submit_leader_append<I>(
+        &mut self,
+        entries: I,
+        vote: Vote<C::NodeId>,
+        last_log_id: LogId<C::NodeId>,
+    ) -> Result<(), StorageError<C::NodeId>>
+    where
+        I: IntoIterator<Item = C::Entry> + OptionalSend,
+        I::IntoIter: OptionalSend,
+    {
+        let permit = self
+            .leader_flush
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| StorageIOError::write_logs(AnyError::error(e)))?;
+
+        let (tx, rx) = C::AsyncRuntime::oneshot();
+        let log_io_id = LogIOId::new(vote.clone(), Some(last_log_id.clone()));
+        let callback = LogFlushed::new(log_io_id, tx);
+        self.log_store.append(entries, callback).await?;
+
+        let pending = PendingFlush {
+            vote,
+            last_log_id,
+            rx,
+            _permit: permit,
+        };
+        let pending = match &self.leader_flush.tx {
+            Some(fwd) => match fwd.send(pending) {
+                Ok(()) => return Ok(()),
+                Err(e) => e.0,
+            },
+            None => pending,
+        };
+        // Start the forwarder: it waits for each flush in submission
+        // order and tells RaftCore, so the leader's own progress only
+        // ever moves forward.
+        let (fwd, mut rx_pending) = mpsc::unbounded_channel::<PendingFlush<C>>();
+        let tx_notify = self.tx_notify.clone();
+        #[allow(clippy::let_underscore_future)]
+        let _ = C::spawn(async move {
+            while let Some(p) = rx_pending.recv().await {
+                let result = match p.rx.await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(StorageIOError::write_logs(AnyError::error(e)).into()),
+                    Err(e) => Err(StorageIOError::write_logs(AnyError::error(e)).into()),
+                };
+                let failed = result.is_err();
+                let sent = tx_notify.send(Notify::LocalLogFlushed {
+                    vote: p.vote,
+                    last_log_id: p.last_log_id,
+                    result,
+                });
+                drop(p._permit);
+                if sent.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let _ = fwd.send(pending);
+        self.leader_flush.tx = Some(fwd);
         Ok(())
     }
 
@@ -1313,6 +1420,24 @@ where
                 }
             }
 
+            Notify::LocalLogFlushed {
+                vote,
+                last_log_id,
+                result,
+            } => {
+                if let Err(e) = result {
+                    tracing::error!(error = display(&e), "leader log flush failed: {}", func_name!());
+                    return Err(Fatal::from(e));
+                }
+                // A flush from an earlier leadership is not progress of
+                // this one.
+                if self.does_vote_match(&vote, "LocalLogFlushed") {
+                    if let Ok(mut lh) = self.engine.leader_handler() {
+                        lh.replication_handler().update_local_progress(Some(last_log_id));
+                    }
+                }
+            }
+
             Notify::Network { response } => {
                 //
                 match response {
@@ -1623,12 +1748,20 @@ where
                 let last_log_id = entries.last().unwrap().get_log_id().clone();
                 tracing::debug!("AppendInputEntries: {}", DisplaySlice::<_>(&entries),);
 
-                self.append_to_log(entries, vote, last_log_id.clone()).await?;
+                // fastetcd patch (fastetcd#97): this node's own append as
+                // leader does not wait for its flush; a follower's still
+                // does (it answers AppendEntries only after it).
+                let own_leader_append = self.engine.leader.as_ref().is_some_and(|l| l.vote == vote);
+                if own_leader_append {
+                    self.submit_leader_append(entries, vote, last_log_id).await?;
+                } else {
+                    self.append_to_log(entries, vote, last_log_id.clone()).await?;
 
-                // The leader may have changed.
-                // But reporting to a different leader is not a problem.
-                if let Ok(mut lh) = self.engine.leader_handler() {
-                    lh.replication_handler().update_local_progress(Some(last_log_id));
+                    // The leader may have changed.
+                    // But reporting to a different leader is not a problem.
+                    if let Ok(mut lh) = self.engine.leader_handler() {
+                        lh.replication_handler().update_local_progress(Some(last_log_id));
+                    }
                 }
             }
             Command::SaveVote { vote } => {

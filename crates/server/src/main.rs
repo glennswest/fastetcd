@@ -1166,6 +1166,9 @@ async fn main() -> anyhow::Result<()> {
         },
     );
     let log_progress = log.progress();
+    // Nothing is applied before this member's log holds it durably: the
+    // leader replicates before its own fsync returns (#97).
+    sm.follow_log_durability(log_progress.clone());
     let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
     // `--snapshot-count` and `--max-in-snapshot-log-to-keep` in proposals,

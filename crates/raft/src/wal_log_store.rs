@@ -579,7 +579,7 @@ impl WalLogStore {
             .copied()
             .or(last_purged.map(|p| p.index));
         if let Some(l) = last_index {
-            progress.last_durable.fetch_max(l + 1, Ordering::Release);
+            progress.raise_durable(l + 1);
         }
         let committed_index = Arc::new(AtomicU64::new(0));
         if let Some(c) = &committed {
@@ -912,7 +912,7 @@ impl RaftLogStorage<TypeConfig> for WalLogStore {
             done: Some(Box::new(move |r: io::Result<()>| {
                 if r.is_ok() {
                     if let Some(last) = last {
-                        progress.last_durable.fetch_max(last + 1, Ordering::Release);
+                        progress.raise_durable(last + 1);
                     }
                 }
                 callback.log_io_completed(r);
