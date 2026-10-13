@@ -9,15 +9,25 @@ The write gap below was a bug, and is fixed (v1.31.0). `compare.sh` on a
 build VM (8 CPUs, SSD, btrfs; `FASTETCD_TAGS=tree`), etcd v3.7.2's
 `benchmark`, 1000 clients, puts/s, "a / b" two rounds:
 
-| | etcd v3.7.2 | fastetcd v1.30.0 | fastetcd v1.31.0 |
-|---|---:|---:|---:|
-| put, 1 member | 22 313 / 24 227 / 32 800 / 33 952; then 15 821 / 44 890 | 1 504 / 4 705 / 6 332 / 6 139 | 27 593 / 49 022 |
-| txn-put, 1 member | 19 339; then 23 689 / 52 099 | 4 230 / 20 494 / 2 978 | 23 117 / 49 102 |
-| put, 3 members (one VM) | 8 123 | – | 9 822 |
-| txn-put, 3 members | 6 984 | – | 13 051 |
+Before (v1.30.0), four runs, etcd's beside each:
 
-(etcd's columns are its runs beside each fastetcd run; the build VMs'
-disk varies from run to run, so compare within a row's round.)
+| | etcd v3.7.2 | fastetcd v1.30.0 |
+|---|---:|---:|
+| put, 1 member | 22 313 / 24 227 / 32 800 / 33 952 | 1 504 / 4 705 / 6 332 / 6 139 |
+| txn-put, 1 member | 19 339 / 32 206 / 34 705 | 4 230 / 20 494 / 2 978 |
+
+After (v1.31.0, 5416050), one job, etcd and fastetcd alternating:
+
+| | etcd v3.7.2 | fastetcd v1.31.0 |
+|---|---:|---:|
+| put, 1 member | 25 541 / 23 845, p99 121 / 108 ms | 31 721 / 28 707, p99 69 / 61 ms |
+| txn-put, 1 member | 26 847 / 22 220, p99 74 / 101 ms | 20 217 / 25 644, p99 130 / 72 ms |
+| put, 3 members (one VM) | 9 242, p99 183 ms | 9 754, p99 579 ms |
+| txn-put, 3 members | 8 398, p99 251 ms | 9 031, p99 238 ms |
+
+The build VMs' disk varies from job to job (etcd alone ran from 16k to
+45k puts/s in other jobs), so compare within a job. One open difference:
+fastetcd's put p99 on 3 members (579 vs 183 ms).
 
 Cause, from `perf` (`PERF=1`): half of fastetcd's CPU went to `memmove`
 and `bincode::serialize`. etcd's `benchmark put` writes one key
@@ -27,9 +37,9 @@ put and copied it out of the RAM index: O(history) per write, quadratic
 for a hot key. On top of that, each of a batch's ~1000 proposals was its
 own write-behind commit, so a batch filled the 1024-layer limit and
 flushed into redb inline. Now a batch's puts, deletes and txns (those
-that cannot be refused half-way) are applied in one commit, each at its
-own revision, and each key's index is written once per commit; compares
-read only a key's current revision. Not measured: a slow disk (the pve
+that cannot be refused half-way) are applied up to 256 per commit, each
+at its own revision, and each key's index is written once per commit;
+compares read only a key's current revision. Not measured: a slow disk (the pve
 bench VMs are gone); there stormblock's flush path (stormblock#409) is
 also in the way.
 

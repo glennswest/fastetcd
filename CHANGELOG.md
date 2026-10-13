@@ -6,14 +6,14 @@
 
 ### 2026-10-13
 - **perf:** Writes at etcd's rate (#142). A batch's puts, deletes and
-  txns that cannot be refused half-way are applied in one commit
+  txns that cannot be refused half-way are applied up to 256 per commit
   (`MvccStore::apply_many`), each at its own revision with its own
   events, and a key's index (its whole history) is written once per
   commit instead of on every put; compares read only the key's current
   revision. Build VM, 1000 clients, etcd v3.7.2 `benchmark`: put
-  1.5–6.3k → 27.6k / 49.0k/s (etcd 15.8k / 44.9k), txn-put 3.0–20.5k →
-  23.1k / 49.1k/s (etcd 23.7k / 52.1k); 3 members put 9.8k (etcd 8.1k),
-  txn-put 13.1k (etcd 7.0k). `docs/benchmarks/etcd-vs-fastetcd.md`.
+  1.5–6.3k → 31.7k / 28.7k/s (etcd 25.5k / 23.8k), txn-put 3.0–20.5k →
+  20.2k / 25.6k/s (etcd 26.8k / 22.2k); 3 members put 9.8k (etcd 9.2k),
+  txn-put 9.0k (etcd 8.4k). `docs/benchmarks/etcd-vs-fastetcd.md`.
 - **test:** `tests/bench/compare.sh`: `FASTETCD_TAGS=tree` benches this
   checkout, `WORKLOADS` picks workloads, `PERF=1` records a profile
   around the 1000-client put.

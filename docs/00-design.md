@@ -236,7 +236,8 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
    together (into the write-behind layer), returns the response. A
    batch's puts, deletes and txns go through `MvccStore::apply_many`
    (#142): one engine snapshot, one context and one commit for a run of
-   them, each still at its own revision with its own events, and each
+   up to 256 of them (yielding between runs, so reads and heartbeats get
+   in), each still at its own revision with its own events, and each
    key's index written once per commit, not once per put (it holds the
    key's whole history). Only requests that cannot be refused once they
    have written are grouped (`ApplyItem`); the rest apply alone. A put
