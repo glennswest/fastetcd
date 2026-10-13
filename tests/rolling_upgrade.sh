@@ -168,7 +168,8 @@ for i in 1 2 3; do
         sleep 0.2
     done
     check "member $i on $NEW_V applies writes again ($(awk -v a="$t" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f", b - a}') s after its stop)" "$up"
-    backups=$(ls "$WORK/data$i/backups" 2>/dev/null | wc -l)
+    # No backups dir when the version did not change (pipefail: ls fails).
+    backups=$({ ls "$WORK/data$i/backups" 2>/dev/null || true; } | wc -l)
     if [ "$OLD_V" != "$NEW_V" ]; then
         check "member $i wrote its pre-version backup (data$i/backups: $backups file(s))" "$([ "$backups" -ge 1 ] && echo 1 || echo 0)"
     fi
