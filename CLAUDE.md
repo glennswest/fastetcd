@@ -2451,3 +2451,21 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 4733765: `tests/metrics_health.sh`
       15/15 (a certless probe is refused on the mTLS client port and
       answered on 2381, same bodies), workspace 419 pass 0 fail.
+
+75. **Write throughput to etcd's level (#142, P1).** Owner (2026-10-12):
+    the gap is a bug. Issue numbers are v1.12 (1000 clients: etcd 15–20k
+    puts/s, fastetcd ~5k). Plan:
+    - Measure main first (`FASTETCD_TAGS=tree WORKLOADS=... PERF=1
+      tests/bench/compare.sh v3.7.2` on a build VM): puts/s, proposals
+      per fsync, checkpoints, write-behind back-pressure, a perf profile.
+    - Suspect (from reading the code): a batch of N proposals is applied
+      as N `MvccStore::apply` calls, each with its own lock, engine
+      snapshot and write-behind commit (a layer each; cap 1024), so a
+      1000-put batch costs 1000 commits. Fix candidate: apply the simple
+      sub-entries of a batch (one Put / DeleteRange each) in one context
+      and one engine commit, each at its own revision, events per
+      revision as now; batch progress then commits once with them.
+    Work items:
+    - [ ] Baseline measurement on a build VM.
+    - [ ] Fix what it shows; tests; bench again vs etcd.
+    - [ ] Docs (benchmarks doc, 00), changelog; release; close #142.
