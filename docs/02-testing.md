@@ -78,6 +78,13 @@ and certificates with openssl, starts this tree's `fastetcd` with
 ctl command over TLS: CN identity, `--user`, and the refusals (no or the
 wrong CA, plaintext against TLS, mismatched options).
 
+Health on the metrics listener (#133): `sc-build tests/metrics_health.sh`
+starts this tree's `fastetcd` as a StormCOS node runs it (client port
+mutual TLS, metrics plain HTTP), checks a probe with no client
+certificate is refused on the client port and answered on the metrics
+port (`/health`, `/livez`, `/readyz`, per-check routes, the same bodies
+as the client port's), and that `/metrics` is still served.
+
 A real rolling upgrade (#65): `sc-build 'tests/rolling_upgrade.sh
 <from-ref> [<to-ref>]'` (`tree` names this tree either side, so `tree
 v1.24.1` is a downgrade) builds both, starts three member processes on
