@@ -1448,6 +1448,44 @@ impl MvccStore {
         Ok((revision, results))
     }
 
+    /// Apply several requests, each its own revision exactly as that
+    /// many [`apply`](Self::apply) calls in order would, in one engine
+    /// snapshot and one commit (fastetcd#142): a batched raft entry's
+    /// puts and deletes. Each group must refuse, if at all, before it
+    /// writes anything, which holds for a group of one mutation (a
+    /// `Put` refuses before its writes; a `DeleteRange` never refuses).
+    /// Per group: its revision and results, or the store's revision at
+    /// that point and the refusal. Watchers get one event batch per
+    /// revision, as from separate commits.
+    pub async fn apply_many(&self, groups: &[&[Mutation]]) -> MvccResult<Vec<ApplyManyResult>> {
+        let mut state = self.inner.write_state.lock().await;
+        let snap = self.inner.engine.snapshot().await?;
+        let mut ctx = ApplyContext::default();
+        let mut local = *state;
+        let mut out = Vec::with_capacity(groups.len());
+        for mutations in groups {
+            if mutations.is_empty() {
+                out.push(Ok((local.current_rev, Vec::new())));
+                continue;
+            }
+            match self.apply_inner(&*snap, &mut ctx, &mut local, mutations).await {
+                Ok((revision, results, produced)) => {
+                    if produced {
+                        local.current_rev = revision;
+                        ctx.event_marks.push((revision, ctx.pending_events.len()));
+                    }
+                    out.push(Ok((revision, results)));
+                }
+                Err(MvccError::Refused(refusal)) => out.push(Err((local.current_rev, refusal))),
+                Err(e) => return Err(e),
+            }
+        }
+        if local.current_rev != state.current_rev {
+            self.commit_ctx(&mut state, local.current_rev, ctx).await?;
+        }
+        Ok(out)
+    }
+
     /// Range query at `target_rev` (or current state if `target_rev == 0`).
     pub async fn range(
         &self,
@@ -1669,9 +1707,15 @@ impl MvccStore {
                 ignore_lease,
                 prev_kv,
             } => {
-                let mut idx = self.index_of(ctx, key);
+                let (mut idx, from_ctx) = self.take_index(ctx, key);
                 let prev = if idx.is_live() {
-                    self.latest_record_in(snap, ctx, key, &idx).await?
+                    match self.latest_record_in(snap, ctx, key, &idx).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            restore_index(ctx, idx, from_ctx);
+                            return Err(e);
+                        }
+                    }
                 } else {
                     None
                 };
@@ -1680,6 +1724,7 @@ impl MvccStore {
                 // error: it is the client's request, and an error here
                 // used to stop every member's apply (fastetcd#49).
                 if (*ignore_value || *ignore_lease) && prev.is_none() {
+                    restore_index(ctx, idx, from_ctx);
                     return Err(MvccError::Refused(Refusal::KeyNotFound));
                 }
 
@@ -1706,13 +1751,18 @@ impl MvccStore {
                 };
 
                 let kv_key = make_kv_key(key, rev);
-                let record_bytes = bincode::serialize(&record)
-                    .map_err(|e| MvccError::Internal(format!("serialize KvRecord: {e}")))?;
+                let record_bytes = match bincode::serialize(&record) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        restore_index(ctx, idx, from_ctx);
+                        return Err(MvccError::Internal(format!("serialize KvRecord: {e}")));
+                    }
+                };
                 ctx.batch.put(TABLE_KV, &kv_key, &record_bytes);
-
-                let idx_bytes = bincode::serialize(&idx)
-                    .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                ctx.batch.put(TABLE_IDX, key, &idx_bytes);
+                // The key's index is written once, at commit
+                // (`commit_ctx`): it holds every revision of the key, so
+                // writing it per put cost a hot key O(history) per write
+                // (fastetcd#142).
 
                 // If the lease association changed, update the
                 // lease_keys reverse index. The previous lease (if
@@ -1759,17 +1809,24 @@ impl MvccStore {
                 let live_keys = self.live_keys_in_range(ctx, key, range_end);
                 let mut result = MutationResult::default();
                 for live_key in live_keys {
-                    let mut idx = self.index_of(ctx, &live_key);
+                    let (mut idx, from_ctx) = self.take_index(ctx, &live_key);
                     // Always load the prev record (regardless of
                     // the request's prev_kv flag) so the broadcast
                     // event carries it for watchers that want it.
                     let prev = if idx.is_live() {
-                        self.latest_record_in(snap, ctx, &live_key, &idx).await?
+                        match self.latest_record_in(snap, ctx, &live_key, &idx).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                restore_index(ctx, idx, from_ctx);
+                                return Err(e);
+                            }
+                        }
                     } else {
                         None
                     };
                     let closed = idx.record_delete(rev);
                     if !closed {
+                        restore_index(ctx, idx, from_ctx);
                         continue;
                     }
                     let tombstone = KvRecord {
@@ -1782,12 +1839,14 @@ impl MvccStore {
                         deleted: true,
                     };
                     let kv_key = make_kv_key(&live_key, rev);
-                    let bytes = bincode::serialize(&tombstone)
-                        .map_err(|e| MvccError::Internal(format!("serialize tombstone: {e}")))?;
+                    let bytes = match bincode::serialize(&tombstone) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            restore_index(ctx, idx, from_ctx);
+                            return Err(MvccError::Internal(format!("serialize tombstone: {e}")));
+                        }
+                    };
                     ctx.batch.put(TABLE_KV, &kv_key, &bytes);
-                    let idx_bytes = bincode::serialize(&idx)
-                        .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
-                    ctx.batch.put(TABLE_IDX, &live_key, &idx_bytes);
                     // Drop the lease_keys reverse index entry if the
                     // deleted key was attached to a lease.
                     if let Some(p) = &prev {
@@ -1827,6 +1886,13 @@ impl MvccStore {
         new_rev: i64,
         mut ctx: ApplyContext,
     ) -> MvccResult<()> {
+        // Each changed key's index, once however many revisions of it
+        // the context holds.
+        for (key, idx) in &ctx.idx_cache {
+            let idx_bytes = bincode::serialize(idx)
+                .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;
+            ctx.batch.put(TABLE_IDX, key, &idx_bytes);
+        }
         write_i64(&mut ctx.batch, META_KEY_CURRENT_REV, new_rev);
         self.fold_raft_meta(&mut ctx.batch).await;
         self.inner
@@ -1853,12 +1919,25 @@ impl MvccStore {
         state.current_rev = new_rev;
         // Broadcast the event batch. Send error here means no
         // subscribers — fine, just drop on the floor.
-        if !ctx.pending_events.is_empty() {
-            let batch = EventBatch {
-                revision: new_rev,
-                events: ctx.pending_events,
-            };
-            let _ = self.inner.event_tx.send(batch);
+        if ctx.event_marks.is_empty() {
+            if !ctx.pending_events.is_empty() {
+                let batch = EventBatch {
+                    revision: new_rev,
+                    events: ctx.pending_events,
+                };
+                let _ = self.inner.event_tx.send(batch);
+            }
+        } else {
+            // One batch per revision, in order, as separate commits sent.
+            let mut events = ctx.pending_events.into_iter();
+            let mut start = 0;
+            for (revision, end) in ctx.event_marks {
+                let batch: Vec<MvccEvent> = events.by_ref().take(end - start).collect();
+                start = end;
+                if !batch.is_empty() {
+                    let _ = self.inner.event_tx.send(EventBatch { revision, events: batch });
+                }
+            }
         }
         Ok(())
     }
@@ -1960,18 +2039,22 @@ impl MvccStore {
         Ok((!rec.is_tombstone()).then_some(rec))
     }
 
-    /// `key`'s index as the apply in progress sees it: its own earlier
-    /// change, else the resident index, else a fresh one.
-    fn index_of(&self, ctx: &ApplyContext, key: &[u8]) -> KeyIndex {
-        if let Some(idx) = ctx.idx_cache.get(key) {
-            return idx.clone();
+    /// The key's index for changing it: moved out of `ctx` if this apply
+    /// changed it already (no copy of a long history), else a copy of the
+    /// resident one. `true` if it came from `ctx`, which
+    /// [`restore_index`] needs to put it back if it is not changed.
+    fn take_index(&self, ctx: &mut ApplyContext, key: &[u8]) -> (KeyIndex, bool) {
+        if let Some(idx) = ctx.idx_cache.remove(key) {
+            return (idx, true);
         }
-        self.inner
+        let idx = self
+            .inner
             .cache
             .index
             .read()
             .get(key)
-            .unwrap_or_else(|| KeyIndex::new(key.to_vec()))
+            .unwrap_or_else(|| KeyIndex::new(key.to_vec()));
+        (idx, false)
     }
 
     /// The key's latest record as the apply in progress sees it.
@@ -2119,7 +2202,23 @@ struct ApplyContext {
     /// Events accumulated during this apply, to be broadcast after a
     /// successful commit. Order matches the order ops produced them.
     pending_events: Vec<MvccEvent>,
+    /// For a context holding several revisions ([`MvccStore::apply_many`]):
+    /// each revision and the end of its events in `pending_events`, in
+    /// order. Empty: every event is the commit's one revision.
+    event_marks: Vec<(i64, usize)>,
 }
+
+/// Put back an index [`MvccStore::take_index`] took out of `ctx` and did
+/// not change.
+fn restore_index(ctx: &mut ApplyContext, idx: KeyIndex, from_ctx: bool) {
+    if from_ctx {
+        ctx.idx_cache.insert(idx.key.clone(), idx);
+    }
+}
+
+/// One group's outcome in [`MvccStore::apply_many`]: its revision and
+/// results, or the store's revision then and why it was refused.
+pub type ApplyManyResult = Result<(i64, Vec<MutationResult>), (i64, Refusal)>;
 
 async fn previous_live_record(
     snap: &dyn Snapshot,
@@ -2446,6 +2545,113 @@ mod tests {
             range_end: end.to_vec(),
             prev_kv: true,
         }
+    }
+
+    fn put_ignore_value(key: &[u8]) -> Mutation {
+        Mutation::Put {
+            key: key.to_vec(),
+            value: Vec::new(),
+            lease: 0,
+            ignore_value: true,
+            ignore_lease: false,
+            prev_kv: true,
+        }
+    }
+
+    /// Everything a store holds at every revision, as text.
+    async fn history(s: &MvccStore) -> Vec<String> {
+        let current = s.current_revision().await;
+        let mut out = Vec::new();
+        for rev in 1..=current {
+            let r = s.range(b"\0", b"\0", 0, rev, false, false).await.unwrap();
+            out.push(format!("{rev}: {:?}", r.kvs));
+        }
+        out
+    }
+
+    fn drain(rx: &mut broadcast::Receiver<EventBatch>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push(format!("{} {:?}", b.revision, b.events));
+        }
+        out
+    }
+
+    /// `apply_many` is exactly that many `apply` calls (fastetcd#142):
+    /// revisions, results, refusals, events per revision, every
+    /// historical read, and what a reopened store holds.
+    #[tokio::test]
+    async fn apply_many_is_the_same_as_applying_one_by_one() {
+        let (_d1, one) = open_mvcc().await;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("many.redb");
+        let many = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        let mut rx_one = one.subscribe();
+        let mut rx_many = many.subscribe();
+
+        // A deterministic mix over a few keys: hot keys, deletes of
+        // missing and present keys, ranges, refused ignore_value puts.
+        let mut seed: u64 = 42;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        let keys: [&[u8]; 4] = [b"a", b"b", b"c", b"hot"];
+        let mut runs: Vec<Vec<Mutation>> = Vec::new();
+        for _ in 0..40 {
+            let n = 1 + next() % 30;
+            let mut run = Vec::new();
+            for i in 0..n {
+                let k = keys[next() % keys.len()];
+                run.push(match next() % 10 {
+                    0 => del_prev(k, b""),
+                    1 => del_range(b"a", b"c"),
+                    2 => put_ignore_value(k),
+                    3 => put_prev(k, format!("p{i}").as_bytes()),
+                    _ => put(b"hot", format!("v{i}").as_bytes()),
+                });
+            }
+            runs.push(run);
+        }
+
+        for run in &runs {
+            let mut expected = Vec::new();
+            for m in run {
+                expected.push(match one.apply(std::slice::from_ref(m)).await {
+                    Ok(r) => format!("{r:?}"),
+                    Err(MvccError::Refused(refusal)) => {
+                        format!("{:?}", Err::<(), _>((one.current_revision().await, refusal)))
+                    }
+                    Err(e) => panic!("{e}"),
+                });
+            }
+            let groups: Vec<&[Mutation]> = run.iter().map(std::slice::from_ref).collect();
+            let got: Vec<String> = many
+                .apply_many(&groups)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| match r {
+                    Ok(ok) => format!("{ok:?}"),
+                    Err(e) => format!("{:?}", Err::<(), _>(e)),
+                })
+                .collect();
+            assert_eq!(got, expected);
+            assert_eq!(drain(&mut rx_many), drain(&mut rx_one));
+        }
+        assert!(one.current_revision().await > 200);
+        assert_eq!(many.current_revision().await, one.current_revision().await);
+        assert_eq!(history(&many).await, history(&one).await);
+
+        // What it wrote to disk (each key's index once per commit).
+        let want = history(&one).await;
+        drop(rx_many);
+        drop(many);
+        let reopened = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        assert_eq!(history(&reopened).await, want);
+        let hot = reopened.range(b"hot", b"", 0, 0, false, false).await.unwrap();
+        let hot_one = one.range(b"hot", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(hot.kvs, hot_one.kvs);
     }
 
     #[tokio::test]

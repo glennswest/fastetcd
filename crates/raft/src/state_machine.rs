@@ -38,7 +38,7 @@ use tokio::sync::{watch, Mutex};
 
 use fastetcd_storage::mvcc::auth::AuthTables;
 use fastetcd_storage::mvcc::LeaseTables;
-use fastetcd_storage::mvcc::MvccStore;
+use fastetcd_storage::mvcc::{Mutation, MvccStore};
 
 use crate::snapshot_data::{Content, SnapshotFile};
 use crate::snapshot_store::{self, SnapshotStore};
@@ -370,13 +370,39 @@ impl FastetcdStateMachine {
         let mut applied_staged = false;
         // The log now holds a batch: a pre-1.10 member cannot read it (#77).
         self.mvcc.stage_batched_marker().await;
-        for (j, sub) in subs.iter().enumerate() {
+        let mut j = 0;
+        while j < subs.len() {
+            let sub = &subs[j];
             if matches!(sub, FastetcdLogEntry::Batch(_)) {
                 anyhow::bail!("nested batch in log entry {index}");
             }
             if j < skip {
                 let revision = self.mvcc.current_revision().await;
                 out.push(FastetcdLogResponse::Noop { revision });
+                j += 1;
+                continue;
+            }
+            // A run of plain puts and deletes: one engine commit for all
+            // of them (fastetcd#142), each still its own revision. The
+            // progress is staged for the run's end and commits with it.
+            let run: Vec<&[Mutation]> = subs[j..].iter().map_while(single_mutation).collect();
+            if run.len() > 1 {
+                let end = j + run.len();
+                self.mvcc.stage_batch_progress(encode_progress(index, end)).await;
+                if end == subs.len() {
+                    self.mvcc.stage_raft_meta(applied_bytes.clone(), None).await;
+                    applied_staged = true;
+                }
+                for r in self.mvcc.apply_many(&run).await? {
+                    out.push(match r {
+                        Ok((revision, results)) => FastetcdLogResponse::Apply { revision, results },
+                        Err((revision, refusal)) => {
+                            tracing::debug!(log_index = index, %refusal, "entry refused at apply");
+                            FastetcdLogResponse::Refused { revision, refusal }
+                        }
+                    });
+                }
+                j = end;
                 continue;
             }
             self.mvcc.stage_batch_progress(encode_progress(index, j + 1)).await;
@@ -385,6 +411,7 @@ impl FastetcdStateMachine {
                 applied_staged = true;
             }
             out.push(apply_data(&self.mvcc, sub, index).await?);
+            j += 1;
         }
         if !applied_staged {
             self.mvcc.stage_raft_meta(applied_bytes, None).await;
@@ -856,6 +883,16 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
 }
 
 // ---------- helpers ----------
+
+/// The mutation of an `Apply` entry that has exactly one: what
+/// [`MvccStore::apply_many`] may group, since it refuses (if at all)
+/// before writing anything.
+fn single_mutation(entry: &FastetcdLogEntry) -> Option<&[Mutation]> {
+    match entry {
+        FastetcdLogEntry::Apply { mutations } if mutations.len() == 1 => Some(mutations.as_slice()),
+        _ => None,
+    }
+}
 
 async fn apply_data(
     mvcc: &MvccStore,
