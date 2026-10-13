@@ -485,8 +485,8 @@ fn max_term(nodes: &[Node]) -> u64 {
 /// is a stall, and the leader then waits for it as before).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lone_write_on_three_members_costs_about_one_fsync() {
-    const D: Duration = Duration::from_millis(120);
-    let nodes = cluster_with(0, Timing { heartbeat: 250, election_min: 1500, election_max: 3000 }).await;
+    const D: Duration = Duration::from_millis(200);
+    let nodes = cluster_with(0, Timing { heartbeat: 500, election_min: 3000, election_max: 6000 }).await;
     let leader = leader_of(&nodes);
     let mut kv = KvClient::connect(leader.client.clone()).await.unwrap();
     for n in &nodes {
@@ -508,7 +508,9 @@ async fn a_lone_write_on_three_members_costs_about_one_fsync() {
     let median = took[took.len() / 2];
     eprintln!("lone writes, every fsync {D:?}: {took:?}, median {median:?}");
     assert!(median >= D, "a write was acknowledged before any fsync: {median:?}");
-    assert!(median < D * 3 / 2, "a lone write paid two fsyncs in series: median {median:?}, fsync {D:?}");
+    // Two in series is 2 x D and more (unpatched openraft: 275 ms at
+    // 120 ms fsyncs, patched 168-212 ms, on a build VM).
+    assert!(median < D * 8 / 5, "a lone write paid two fsyncs in series: median {median:?}, fsync {D:?}");
     // Every member has every write.
     for n in &nodes {
         wait_for("the writes on every member", || n.state.sm.mvcc().op_counts().put >= 9).await;
