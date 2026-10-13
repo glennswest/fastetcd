@@ -98,9 +98,9 @@ fi
 # ---- fastetcd at each tag, and this tree's fastetcd-bench -------------------
 for tag in $FASTETCD_TAGS; do
     if [ "$tag" = tree ]; then
-        # This checkout, with symbols for perf.
-        CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build -q --release --locked -p fastetcd-server
-        cp "$TARGET/release/fastetcd" "$WORK/bin/fastetcd-tree"
+        # This checkout, with symbols and frame pointers for perf.
+        CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=$TARGET/tree cargo build -q --release --locked -p fastetcd-server
+        cp "$TARGET/tree/release/fastetcd" "$WORK/bin/fastetcd-tree"
         continue
     fi
     [ -x "$WORK/bin/fastetcd-$tag" ] && continue
@@ -290,7 +290,7 @@ run_bench() {
     local perf=
     case $who in fastetcd-*)
         if [ "${PERF:-0}" = 1 ] && command -v perf >/dev/null; then
-            perf record -F 199 --call-graph dwarf,32768 -o "$dir/perf.data" -p "$(IFS=,; echo "${PIDS[*]}")" >"$dir/perf.log" 2>&1 &
+            perf record -F 999 -g -o "$dir/perf.data" -p "$(IFS=,; echo "${PIDS[*]}")" >"$dir/perf.log" 2>&1 &
             perf=$!
         fi ;;
     esac
