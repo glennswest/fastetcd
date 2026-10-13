@@ -156,7 +156,7 @@ ahead, #94).
 |---|---|
 | 2379 client | etcd gRPC, `grpc.health.v1`, `/health` `/livez` `/readyz`, `/v3/...` |
 | 2380 peer | `fastetcd.raft.RaftPeer` between members (mTLS with `--peer-*`) |
-| 2381 metrics | Prometheus `/metrics`, etcd's metric names |
+| 2381 metrics | Prometheus `/metrics`, etcd's metric names; `/health` `/livez` `/readyz` |
 
 - **Config**: etcd's flags (`--name`, `--initial-cluster`, `--data-dir`,
   TLS, `--quota-backend-bytes`, …) plus fastetcd's own (`--wal-*`,

@@ -1,6 +1,7 @@
 //! /health, /livez and /readyz check the member as etcd's do (fastetcd#69):
 //! healthy, NOSPACE, CORRUPT, no leader; `exclude`, `serializable`,
-//! `verbose`, the per-check routes.
+//! `verbose`, the per-check routes; and the same answers on the metrics
+//! listener (fastetcd#133).
 
 mod common;
 use common::{start_test_server_full, start_test_server_with_space, NopNet};
@@ -148,4 +149,44 @@ async fn no_leader_fails_health_and_readyz_not_livez() {
     assert_eq!(code, 503);
     assert!(body.contains("[-]linearizable_read failed: "), "{body}");
     assert!(body.contains("[+]serializable_read ok\n"), "{body}");
+}
+
+/// Serve `state`'s metrics listener (`/metrics` + health, #133) on a free port.
+async fn serve_metrics(state: Arc<ServerState>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = fastetcd_server::metrics::router(fastetcd_server::metrics::Metrics::new(), state).await;
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn the_metrics_listener_answers_health_as_the_client_port_does() {
+    let h = start_test_server_full().await;
+    let base = serve_metrics(h.state.clone()).await;
+    assert_eq!(get(&base, "/health").await, (200, r#"{"health":"true","reason":""}"#.into()));
+    assert_eq!(get(&base, "/livez").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/readyz").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/readyz/linearizable_read").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/livez/serializable_read?verbose").await.0, 200);
+    let (code, body) = get(&base, "/metrics").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("etcd_server_health_success_total"), "{body}");
+    assert_eq!(get(&base, "/").await.0, 200);
+    assert_eq!(get(&base, "/nonsense").await, (404, "not found\n".into()));
+    assert_eq!(get(&base, "/readyz/nonsense").await.0, 404);
+}
+
+#[tokio::test]
+async fn the_metrics_listener_reports_no_leader() {
+    let (_d, state) = leaderless().await;
+    let base = serve_metrics(state).await;
+    assert_eq!(
+        get(&base, "/health").await,
+        (503, "{\"health\":\"false\",\"reason\":\"RAFT NO LEADER\"}\n".into())
+    );
+    assert_eq!(get(&base, "/livez").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/readyz").await.0, 503);
 }

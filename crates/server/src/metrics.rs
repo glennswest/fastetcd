@@ -89,18 +89,11 @@
 //! task — so we always report the current truth. Scrapes are
 //! serialized, so two at once cannot count a counter's increase twice.
 
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use axum::http::StatusCode;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -934,11 +927,10 @@ fn catch_up(counter: &Counter, total: u64) {
     }
 }
 
-/// Spawn a minimal hyper HTTP/1 server on `addr` that serves the
-/// Prometheus exposition text on `GET /metrics`.
+/// Serve `/metrics` (and `/`) on `addr`, with the health routes beside
+/// them (fastetcd#133).
 pub fn spawn_server(addr: SocketAddr, metrics: Arc<Metrics>, state: Arc<ServerState>) {
     tokio::spawn(async move {
-        metrics.attach(&state).await;
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -946,67 +938,46 @@ pub fn spawn_server(addr: SocketAddr, metrics: Arc<Metrics>, state: Arc<ServerSt
                 return;
             }
         };
-        tracing::info!(target: "fastetcd::metrics", %addr, "serving /metrics");
-        loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(target: "fastetcd::metrics", "accept: {e}");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
-                }
-            };
-            let metrics = metrics.clone();
-            let state = state.clone();
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                if let Err(e) = http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| handle(req, metrics.clone(), state.clone())),
-                    )
-                    .await
-                {
-                    tracing::debug!(target: "fastetcd::metrics", "conn: {e}");
-                }
-            });
+        tracing::info!(target: "fastetcd::metrics", %addr, "serving /metrics, /health, /livez, /readyz");
+        let app = router(metrics, state).await;
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(target: "fastetcd::metrics", "serve {addr}: {e}");
         }
     });
 }
 
-async fn handle(
-    req: Request<hyper::body::Incoming>,
-    metrics: Arc<Metrics>,
-    state: Arc<ServerState>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
-    let path = req.uri().path();
-    if path != "/metrics" && path != "/" {
-        let body = Bytes::from_static(b"not found\n");
-        let mut r = Response::new(Full::new(body));
-        *r.status_mut() = StatusCode::NOT_FOUND;
-        return Ok(r);
-    }
+/// The metrics listener's routes: Prometheus text on `/metrics` and
+/// `/`, and `/health`, `/livez`, `/readyz` (and the per-check routes)
+/// with the client port's answers. etcd serves health on
+/// `--listen-metrics-urls` too, so a probe that holds no client
+/// certificate can reach it while the client port is mutual TLS.
+/// Registers `state`'s metrics with `metrics` (call it once).
+pub async fn router(metrics: Arc<Metrics>, state: Arc<ServerState>) -> axum::Router {
+    metrics.attach(&state).await;
+    let handler = {
+        let state = state.clone();
+        move || {
+            let metrics = metrics.clone();
+            let state = state.clone();
+            async move { scrape(&metrics, &state).await }
+        }
+    };
+    axum::Router::new()
+        .route("/metrics", axum::routing::any(handler.clone()))
+        .route("/", axum::routing::any(handler))
+        .merge(crate::health::router(state))
+        .fallback(|| async { (StatusCode::NOT_FOUND, "not found\n") })
+}
+
+async fn scrape(metrics: &Metrics, state: &ServerState) -> axum::response::Response {
+    use axum::response::IntoResponse;
     // Refresh under the registry lock: scrapes take turns.
     let reg = metrics.registry.lock().await;
-    metrics.refresh(&state).await;
+    metrics.refresh(state).await;
     let mut buf = String::new();
     if let Err(e) = encode(&mut buf, &reg) {
-        let body = Bytes::from(format!("encode error: {e}\n"));
-        let mut r = Response::new(Full::new(body));
-        *r.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-        return Ok(r);
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("encode error: {e}\n")).into_response();
     }
     drop(reg);
-    let _ = req
-        .into_body()
-        .collect()
-        .await
-        .map(|_| ())
-        .map_err(|_| ());
-    let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/plain; version=0.0.4")
-        .body(Full::new(Bytes::from(buf)))
-        .expect("response build");
-    Ok(resp)
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], buf).into_response()
 }

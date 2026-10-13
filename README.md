@@ -118,7 +118,7 @@ goal is a drop-in replacement, not a fork of behavior.
 | Watch / Lease / Txn | Full | Wire-compatible, nested txns included (#56); no watch fragmentation (#58) |
 | Auth | Token / per-key RBAC | Token / per-key RBAC |
 | TLS | Yes | Yes |
-| Metrics | Prometheus `/metrics` | Prometheus `/metrics` |
+| Metrics | Prometheus `/metrics`; `/health` `/livez` `/readyz` (plain HTTP) | Prometheus `/metrics` |
 | Health | grpc.health.v1, `/health` | grpc.health.v1, `/health`, `/livez`, `/readyz`, with etcd's checks (leader, alarms, reads; #69) |
 | JSON gateway | `/v3/...` (grpc-gateway) | `/v3/...`, same routes and JSON ([docs](docs/03-deploy.md#v3-json-gateway)) |
 | Data import | n/a | `fastetcd-migrate` reads etcd BoltDB snapshots |

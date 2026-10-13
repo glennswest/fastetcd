@@ -42,6 +42,9 @@ are the authority; as of stormcos 27add14 (2026-10-07):
   `FASTETCD_DATA_DIR` (stormcluster sets it for a node that joins or is
   promoted). Liveness is a TCP probe on 2379 (first after 5 s, restart
   after 3 misses): an HTTP probe cannot present a client certificate.
+  From 1.30 the metrics port also answers `/livez` and `/readyz` in plain
+  HTTP (#133), so stormcos can probe `http://127.0.0.1:2381/livez`
+  instead (stormcos#192).
 - **Volumes:** `/data/fastetcd` from the blank golden `fastetcd-data`
   (1G, headroom on top of fastetcd's own bounded growth, see
   [Disk space](#disk-space)); `/data/backup` from `fastetcd-backup` (2G),
@@ -852,7 +855,11 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
 ## Health checks
 
 On the client port, as etcd's (since 1.25, #69; before that they always
-answered healthy):
+answered healthy), and with the same answers on the metrics listener
+(`--listen-metrics-url`, plain HTTP; since 1.30, #133), as etcd serves
+them on `--listen-metrics-urls`: a probe that holds no client
+certificate (stormd's HTTP probes) reaches them there while the client
+port is mutual TLS:
 
 | Route | Healthy | Not (503) |
 |---|---|---|

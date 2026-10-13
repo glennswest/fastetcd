@@ -4,6 +4,13 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-13
+- **feat:** The metrics listener (`--listen-metrics-url`) serves
+  `/health`, `/livez`, `/readyz` and the per-check routes with the client
+  port's answers, as etcd serves them on `--listen-metrics-urls`, so a
+  probe without a client certificate can check a member whose client port
+  is mutual TLS (#133, stormcos#192). The listener is now an axum router.
+
 ### 2026-10-09
 - **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
 - **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.

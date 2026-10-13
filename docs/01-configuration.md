@@ -18,7 +18,7 @@ plain switches.
 |---|---|---|
 | 2379, `127.0.0.1` | `--listen-client-urls` | etcd v3 gRPC (KV, Watch, Lease, Cluster, Maintenance, Auth), `grpc.health.v1`, fastetcd's `FastetcdAdmin` (`auth members`, `auth adopt`); HTTP `GET /health`, `/livez`, `/readyz` (etcd's checks: leader, alarms, reads; 03 § Health checks); the v3 JSON gateway `POST /v3/...` |
 | 2380, `127.0.0.1` | `--listen-peer-urls` | raft between members (`fastetcd.raft.RaftPeer`: AppendEntries, Vote, InstallSnapshot, write/read/membership forwarding, AuthSync) |
-| 2381, `127.0.0.1` | `--listen-metrics-url` | Prometheus `GET /metrics` (plain HTTP; empty disables) |
+| 2381, `127.0.0.1` | `--listen-metrics-url` | Prometheus `GET /metrics`, and `GET /health`, `/livez`, `/readyz` with the client port's answers, for probes holding no client certificate (plain HTTP, as etcd's `--listen-metrics-urls`; since 1.30, #133; empty disables) |
 
 The defaults bind loopback. A member others must reach needs
 `--listen-*-urls` on a routable address and `--advertise-client-urls` /
@@ -60,7 +60,7 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 | Flag | Default | Env | etcd env | Meaning |
 |---|---|---|---|---|
 | `--enable-grpc-gateway` | `true` | `FASTETCD_ENABLE_GRPC_GATEWAY` | `ETCD_ENABLE_GRPC_GATEWAY` | The v3 JSON gateway on the client port ([03-deploy](03-deploy.md#v3-json-gateway)). |
-| `--listen-metrics-url` | `127.0.0.1:2381` | `FASTETCD_LISTEN_METRICS_URL` | `ETCD_LISTEN_METRICS_URLS` | `/metrics` address (host:port, no scheme); empty disables. |
+| `--listen-metrics-url` | `127.0.0.1:2381` | `FASTETCD_LISTEN_METRICS_URL` | `ETCD_LISTEN_METRICS_URLS` | `/metrics` (+ `/health` `/livez` `/readyz`) address (host:port, no scheme); empty disables. |
 
 ## Raft log and snapshots
 

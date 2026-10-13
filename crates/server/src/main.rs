@@ -237,7 +237,9 @@ struct Args {
     )]
     enable_grpc_gateway: bool,
 
-    /// Address to serve Prometheus `/metrics` on. Empty disables.
+    /// Address to serve Prometheus `/metrics` on, with `/health`,
+    /// `/livez` and `/readyz` (plain HTTP, as etcd's metrics URLs).
+    /// Empty disables.
     #[arg(
         long,
         env = "FASTETCD_LISTEN_METRICS_URL",

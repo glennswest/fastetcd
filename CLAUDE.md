@@ -2431,3 +2431,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       clientv3 v3.5.17 with a 2 MiB receive limit: with `WithFragment`
       the 3.2 MiB response arrives as one joined response of 8 events;
       without, `received message larger than max (3277020 vs. 2097152)`.
+
+74. **Health routes on the metrics listener too (#133, P3).** stormcos
+    wants HTTP `/livez` / `/readyz` probes (stormcos#192), but its client
+    port 2379 is mutual TLS and stormd's probes hold no client
+    certificate. etcd serves `/health` on `--listen-metrics-urls` for
+    that. Plan: the metrics listener becomes an axum router: `/metrics`,
+    `/`, and `health::router` merged (same handlers, same answers).
+    Work items:
+    - [x] metrics.rs `router`; tests in `health_checks.rs` (healthy and
+      leaderless member over the metrics listener).
+    - [x] Docs (01, 03, README, deck), changelog.
+    - [ ] sc-build green; release 1.30.0; close #133.
