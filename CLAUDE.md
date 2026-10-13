@@ -2465,7 +2465,31 @@ Tracked live in the Claude task system. Snapshot of the order:
       sub-entries of a batch (one Put / DeleteRange each) in one context
       and one engine commit, each at its own revision, events per
       revision as now; batch progress then commits once with them.
+    Found (build VM, 8 CPUs, 1000 clients, v1.30.0): etcd 22–34k puts/s,
+    fastetcd 1.5–6.3k; txn-put etcd 19–35k, fastetcd 3–4k. perf: half the
+    CPU in memmove + bincode. etcd's `benchmark put` writes ONE key
+    (`--key-space-size` defaults to 1), and fastetcd rewrote the key's
+    whole `KeyIndex` (every revision since the last compaction) into
+    `mvcc_idx` on every put, and cloned it from the resident index:
+    O(history) per write, O(n^2) for a hot key. Plus one write-behind
+    commit (and layer) per sub-entry of a batch, so a batch of 1000 hit
+    the 1024-layer back-pressure flush inline.
+    Done:
+    - `MvccStore::apply_many` (one snapshot, one context, one commit,
+      events per revision); the state machine sends runs of a batch's
+      sub-entries that cannot refuse after writing (`ApplyItem::mutations`
+      / `::txn`: no ignore_* puts in multi-op, no Range at a revision, no
+      nested txn) through it, batch progress staged for the run's end.
+    - A key's index is serialized once per commit (`commit_ctx`), taken
+      out of the context instead of cloned; compares read only the
+      key's current revision (`compare_targets`), through the context.
+    - put-1000c after the first two: 44.6k / 34.3k vs etcd 34.0k / 35.0k.
     Work items:
-    - [ ] Baseline measurement on a build VM.
-    - [ ] Fix what it shows; tests; bench again vs etcd.
-    - [ ] Docs (benchmarks doc, 00), changelog; release; close #142.
+    - [x] Baseline measurement on a build VM (`compare.sh`: `tree`,
+      `WORKLOADS`, `PERF=1` with frame pointers).
+    - [x] apply_many + index once per commit; equivalence test
+      (`apply_many_is_the_same_as_applying_one_by_one`).
+    - [x] txns in the shared commit; compare targets.
+    - [ ] Bench again (put, txn-put, 1 and 3 members) vs etcd.
+    - [ ] Full workspace; docs (benchmarks doc, 00), changelog; release;
+      close #142.
