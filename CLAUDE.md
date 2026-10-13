@@ -2154,8 +2154,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       members via a follower 1 694 → 27 256/s, via the leader 2 488 →
       99 820/s; WAL fsyncs in the run ~2 000 → 10–105.
 
-60. **3 members: a lone write pays two fsyncs in series (#97, P2) — waiting
-    on the owner.** Confirmed in openraft 0.9.24 and 0.9.25:
+60. **3 members: a lone write pays two fsyncs in series (#97, P2) — owner
+    approved option 1 (2026-10-09): vendored openraft patch, offered
+    upstream; see item 76.** Confirmed in openraft 0.9.24 and 0.9.25:
     `run_command(AppendInputEntries)` awaits the leader's own `LogFlushed`
     (`append_to_log`) before the `Replicate` commands that follow it run.
     Not fixable in fastetcd's code: reporting the flush early lets a
@@ -2505,3 +2506,38 @@ Tracked live in the Claude task system. Snapshot of the order:
       doc, 00), changelog; release 1.31.0; close #142.
     - Open: 3-member put p99 579 ms vs etcd's 183 ms; slow disk not
       measured (no bench VM; stormblock#409).
+
+76. **The leader replicates without waiting for its own fsync (#97, P2).**
+    Owner (2026-10-09, master's recommendation): vendor openraft 0.9.24
+    (`vendor/openraft`, sha256 of the crate = Cargo.lock's checksum,
+    `[patch.crates-io]`, excluded from the workspace), patch it, guard it
+    with openraft's own tests plus fastetcd's 3-member and crash tests,
+    offer the patch upstream, drop the copy once a release has it. Plan:
+    - openraft `RaftCore::run_command(AppendInputEntries)`: when the
+      command carries this node's own leader vote, submit the append
+      (`log_store.append`, which the WAL returns from at once) and go on,
+      so the `Replicate` commands after it run now. The flush comes back
+      in order through one forwarder task as `Notify::LocalLogFlushed`;
+      it updates the leader's own progress only if the leader's vote is
+      unchanged; an error stops RaftCore as before. At most 16 leader
+      appends unflushed (a semaphore): a stuck disk blocks RaftCore
+      again, as before, instead of queueing without bound. Followers
+      unchanged (they answer AppendEntries after their fsync).
+    - Commit still needs a durable quorum (the leader counts only once
+      flushed), so a write can commit on two followers before the
+      leader's fsync returns. fastetcd keeps applied <= locally durable:
+      the state machine waits for the log store's durable index before
+      applying an entry (`LogProgress::last_durable`, a notify), so redb
+      never gets ahead of the WAL. On the leader that wait overlaps the
+      followers' fsync: about one fsync per lone write, not two.
+    Work items:
+    - [ ] Vendor pristine 0.9.24; patch; lock update.
+    - [ ] SM waits for local durability; wiring.
+    - [ ] Tests: openraft's own suite (vendor dir), fastetcd workspace;
+      a 3-member test with a slow leader fsync (write latency ~ one fsync,
+      commit before the leader's flush, nothing lost on restart); #103's
+      leader-stall test updated (now: no election while < 16 appends
+      queue).
+    - [ ] Measure lone-write latency, 3 members, slowed fsync, before/after.
+    - [ ] Docs (00, 03, 02, vendor/openraft/FASTETCD.md), changelog;
+      release; upstream PR; close #97.
