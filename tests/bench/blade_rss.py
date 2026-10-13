@@ -59,7 +59,9 @@ class Renewals:
         self.dur = {}      # name -> leaseDurationSeconds
         self.changes = []  # (wall, name, old holder, new holder)
         self.errors = 0
-        self.f = csv.writer(open(os.path.join(OUT, "renewals.csv"), "w", newline=""))
+        # Line-buffered: a run cut off (a node powered off, a lost
+        # session) keeps everything up to then.
+        self.f = csv.writer(open(os.path.join(OUT, "renewals.csv"), "w", newline="", buffering=1))
         self.f.writerow(["wall", "lease", "holder", "renew_time", "gap_s", "transitions"])
 
     def run(self):
@@ -111,7 +113,7 @@ def main():
     ren = Renewals()
     th = threading.Thread(target=ren.run, daemon=True)
     th.start()
-    w = csv.writer(open(os.path.join(OUT, "samples.csv"), "w", newline=""))
+    w = csv.writer(open(os.path.join(OUT, "samples.csv"), "w", newline="", buffering=1))
     w.writerow(["wall"] + list(WANT))
     rows = []
     end = time.time() + HOURS * 3600
@@ -126,7 +128,8 @@ def main():
                       "rss", mib(m.get("process_resident_memory_bytes", 0)), "MiB",
                       "vcache", mib(m.get("fastetcd_value_cache_bytes", 0)),
                       "index", mib(m.get("fastetcd_key_index_bytes", 0)),
-                      "rev", int(m.get("etcd_debugging_mvcc_current_revision", 0)), flush=True)
+                      "rev", int(m.get("etcd_debugging_mvcc_current_revision", 0)),
+                      "started", int(m.get("process_start_time_seconds", 0)), flush=True)
             except OSError as e:
                 print("metrics:", e, flush=True)
             time.sleep(max(0, EVERY - (time.time() - t0)))
