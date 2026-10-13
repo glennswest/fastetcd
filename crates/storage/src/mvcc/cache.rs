@@ -135,6 +135,11 @@ impl IndexRead<'_> {
         })
     }
 
+    /// The key's generations, borrowed (no copy of its history).
+    pub fn get_generations(&self, key: &[u8]) -> Option<&[Generation]> {
+        self.0.get(key).map(Vec::as_slice)
+    }
+
     pub fn contains(&self, key: &[u8]) -> bool {
         self.0.contains_key(key)
     }

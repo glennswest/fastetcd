@@ -38,7 +38,7 @@ use tokio::sync::{watch, Mutex};
 
 use fastetcd_storage::mvcc::auth::AuthTables;
 use fastetcd_storage::mvcc::LeaseTables;
-use fastetcd_storage::mvcc::{Mutation, MvccStore};
+use fastetcd_storage::mvcc::{ApplyItem, ApplyOutcome, MvccStore};
 
 use crate::snapshot_data::{Content, SnapshotFile};
 use crate::snapshot_store::{self, SnapshotStore};
@@ -382,10 +382,11 @@ impl FastetcdStateMachine {
                 j += 1;
                 continue;
             }
-            // A run of plain puts and deletes: one engine commit for all
-            // of them (fastetcd#142), each still its own revision. The
-            // progress is staged for the run's end and commits with it.
-            let run: Vec<&[Mutation]> = subs[j..].iter().map_while(single_mutation).collect();
+            // A run of puts, deletes and txns that cannot refuse once
+            // started: one engine commit for all of them (fastetcd#142),
+            // each still its own revision. The progress is staged for the
+            // run's end and commits with it.
+            let run: Vec<ApplyItem<'_>> = subs[j..].iter().map_while(groupable).collect();
             if run.len() > 1 {
                 let end = j + run.len();
                 self.mvcc.stage_batch_progress(encode_progress(index, end)).await;
@@ -395,8 +396,11 @@ impl FastetcdStateMachine {
                 }
                 for r in self.mvcc.apply_many(&run).await? {
                     out.push(match r {
-                        Ok((revision, results)) => FastetcdLogResponse::Apply { revision, results },
-                        Err((revision, refusal)) => {
+                        ApplyOutcome::Mutations(revision, results) => {
+                            FastetcdLogResponse::Apply { revision, results }
+                        }
+                        ApplyOutcome::Txn(t) => FastetcdLogResponse::Txn(t),
+                        ApplyOutcome::Refused(revision, refusal) => {
                             tracing::debug!(log_index = index, %refusal, "entry refused at apply");
                             FastetcdLogResponse::Refused { revision, refusal }
                         }
@@ -884,12 +888,11 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
 
 // ---------- helpers ----------
 
-/// The mutation of an `Apply` entry that has exactly one: what
-/// [`MvccStore::apply_many`] may group, since it refuses (if at all)
-/// before writing anything.
-fn single_mutation(entry: &FastetcdLogEntry) -> Option<&[Mutation]> {
+/// A sub-entry [`MvccStore::apply_many`] may apply with others.
+fn groupable(entry: &FastetcdLogEntry) -> Option<ApplyItem<'_>> {
     match entry {
-        FastetcdLogEntry::Apply { mutations } if mutations.len() == 1 => Some(mutations.as_slice()),
+        FastetcdLogEntry::Apply { mutations } => ApplyItem::mutations(mutations),
+        FastetcdLogEntry::Txn { compares, success, failure } => ApplyItem::txn(compares, success, failure),
         _ => None,
     }
 }

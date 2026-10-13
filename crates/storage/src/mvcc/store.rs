@@ -1194,9 +1194,10 @@ impl MvccStore {
         // the apply loop waits on the same lock.
         let state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
-        let indexes = self.compare_indexes(compares);
+        let ctx = ApplyContext::default();
+        let targets = self.compare_targets(&ctx, compares);
         drop(state);
-        self.evaluate_compares_with(&*snap, compares, &indexes).await
+        self.evaluate_compares_with(&*snap, &ctx, compares, &targets).await
     }
 
     /// The keys attached to lease `id` (none if it does not exist), for
@@ -1449,35 +1450,56 @@ impl MvccStore {
     }
 
     /// Apply several requests, each its own revision exactly as that
-    /// many [`apply`](Self::apply) calls in order would, in one engine
-    /// snapshot and one commit (fastetcd#142): a batched raft entry's
-    /// puts and deletes. Each group must refuse, if at all, before it
-    /// writes anything, which holds for a group of one mutation (a
-    /// `Put` refuses before its writes; a `DeleteRange` never refuses).
-    /// Per group: its revision and results, or the store's revision at
-    /// that point and the refusal. Watchers get one event batch per
-    /// revision, as from separate commits.
-    pub async fn apply_many(&self, groups: &[&[Mutation]]) -> MvccResult<Vec<ApplyManyResult>> {
+    /// many [`apply`](Self::apply) / [`txn`](Self::txn) calls in order
+    /// would, in one engine snapshot and one commit (fastetcd#142): a
+    /// batched raft entry's writes. Only requests that refuse, if at
+    /// all, before they write anything may be given ([`ApplyItem::of`]
+    /// decides): a refusal must leave the shared commit untouched.
+    /// Watchers get one event batch per revision, as from separate
+    /// commits.
+    pub async fn apply_many(&self, items: &[ApplyItem<'_>]) -> MvccResult<Vec<ApplyOutcome>> {
         let mut state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
         let mut ctx = ApplyContext::default();
         let mut local = *state;
-        let mut out = Vec::with_capacity(groups.len());
-        for mutations in groups {
-            if mutations.is_empty() {
-                out.push(Ok((local.current_rev, Vec::new())));
-                continue;
-            }
-            match self.apply_inner(&*snap, &mut ctx, &mut local, mutations).await {
-                Ok((revision, results, produced)) => {
-                    if produced {
-                        local.current_rev = revision;
-                        ctx.event_marks.push((revision, ctx.pending_events.len()));
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            match *item {
+                ApplyItem::Mutations(mutations) => {
+                    if mutations.is_empty() {
+                        out.push(ApplyOutcome::Mutations(local.current_rev, Vec::new()));
+                        continue;
                     }
-                    out.push(Ok((revision, results)));
+                    match self.apply_inner(&*snap, &mut ctx, &mut local, mutations).await {
+                        Ok((revision, results, produced)) => {
+                            if produced {
+                                local.current_rev = revision;
+                                ctx.event_marks.push((revision, ctx.pending_events.len()));
+                            }
+                            out.push(ApplyOutcome::Mutations(revision, results));
+                        }
+                        Err(MvccError::Refused(refusal)) => {
+                            out.push(ApplyOutcome::Refused(local.current_rev, refusal))
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                Err(MvccError::Refused(refusal)) => out.push(Err((local.current_rev, refusal))),
-                Err(e) => return Err(e),
+                ApplyItem::Txn { compares, success, failure } => {
+                    let succeeded = self.evaluate_compares(&*snap, &ctx, compares).await?;
+                    let ops: &[TxnOp] = if succeeded { success } else { failure };
+                    let mut exec = TxnExec { main: local.current_rev + 1, sub: 0, produced_any: false };
+                    let op_results = self.txn_ops(&*snap, &mut ctx, local, &mut exec, ops).await?;
+                    self.inner.ops.txn.fetch_add(1, Ordering::Relaxed);
+                    if exec.produced_any {
+                        local.current_rev = exec.main;
+                        ctx.event_marks.push((exec.main, ctx.pending_events.len()));
+                    }
+                    out.push(ApplyOutcome::Txn(TxnResult {
+                        succeeded,
+                        revision: local.current_rev,
+                        op_results,
+                    }));
+                }
             }
         }
         if local.current_rev != state.current_rev {
@@ -1567,10 +1589,10 @@ impl MvccStore {
         let mut state = self.inner.write_state.lock().await;
         let snap = self.inner.engine.snapshot().await?;
 
-        let succeeded = self.evaluate_compares(&*snap, compares).await?;
+        let mut ctx = ApplyContext::default();
+        let succeeded = self.evaluate_compares(&*snap, &ctx, compares).await?;
         let ops: &[TxnOp] = if succeeded { success } else { failure };
 
-        let mut ctx = ApplyContext::default();
         let mut exec = TxnExec {
             main: state.current_rev + 1,
             // Sub-revisions count mutations only, as `apply` does.
@@ -1639,7 +1661,10 @@ impl MvccStore {
                         op_results.push(TxnOpResult::Mutation(res));
                     }
                     TxnOp::Txn(t) => {
-                        let succeeded = self.evaluate_compares(snap, &t.compares).await?;
+                        // The state before the outermost txn: the
+                        // resident index and `snap`, not `ctx`.
+                        let before = ApplyContext::default();
+                        let succeeded = self.evaluate_compares(snap, &before, &t.compares).await?;
                         let branch: &[TxnOp] = if succeeded { &t.success } else { &t.failure };
                         let results = self.txn_ops(snap, ctx, state, exec, branch).await?;
                         op_results.push(TxnOpResult::Txn { succeeded, op_results: results });
@@ -2110,32 +2135,47 @@ impl MvccStore {
     async fn evaluate_compares(
         &self,
         snap: &dyn Snapshot,
+        ctx: &ApplyContext,
         compares: &[Compare],
     ) -> MvccResult<bool> {
-        let indexes = self.compare_indexes(compares);
-        self.evaluate_compares_with(snap, compares, &indexes).await
+        let targets = self.compare_targets(ctx, compares);
+        self.evaluate_compares_with(snap, ctx, compares, &targets).await
     }
 
-    /// The indexes of the keys each compare covers, from the resident
-    /// index under one guard. A key absent from the index is absent.
-    fn compare_indexes(&self, compares: &[Compare]) -> Vec<Vec<KeyIndex>> {
+    /// Each compare's keys with their live revision now (`None`: absent
+    /// or deleted), as `ctx` sees them over the resident index, under
+    /// one guard. Only the revision is taken, not the key's history: a
+    /// compare on a hot key used to copy all of it (fastetcd#142).
+    fn compare_targets(&self, ctx: &ApplyContext, compares: &[Compare]) -> Vec<CompareTargets> {
         let index = self.inner.cache.index.read();
+        let current = |k: &[u8], resident: Option<&[Generation]>| match ctx.idx_cache.get(k) {
+            Some(idx) => idx.current().map(|(rev, _)| rev),
+            None => resident.and_then(current_of),
+        };
         compares
             .iter()
             .map(|cmp| {
                 if cmp.range_end.is_empty() {
-                    return index.get(&cmp.key).into_iter().collect();
+                    let resident = index.get_generations(&cmp.key);
+                    if resident.is_none() && !ctx.idx_cache.contains_key(&cmp.key) {
+                        return Vec::new();
+                    }
+                    return vec![(cmp.key.clone(), current(&cmp.key, resident))];
                 }
-                match index_bounds(&cmp.key, &cmp.range_end) {
+                let mut out: CompareTargets = match index_bounds(&cmp.key, &cmp.range_end) {
                     Some((start, end)) => index
                         .range(start, end)
-                        .map(|(k, g)| KeyIndex {
-                            key: k.clone(),
-                            generations: g.clone(),
-                        })
+                        .map(|(k, g)| (k.clone(), current(k, Some(g))))
                         .collect(),
                     None => Vec::new(),
+                };
+                // Keys this context created.
+                for (k, idx) in &ctx.idx_cache {
+                    if in_range(k, &cmp.key, &cmp.range_end) && !index.contains(k) {
+                        out.push((k.clone(), idx.current().map(|(rev, _)| rev)));
+                    }
                 }
+                out
             })
             .collect()
     }
@@ -2143,52 +2183,64 @@ impl MvccStore {
     async fn evaluate_compares_with(
         &self,
         snap: &dyn Snapshot,
+        ctx: &ApplyContext,
         compares: &[Compare],
-        indexes: &[Vec<KeyIndex>],
+        targets: &[CompareTargets],
     ) -> MvccResult<bool> {
-        for (cmp, idxs) in compares.iter().zip(indexes) {
-            if !self.evaluate_one_compare(snap, cmp, idxs).await? {
-                return Ok(false);
+        // For a single-key compare, the latest live record (or the
+        // implicit zero record if absent); for a range, every key in it
+        // must satisfy, and an empty range matches (as etcd).
+        for (cmp, keys) in compares.iter().zip(targets) {
+            if cmp.range_end.is_empty() && keys.is_empty() {
+                if !eval_compare(&implicit_zero_record(&cmp.key), &cmp.op, &cmp.target) {
+                    return Ok(false);
+                }
+                continue;
+            }
+            for (key, rev) in keys {
+                let rec = match rev {
+                    None => implicit_zero_record(key),
+                    Some(rev) => self.record_at(snap, ctx, key, *rev).await?,
+                };
+                if !eval_compare(&rec, &cmp.op, &cmp.target) {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
     }
 
-    async fn evaluate_one_compare(
+    /// The record of `key` written at `rev`: from `ctx`, the value
+    /// cache, or the engine.
+    async fn record_at(
         &self,
         snap: &dyn Snapshot,
-        cmp: &Compare,
-        indexes: &[KeyIndex],
-    ) -> MvccResult<bool> {
-        // For a single-key compare, look up the latest live record (or
-        // implicit zero-record if absent) and compare against the target.
-        // For a range compare, every key in the range must satisfy.
-
-        if cmp.range_end.is_empty() {
-            // Single-key compare. If absent, use the implicit zero record.
-            let rec = match indexes.first() {
-                None => implicit_zero_record(&cmp.key),
-                Some(idx) => self
-                    .latest_record(snap, &cmp.key, idx)
-                    .await?
-                    .unwrap_or_else(|| implicit_zero_record(&cmp.key)),
-            };
-            return Ok(eval_compare(&rec, &cmp.op, &cmp.target));
-        }
-
-        // Range compare. All matching keys must satisfy. Empty range
-        // matches vacuously (matches etcd).
-        for idx in indexes {
-            let rec = self
-                .latest_record(snap, &idx.key, idx)
-                .await?
-                .unwrap_or_else(|| implicit_zero_record(&idx.key));
-            if !eval_compare(&rec, &cmp.op, &cmp.target) {
-                return Ok(false);
+        ctx: &ApplyContext,
+        key: &[u8],
+        rev: Revision,
+    ) -> MvccResult<KvRecord> {
+        if let Some(rec) = ctx.latest_record_cache.get(key) {
+            if !rec.is_tombstone() && rec.mod_revision == rev.main {
+                return Ok(rec.clone());
             }
         }
-        Ok(true)
+        if let Some(rec) = self.inner.cache.values.get(key, rev) {
+            return Ok((*rec).clone());
+        }
+        read_record(snap, key, rev).await
     }
+}
+
+/// What one compare covers: each key and its live revision.
+type CompareTargets = Vec<(Vec<u8>, Option<Revision>)>;
+
+/// The live revision of a key with these generations, if any.
+fn current_of(gens: &[Generation]) -> Option<Revision> {
+    let g = gens.last()?;
+    if !g.is_open() {
+        return None;
+    }
+    g.revs.last().copied()
 }
 
 // ---------- helpers ----------
@@ -2216,9 +2268,53 @@ fn restore_index(ctx: &mut ApplyContext, idx: KeyIndex, from_ctx: bool) {
     }
 }
 
-/// One group's outcome in [`MvccStore::apply_many`]: its revision and
-/// results, or the store's revision then and why it was refused.
-pub type ApplyManyResult = Result<(i64, Vec<MutationResult>), (i64, Refusal)>;
+/// A request [`MvccStore::apply_many`] applies.
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyItem<'a> {
+    Mutations(&'a [Mutation]),
+    Txn { compares: &'a [Compare], success: &'a [TxnOp], failure: &'a [TxnOp] },
+}
+
+impl<'a> ApplyItem<'a> {
+    /// `Some` for a request that can share a commit with others: one
+    /// that refuses, if at all, before writing anything, and whose
+    /// compares need no state but the shared one. That is: mutations
+    /// that are one mutation, or none with `ignore_value` /
+    /// `ignore_lease` (the only refusal a mutation has); a txn with no
+    /// nested txn (its compares see the state before the outermost
+    /// txn), no such put and no Range at a given revision (which can be
+    /// compacted or in the future).
+    pub fn mutations(mutations: &'a [Mutation]) -> Option<Self> {
+        (mutations.len() == 1 || !mutations.iter().any(ignores_prev))
+            .then_some(ApplyItem::Mutations(mutations))
+    }
+
+    /// See [`ApplyItem::mutations`].
+    pub fn txn(compares: &'a [Compare], success: &'a [TxnOp], failure: &'a [TxnOp]) -> Option<Self> {
+        let plain = |ops: &[TxnOp]| {
+            ops.iter().all(|op| match op {
+                TxnOp::Mutation(m) => !ignores_prev(m),
+                TxnOp::Range(r) => r.revision == 0,
+                TxnOp::Txn(_) => false,
+            })
+        };
+        (plain(success) && plain(failure)).then_some(ApplyItem::Txn { compares, success, failure })
+    }
+}
+
+fn ignores_prev(m: &Mutation) -> bool {
+    matches!(m, Mutation::Put { ignore_value, ignore_lease, .. } if *ignore_value || *ignore_lease)
+}
+
+/// One request's outcome in [`MvccStore::apply_many`].
+#[derive(Debug, Clone)]
+pub enum ApplyOutcome {
+    /// Its revision and results, as [`MvccStore::apply`] returns them.
+    Mutations(i64, Vec<MutationResult>),
+    Txn(TxnResult),
+    /// The store's revision then, and why it was refused.
+    Refused(i64, Refusal),
+}
 
 async fn previous_live_record(
     snap: &dyn Snapshot,
@@ -2577,8 +2673,26 @@ mod tests {
         out
     }
 
-    /// `apply_many` is exactly that many `apply` calls (fastetcd#142):
-    /// revisions, results, refusals, events per revision, every
+    /// A request of the equivalence test: plain mutations or a txn.
+    enum Req {
+        M(Vec<Mutation>),
+        T(Vec<Compare>, Vec<TxnOp>, Vec<TxnOp>),
+    }
+
+    fn range_op(key: &[u8], end: &[u8]) -> TxnOp {
+        TxnOp::Range(RangeOp {
+            key: key.to_vec(),
+            range_end: end.to_vec(),
+            limit: 0,
+            revision: 0,
+            keys_only: false,
+            count_only: false,
+        })
+    }
+
+    /// `apply_many` is exactly that many `apply` / `txn` calls
+    /// (fastetcd#142): revisions, results, refusals, txn branches seeing
+    /// earlier requests of the same commit, events per revision, every
     /// historical read, and what a reopened store holds.
     #[tokio::test]
     async fn apply_many_is_the_same_as_applying_one_by_one() {
@@ -2590,57 +2704,96 @@ mod tests {
         let mut rx_many = many.subscribe();
 
         // A deterministic mix over a few keys: hot keys, deletes of
-        // missing and present keys, ranges, refused ignore_value puts.
+        // missing and present keys, ranges, refused ignore_value puts,
+        // txns comparing what earlier requests in the run wrote.
         let mut seed: u64 = 42;
         let mut next = move || {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (seed >> 33) as usize
         };
         let keys: [&[u8]; 4] = [b"a", b"b", b"c", b"hot"];
-        let mut runs: Vec<Vec<Mutation>> = Vec::new();
+        let mut runs: Vec<Vec<Req>> = Vec::new();
         for _ in 0..40 {
             let n = 1 + next() % 30;
             let mut run = Vec::new();
             for i in 0..n {
                 let k = keys[next() % keys.len()];
-                run.push(match next() % 10 {
-                    0 => del_prev(k, b""),
-                    1 => del_range(b"a", b"c"),
-                    2 => put_ignore_value(k),
-                    3 => put_prev(k, format!("p{i}").as_bytes()),
-                    _ => put(b"hot", format!("v{i}").as_bytes()),
+                let k2 = keys[next() % keys.len()];
+                let v = format!("v{}", next() % 3).into_bytes();
+                run.push(match next() % 12 {
+                    0 => Req::M(vec![del_prev(k, b"")]),
+                    1 => Req::M(vec![del_range(b"a", b"c")]),
+                    2 => Req::M(vec![put_ignore_value(k)]),
+                    3 => Req::M(vec![put_prev(k, format!("p{i}").as_bytes())]),
+                    4 => Req::M(vec![put(k, &v), put(k2, b"two"), del_range(k2, b"")]),
+                    5 | 6 => {
+                        let target = match next() % 3 {
+                            0 => CompareTarget::Value(v.clone()),
+                            1 => CompareTarget::Version(next() as i64 % 4),
+                            _ => CompareTarget::ModRevision(0),
+                        };
+                        let op = [CompareOp::Equal, CompareOp::NotEqual, CompareOp::Greater, CompareOp::Less]
+                            [next() % 4];
+                        let range_end = if next() % 4 == 0 { b"d".to_vec() } else { Vec::new() };
+                        let key = if range_end.is_empty() { k.to_vec() } else { b"a".to_vec() };
+                        Req::T(
+                            vec![Compare { key, range_end, op, target }],
+                            vec![
+                                TxnOp::Mutation(put(k2, format!("t{i}").as_bytes())),
+                                range_op(k2, b""),
+                                range_op(b"a", b"z"),
+                            ],
+                            vec![TxnOp::Mutation(del_prev(k2, b"")), range_op(k, b"")],
+                        )
+                    }
+                    7 => Req::T(vec![], vec![range_op(b"a", b"z")], vec![]),
+                    _ => Req::M(vec![put(b"hot", format!("v{i}").as_bytes())]),
                 });
             }
             runs.push(run);
         }
 
+        let mut grouped = 0;
         for run in &runs {
             let mut expected = Vec::new();
-            for m in run {
-                expected.push(match one.apply(std::slice::from_ref(m)).await {
-                    Ok(r) => format!("{r:?}"),
-                    Err(MvccError::Refused(refusal)) => {
-                        format!("{:?}", Err::<(), _>((one.current_revision().await, refusal)))
-                    }
-                    Err(e) => panic!("{e}"),
+            for r in run {
+                expected.push(match r {
+                    Req::M(m) => match one.apply(m).await {
+                        Ok((rev, res)) => format!("M {rev} {res:?}"),
+                        Err(MvccError::Refused(refusal)) => {
+                            format!("R {} {refusal:?}", one.current_revision().await)
+                        }
+                        Err(e) => panic!("{e}"),
+                    },
+                    Req::T(c, s, f) => format!("T {:?}", one.txn(c, s, f).await.unwrap()),
                 });
             }
-            let groups: Vec<&[Mutation]> = run.iter().map(std::slice::from_ref).collect();
+            let items: Vec<ApplyItem<'_>> = run
+                .iter()
+                .map(|r| match r {
+                    Req::M(m) => ApplyItem::mutations(m).unwrap(),
+                    Req::T(c, s, f) => ApplyItem::txn(c, s, f).unwrap(),
+                })
+                .collect();
+            grouped += items.len();
             let got: Vec<String> = many
-                .apply_many(&groups)
+                .apply_many(&items)
                 .await
                 .unwrap()
                 .into_iter()
                 .map(|r| match r {
-                    Ok(ok) => format!("{ok:?}"),
-                    Err(e) => format!("{:?}", Err::<(), _>(e)),
+                    ApplyOutcome::Mutations(rev, res) => format!("M {rev} {res:?}"),
+                    ApplyOutcome::Refused(rev, refusal) => format!("R {rev} {refusal:?}"),
+                    ApplyOutcome::Txn(t) => format!("T {t:?}"),
                 })
                 .collect();
             assert_eq!(got, expected);
             assert_eq!(drain(&mut rx_many), drain(&mut rx_one));
         }
+        assert!(grouped > 300);
         assert!(one.current_revision().await > 200);
         assert_eq!(many.current_revision().await, one.current_revision().await);
+        assert_eq!(many.op_counts(), one.op_counts());
         assert_eq!(history(&many).await, history(&one).await);
 
         // What it wrote to disk (each key's index once per commit).
@@ -2652,6 +2805,25 @@ mod tests {
         let hot = reopened.range(b"hot", b"", 0, 0, false, false).await.unwrap();
         let hot_one = one.range(b"hot", b"", 0, 0, false, false).await.unwrap();
         assert_eq!(hot.kvs, hot_one.kvs);
+    }
+
+    /// Only requests that cannot refuse after writing share a commit.
+    #[test]
+    fn what_may_share_a_commit() {
+        let iv = [put_ignore_value(b"a")];
+        assert!(ApplyItem::mutations(&iv).is_some(), "one mutation refuses before writing");
+        let two_iv = [put(b"a", b"1"), put_ignore_value(b"a")];
+        assert!(ApplyItem::mutations(&two_iv).is_none());
+        let plain = [put(b"a", b"1"), del_range(b"b", b"")];
+        assert!(ApplyItem::mutations(&plain).is_some());
+        let ok = [TxnOp::Mutation(put(b"a", b"1")), range_op(b"a", b"")];
+        assert!(ApplyItem::txn(&[], &ok, &[]).is_some());
+        let refusing = [TxnOp::Mutation(put_ignore_value(b"a"))];
+        assert!(ApplyItem::txn(&[], &ok, &refusing).is_none());
+        let at_rev = [TxnOp::Range(RangeOp { key: b"a".to_vec(), revision: 3, ..Default::default() })];
+        assert!(ApplyItem::txn(&[], &at_rev, &[]).is_none());
+        let nested = [TxnOp::Txn(NestedTxn { compares: vec![], success: vec![], failure: vec![] })];
+        assert!(ApplyItem::txn(&[], &[], &nested).is_none());
     }
 
     #[tokio::test]
