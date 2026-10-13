@@ -2237,6 +2237,14 @@ Tracked live in the Claude task system. Snapshot of the order:
     and every kube-system Lease's renewals each second over hours, with
     `blade_getlatency.py` rounds (writes on) for load and for GET p99 with
     concurrent writes.
+    2026-10-13: 11.99's run never happened (server3's 11.99 install
+    failed; X9's last-known-good is 11.88, fastetcd < 1.24, no process
+    metrics; 12.14 failed on X9; the master is installing 12.21, fastetcd
+    1.31, on server1). Now: pvetest2 (12.21-flowsdn, fastetcd 1.31, a
+    real node with live leases), leased 93b5dafc91 until 02:13Z:
+    `blade_rss.py` 4 h + a `blade_getlatency.py` round (writes on) every
+    30 min, `tmp/rss84-pvetest2/`. Then the same on an X9 blade with 12.21
+    after the blades' power-on (11:00Z) — the issue's acceptance.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
