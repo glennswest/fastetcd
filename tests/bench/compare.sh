@@ -290,7 +290,7 @@ run_bench() {
     local perf=
     case $who in fastetcd-*)
         if [ "${PERF:-0}" = 1 ] && command -v perf >/dev/null; then
-            perf record -F 499 -g -o "$dir/perf.data" -p "$(IFS=,; echo "${PIDS[*]}")" >"$dir/perf.log" 2>&1 &
+            perf record -F 199 --call-graph dwarf,32768 -o "$dir/perf.data" -p "$(IFS=,; echo "${PIDS[*]}")" >"$dir/perf.log" 2>&1 &
             perf=$!
         fi ;;
     esac
@@ -303,7 +303,12 @@ run_bench() {
         wait "$perf" 2>/dev/null || true
         perf report -i "$dir/perf.data" --no-children --percent-limit 0.7 --stdio -g none \
             >"$OUT/raw/perf-$DISK-$n-$who-put-1000c.txt" 2>&1 || cat "$dir/perf.log"
-        head -60 "$OUT/raw/perf-$DISK-$n-$who-put-1000c.txt" | sed 's/^/   perf| /'
+        grep -v '^#' "$OUT/raw/perf-$DISK-$n-$who-put-1000c.txt" | grep . | head -30 | sed 's/^/   perf| /'
+        # Who calls the top symbols.
+        perf report -i "$dir/perf.data" --no-children --percent-limit 4 --stdio \
+            -g caller,1,callee,function,percent --max-stack 40 \
+            >"$OUT/raw/perf-$DISK-$n-$who-put-1000c-callers.txt" 2>&1 || true
+        grep -v '^#' "$OUT/raw/perf-$DISK-$n-$who-put-1000c-callers.txt" | grep . | head -400 | sed 's/^/   perfg| /'
     fi
     local tick
     tick=$(getconf CLK_TCK)
