@@ -232,8 +232,14 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
    so a crash in the middle replays exactly the proposals that did not
    reach disk.
 4. The state machine applies it to the MVCC store: assigns the next
-   global revision, commits one redb write transaction (the mutation and
-   the raft `last_applied` together), returns the response. A put
+   global revision, commits its writes and the raft `last_applied`
+   together (into the write-behind layer), returns the response. A
+   batch's puts, deletes and txns go through `MvccStore::apply_many`
+   (#142): one engine snapshot, one context and one commit for a run of
+   them, each still at its own revision with its own events, and each
+   key's index written once per commit, not once per put (it holds the
+   key's whole history). Only requests that cannot be refused once they
+   have written are grouped (`ApplyItem`); the rest apply alone. A put
    naming a lease is checked on the leader before proposing (#19).
 
 ## Watch delivery guarantee

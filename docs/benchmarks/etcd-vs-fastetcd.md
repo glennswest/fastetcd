@@ -3,6 +3,38 @@
 *fastetcd#90, measured 2026-10-03. Reproduce with `tests/bench/compare.sh v3.7.2`;
 raw results in [`data/`](data/).*
 
+## Update 2026-10-13: write throughput (#142)
+
+The write gap below was a bug, and is fixed (v1.31.0). `compare.sh` on a
+build VM (8 CPUs, SSD, btrfs; `FASTETCD_TAGS=tree`), etcd v3.7.2's
+`benchmark`, 1000 clients, puts/s, "a / b" two rounds:
+
+| | etcd v3.7.2 | fastetcd v1.30.0 | fastetcd v1.31.0 |
+|---|---:|---:|---:|
+| put, 1 member | 22 313 / 24 227 / 32 800 / 33 952; then 15 821 / 44 890 | 1 504 / 4 705 / 6 332 / 6 139 | 27 593 / 49 022 |
+| txn-put, 1 member | 19 339; then 23 689 / 52 099 | 4 230 / 20 494 / 2 978 | 23 117 / 49 102 |
+| put, 3 members (one VM) | 8 123 | – | 9 822 |
+| txn-put, 3 members | 6 984 | – | 13 051 |
+
+(etcd's columns are its runs beside each fastetcd run; the build VMs'
+disk varies from run to run, so compare within a row's round.)
+
+Cause, from `perf` (`PERF=1`): half of fastetcd's CPU went to `memmove`
+and `bincode::serialize`. etcd's `benchmark put` writes one key
+(`--key-space-size` defaults to 1), and fastetcd rewrote that key's whole
+index (every revision since the last compaction) into `mvcc_idx` on each
+put and copied it out of the RAM index: O(history) per write, quadratic
+for a hot key. On top of that, each of a batch's ~1000 proposals was its
+own write-behind commit, so a batch filled the 1024-layer limit and
+flushed into redb inline. Now a batch's puts, deletes and txns (those
+that cannot be refused half-way) are applied in one commit, each at its
+own revision, and each key's index is written once per commit; compares
+read only a key's current revision. Not measured: a slow disk (the pve
+bench VMs are gone); there stormblock's flush path (stormblock#409) is
+also in the way.
+
+## The original comparison (#90)
+
 The owner's question: *how does fastetcd compare with the real etcd, and does
 it do better on a slow disk?* Three servers, the same machine and disk each
 time, one at a time:
@@ -45,8 +77,8 @@ applying waits on the disk): its own
 linearizable Range p99 was 835 ms. fastetcd v1.12 answers the same read in
 0.1 ms, from RAM, at nearly the same write rate (74 vs 82 renewal loops/s).
 
-**For raw write throughput, etcd is still ahead, and the gap grows as the
-disk slows.** etcd's `benchmark`, 1000 clients:
+**For raw write throughput, etcd was still ahead (v1.12; fixed in
+v1.31, above), and the gap grows as the disk slows.** etcd's `benchmark`, 1000 clients:
 
 | puts/s, 1000 clients | etcd v3.7.2 | fastetcd v1.11.0 | fastetcd v1.12.0 |
 |---|---:|---:|---:|

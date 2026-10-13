@@ -4,6 +4,20 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-13
+- **perf:** Writes at etcd's rate (#142). A batch's puts, deletes and
+  txns that cannot be refused half-way are applied in one commit
+  (`MvccStore::apply_many`), each at its own revision with its own
+  events, and a key's index (its whole history) is written once per
+  commit instead of on every put; compares read only the key's current
+  revision. Build VM, 1000 clients, etcd v3.7.2 `benchmark`: put
+  1.5–6.3k → 27.6k / 49.0k/s (etcd 15.8k / 44.9k), txn-put 3.0–20.5k →
+  23.1k / 49.1k/s (etcd 23.7k / 52.1k); 3 members put 9.8k (etcd 8.1k),
+  txn-put 13.1k (etcd 7.0k). `docs/benchmarks/etcd-vs-fastetcd.md`.
+- **test:** `tests/bench/compare.sh`: `FASTETCD_TAGS=tree` benches this
+  checkout, `WORKLOADS` picks workloads, `PERF=1` records a profile
+  around the 1000-client put.
+
 ### 2026-10-09
 - **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
 - **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
