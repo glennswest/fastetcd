@@ -478,6 +478,43 @@ fn max_term(nodes: &[Node]) -> u64 {
     nodes.iter().map(|n| n.raft.metrics().borrow().current_term).max().unwrap_or(0)
 }
 
+/// fastetcd#97: on three members a lone write costs about one fsync, as
+/// in etcd, not the leader's and then a follower's in series: the leader
+/// replicates while its own fsync runs (vendored openraft patch). Every
+/// member's fsync takes `D`, under the heartbeat interval (a longer one
+/// is a stall, and the leader then waits for it as before).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_write_on_three_members_costs_about_one_fsync() {
+    const D: Duration = Duration::from_millis(120);
+    let nodes = cluster_with(0, Timing { heartbeat: 250, election_min: 1500, election_max: 3000 }).await;
+    let leader = leader_of(&nodes);
+    let mut kv = KvClient::connect(leader.client.clone()).await.unwrap();
+    for n in &nodes {
+        n.log.set_sync_delay(D);
+    }
+    let mut took = Vec::new();
+    for i in 0..9 {
+        let t = Instant::now();
+        kv.put(pb::PutRequest { key: format!("lone{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+        took.push(t.elapsed());
+        sleep(Duration::from_millis(300)).await;
+    }
+    for n in &nodes {
+        n.log.set_sync_delay(Duration::ZERO);
+    }
+    took.sort();
+    let median = took[took.len() / 2];
+    eprintln!("lone writes, every fsync {D:?}: {took:?}, median {median:?}");
+    assert!(median >= D, "a write was acknowledged before any fsync: {median:?}");
+    assert!(median < D * 3 / 2, "a lone write paid two fsyncs in series: median {median:?}, fsync {D:?}");
+    // Every member has every write.
+    for n in &nodes {
+        wait_for("the writes on every member", || n.state.sm.mvcc().op_counts().put >= 9).await;
+    }
+}
+
 /// fastetcd#103: WAL fsyncs take `stall` (on every member, or with
 /// `everyone` false on the leader alone) while four writes go through
 /// the leader. openraft 0.9 sends heartbeats from RaftCore, which waits
