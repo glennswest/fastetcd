@@ -21,7 +21,12 @@
 # Environment:
 #   MEMBERS        "1" (default), "3", or "1 3"
 #   PARTS          default "bench durability"; add "k8s" for the apiserver rig
-#   FASTETCD_TAGS  default "v1.11.0 v1.12.0"
+#   FASTETCD_TAGS  default "v1.11.0 v1.12.0"; "tree" is this checkout
+#   WORKLOADS      the bench workloads to run (default: all of put-1c
+#                  put-1000c range-lin-1000c range-ser-1000c txn-put-1000c
+#                  watch-1000w lease-keepalive-1000c)
+#   PERF           1: record `perf` (if the host allows it) around each
+#                  fastetcd put-1000c; the report goes to OUT/raw
 #   DISK           label for the CSVs (default: dev-ssd)
 #   OUT            results directory (default tmp/compare/out)
 #   PORT_BASE      first port used (default 24000); two runs at once on
@@ -92,6 +97,12 @@ fi
 
 # ---- fastetcd at each tag, and this tree's fastetcd-bench -------------------
 for tag in $FASTETCD_TAGS; do
+    if [ "$tag" = tree ]; then
+        # This checkout, with symbols for perf.
+        CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build -q --release --locked -p fastetcd-server
+        cp "$TARGET/release/fastetcd" "$WORK/bin/fastetcd-tree"
+        continue
+    fi
     [ -x "$WORK/bin/fastetcd-$tag" ] && continue
     rev=$tag
     if ! git rev-parse -q --verify "$tag^{commit}" >/dev/null; then
@@ -210,6 +221,7 @@ PY
 bench_one() {
     local who=$1 n=$2 name=$3 clients=$4 total=$5
     shift 5
+    case " ${WORKLOADS:-$name} " in *" $name "*) ;; *) return 0 ;; esac
     local raw="$OUT/raw/bench-$DISK-$n-$who-$name.txt"
     echo "-- $who x$n: $name"
     local cap=() rc=0
@@ -253,7 +265,7 @@ fe_metrics() {
     case $who in fastetcd-*) ;; *) return 0 ;; esac
     for i in $(seq "$n"); do
         curl -sf "http://127.0.0.1:$(metrics_port "$i")/metrics" |
-            grep -E '^fastetcd_(wal_fsync|checkpoint_(max|commit_max)|write_behind_(flush|back))' |
+            grep -E '^fastetcd_(wal_(fsync|entries_synced|proposals_synced)|checkpoint_(max|commit_max|seconds|total)|checkpoints|write_behind_(flush|back|batches)|proposal|proposals_)' |
             sed "s/^/   m$i /" || true
     done
 }
@@ -275,10 +287,24 @@ run_bench() {
     t0=$(date +%s.%N) c0=$(cpu_ticks) w0=$(io_field write_bytes) x0=$(io_field wchar)
     (while :; do r=$(rss_kb); [ "$r" -gt "$max" ] && max=$r && echo "$max" >"$dir/rss_max"; sleep 0.5; done) &
     sampler=$!
+    local perf=
+    case $who in fastetcd-*)
+        if [ "${PERF:-0}" = 1 ] && command -v perf >/dev/null; then
+            perf record -F 499 -g -o "$dir/perf.data" -p "$(IFS=,; echo "${PIDS[*]}")" >"$dir/perf.log" 2>&1 &
+            perf=$!
+        fi ;;
+    esac
     bench_one "$who" "$n" put-1000c 1000 "$PUT_TOTAL" --conns=100 --clients=1000 \
         put --key-size=8 --sequential-keys --total="$PUT_TOTAL" --val-size=256
     kill "$sampler" 2>/dev/null || true
     wait "$sampler" 2>/dev/null || true
+    if [ -n "$perf" ]; then
+        kill -INT "$perf" 2>/dev/null || true
+        wait "$perf" 2>/dev/null || true
+        perf report -i "$dir/perf.data" --no-children --percent-limit 0.7 --stdio -g none \
+            >"$OUT/raw/perf-$DISK-$n-$who-put-1000c.txt" 2>&1 || cat "$dir/perf.log"
+        head -60 "$OUT/raw/perf-$DISK-$n-$who-put-1000c.txt" | sed 's/^/   perf| /'
+    fi
     local tick
     tick=$(getconf CLK_TCK)
     awk -v d="$DISK" -v n="$n" -v who="$who" -v idle="$rss_idle" -v max="$(cat "$dir/rss_max" 2>/dev/null || echo 0)" \
@@ -288,6 +314,7 @@ run_bench() {
                  printf "%s,%s,%s,%.1f,%.1f,%.3f,%.1f,%.1f\n", d, n, who, idle/1024, max/1024,
                         c/tick*k, w/1024*k, x/1024*k }' >>"$RES_CSV"
     tail -n 1 "$RES_CSV"
+    fe_metrics "$who" "$n"
 
     # The cluster may be electing after the heaviest load (seen: fastetcd
     # v1.11.0, 3 members); wait for it rather than fail the run.
