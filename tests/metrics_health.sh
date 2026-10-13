@@ -64,6 +64,7 @@ check() {
     out=$(curl -s -w '\n%{http_code}' "$@" || true)
     got=${out##*$'\n'}
     out=${out%$'\n'*}
+    out=${out%$'\n'} # the body's own trailing newline
     if [ "$got" != "$code" ]; then
         fail "$what: HTTP $got, want $code: $out"
     elif [ -n "$body" ] && [ "$out" != "$body" ]; then
