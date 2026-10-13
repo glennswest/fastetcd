@@ -10,7 +10,14 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.31.0`** — Writes at etcd's rate (#142): a batch's puts, deletes and
+**`1.32.0`** — The leader replicates while its own WAL fsync runs (#97):
+vendored openraft 0.9.24 with one patch (`vendor/openraft/FASTETCD.md`);
+a lone write on 3 members costs ~one fsync (200 ms fsyncs: ~230 vs
+~435 ms); the state machine applies only what the local log holds
+durably; a leader fsync over a heartbeat interval still holds
+replication, so a stalled leader is replaced as before.
+
+Previous: **`1.31.0`** — Writes at etcd's rate (#142): a batch's puts, deletes and
 txns that cannot be refused half-way apply up to 256 per commit
 (`MvccStore::apply_many`), and a key's index is written once per commit,
 not per put (a hot key cost O(history) per write). 1000 clients, build
@@ -2530,14 +2537,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       applying an entry (`LogProgress::last_durable`, a notify), so redb
       never gets ahead of the WAL. On the leader that wait overlaps the
       followers' fsync: about one fsync per lone write, not two.
+    - Changed while doing it: with the leader no longer blocked on its
+      fsync, a stalled leader disk kept the leadership (heartbeats went
+      on) while writes hung. So a leader flush outstanding for a
+      heartbeat interval holds replication and heartbeats until it
+      completes, as every flush did before: #103's two stall tests pass
+      unchanged (1 s timeout elects; 10 s keeps the leader).
     Work items:
-    - [ ] Vendor pristine 0.9.24; patch; lock update.
-    - [ ] SM waits for local durability; wiring.
-    - [ ] Tests: openraft's own suite (vendor dir), fastetcd workspace;
-      a 3-member test with a slow leader fsync (write latency ~ one fsync,
-      commit before the leader's flush, nothing lost on restart); #103's
-      leader-stall test updated (now: no election while < 16 appends
-      queue).
-    - [ ] Measure lone-write latency, 3 members, slowed fsync, before/after.
-    - [ ] Docs (00, 03, 02, vendor/openraft/FASTETCD.md), changelog;
-      release; upstream PR; close #97.
+    - [x] Vendor pristine 0.9.24 (f7473ba); patch; lock update.
+    - [x] SM waits for local durability; wiring (main, harnesses).
+    - [x] Tests: openraft's own suite in the vendor dir (184 pass,
+      patched and not); workspace 422 pass; `a_lone_write_on_three_
+      members_costs_about_one_fsync`; test container short/medium/long
+      (leader SIGKILL, SIGKILL keeps acknowledged writes); rolling
+      upgrade v1.31.0 -> tree and back.
+    - [x] Measured (build VM, side by side, 3 rounds, every fsync 200 ms):
+      lone write median 215-246 ms vs 433-438 ms unpatched.
+    - [x] Docs (00, 03, deck, vendor/openraft/FASTETCD.md), changelog;
+      release 1.32.0; upstream PR; close #97.

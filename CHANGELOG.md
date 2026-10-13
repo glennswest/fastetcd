@@ -4,10 +4,21 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-13
-- **perf:** On a multi-member cluster a lone write costs about one fsync,
-  as in etcd, not the leader's then a follower's (#97). openraft 0.9.24
-  is vendored (`vendor/openraft`, crates.io sha256 checked, used through
+### 2026-10-09
+- **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
+- **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
+  SSD vs v1.11.0: writes 2.9–4.4x, linearizable p99 ~15x better. pve hard
+  power cut: 301 of 300 committed objects survived. X9 blade (server3,
+  1.18): apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms,
+  p99 1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
+  (#89)
+
+## [v1.32.0] — 2026-10-13
+
+### Changed
+- On a multi-member cluster a lone write costs about one fsync, as in
+  etcd, not the leader's then a follower's (#97). openraft 0.9.24 is
+  vendored (`vendor/openraft`, crates.io sha256 checked, used through
   `[patch.crates-io]`) with one change: the leader submits its own log
   append and replicates at once, counts itself in the commit quorum when
   its flush returns (at most 16 unflushed), and holds all replication
@@ -17,14 +28,9 @@
   (`LogProgress::wait_durable`). 3 members, every fsync 200 ms: lone
   write median 215–246 ms (was 433–438). `vendor/openraft/FASTETCD.md`.
 
-### 2026-10-09
-- **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
-- **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
-  SSD vs v1.11.0: writes 2.9–4.4x, linearizable p99 ~15x better. pve hard
-  power cut: 301 of 300 committed objects survived. X9 blade (server3,
-  1.18): apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms,
-  p99 1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
-  (#89)
+### Fixed
+- `tests/rolling_upgrade.sh` no longer stops when both sides are the same
+  version (no pre-version backups dir).
 
 ## [v1.31.0] — 2026-10-13
 
