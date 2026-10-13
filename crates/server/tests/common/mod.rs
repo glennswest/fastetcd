@@ -137,6 +137,7 @@ pub async fn start_test_server_with_space(
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
     let sm = FastetcdStateMachine::open(mvcc, dir.path().join("snapshots")).await.unwrap();
     let log = KvLogStore::new(engine);
+    sm.follow_log_durability(log.progress());
     let config = Arc::new(
         Config {
             heartbeat_interval: 100,

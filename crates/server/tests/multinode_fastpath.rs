@@ -123,6 +123,8 @@ async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
         .await
         .unwrap();
     let progress = log.progress();
+    // As main does (#97).
+    sm.follow_log_durability(progress.clone());
     let log_handle = log.clone();
     fastetcd_raft::wal_log_store::spawn_checkpointer(
         log.clone(),

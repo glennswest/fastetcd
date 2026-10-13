@@ -49,6 +49,8 @@ async fn start_node(id: NodeId) -> Node {
     let log = WalLogStore::open(&wal_dir(dir.path()), engine, WalLogOptions::default())
         .await
         .unwrap();
+    // As main does (#97).
+    sm.follow_log_durability(log.progress());
 
     let config = Arc::new(
         Config {

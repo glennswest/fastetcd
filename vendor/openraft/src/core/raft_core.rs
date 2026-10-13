@@ -115,17 +115,50 @@ pub(crate) const MAX_UNFLUSHED_LEADER_APPENDS: usize = 16;
 /// fastetcd patch (fastetcd#97): a leader's appends submitted without
 /// waiting for their flush, and the task that reports the flushes back
 /// to RaftCore, one by one in submission order.
+///
+/// A flush outstanding for longer than a heartbeat interval is a
+/// stalled disk: RaftCore then waits for its flushes before it sends
+/// anything to a follower (heartbeats included), as it did on every
+/// append before the patch, so the followers elect another leader
+/// instead of following one that cannot make anything durable.
 pub(crate) struct LeaderFlush<C: RaftTypeConfig> {
     permits: Arc<tokio::sync::Semaphore>,
     tx: Option<mpsc::UnboundedSender<PendingFlush<C>>>,
+    /// Appends submitted so far.
+    submitted: u64,
+    /// Submission number and time of the appends not known to be flushed.
+    times: std::collections::VecDeque<(u64, std::time::Instant)>,
+    /// Appends flushed so far (or failed), counted by the forwarder.
+    flushed_tx: Arc<watch::Sender<u64>>,
+    flushed_rx: watch::Receiver<u64>,
+    /// Whether the current stall was logged.
+    stall_logged: bool,
 }
 
 impl<C: RaftTypeConfig> Default for LeaderFlush<C> {
     fn default() -> Self {
+        let (flushed_tx, flushed_rx) = watch::channel(0);
         Self {
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_UNFLUSHED_LEADER_APPENDS)),
             tx: None,
+            submitted: 0,
+            times: Default::default(),
+            flushed_tx: Arc::new(flushed_tx),
+            flushed_rx,
+            stall_logged: false,
         }
+    }
+}
+
+impl<C: RaftTypeConfig> LeaderFlush<C> {
+    /// Whether the oldest unflushed append was submitted `after` ago or
+    /// longer.
+    fn stalled(&mut self, after: Duration) -> bool {
+        let done = *self.flushed_rx.borrow();
+        while self.times.front().is_some_and(|(seq, _)| *seq < done) {
+            self.times.pop_front();
+        }
+        self.times.front().is_some_and(|(_, t)| t.elapsed() >= after)
     }
 }
 
@@ -800,6 +833,8 @@ where
             rx,
             _permit: permit,
         };
+        self.leader_flush.times.push_back((self.leader_flush.submitted, std::time::Instant::now()));
+        self.leader_flush.submitted += 1;
         let pending = match &self.leader_flush.tx {
             Some(fwd) => match fwd.send(pending) {
                 Ok(()) => return Ok(()),
@@ -812,6 +847,7 @@ where
         // ever moves forward.
         let (fwd, mut rx_pending) = mpsc::unbounded_channel::<PendingFlush<C>>();
         let tx_notify = self.tx_notify.clone();
+        let flushed = self.leader_flush.flushed_tx.clone();
         #[allow(clippy::let_underscore_future)]
         let _ = C::spawn(async move {
             while let Some(p) = rx_pending.recv().await {
@@ -820,14 +856,16 @@ where
                     Ok(Err(e)) => Err(StorageIOError::write_logs(AnyError::error(e)).into()),
                     Err(e) => Err(StorageIOError::write_logs(AnyError::error(e)).into()),
                 };
-                let failed = result.is_err();
+                // Counted even when it failed: RaftCore may be waiting for
+                // it (`wait_leader_flushes`), and stops on the error.
+                flushed.send_modify(|n| *n += 1);
                 let sent = tx_notify.send(Notify::LocalLogFlushed {
                     vote: p.vote,
                     last_log_id: p.last_log_id,
                     result,
                 });
                 drop(p._permit);
-                if sent.is_err() || failed {
+                if sent.is_err() {
                     break;
                 }
             }
@@ -835,6 +873,27 @@ where
         let _ = fwd.send(pending);
         self.leader_flush.tx = Some(fwd);
         Ok(())
+    }
+
+    /// fastetcd patch (fastetcd#97): if a leader append has been
+    /// waiting for its flush for a heartbeat interval or longer, wait for
+    /// every submitted append's flush (see [`LeaderFlush`]).
+    async fn wait_if_leader_flush_stalled(&mut self) {
+        let after = Duration::from_millis(self.config.heartbeat_interval);
+        if !self.leader_flush.stalled(after) {
+            self.leader_flush.stall_logged = false;
+            return;
+        }
+        if !self.leader_flush.stall_logged {
+            tracing::warn!(
+                "the leader's log flush has taken {:?} or more: holding replication and heartbeats until it completes",
+                after
+            );
+            self.leader_flush.stall_logged = true;
+        }
+        let target = self.leader_flush.submitted;
+        let mut rx = self.leader_flush.flushed_rx.clone();
+        let _ = rx.wait_for(|n| *n >= target).await;
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1819,6 +1878,7 @@ where
                 self.apply_to_state_machine(seq, already_committed.next_index(), upto.index).await?;
             }
             Command::Replicate { req, target } => {
+                self.wait_if_leader_flush_stalled().await;
                 let node = self.replications.get(&target).expect("replication to target node exists");
 
                 match req {
