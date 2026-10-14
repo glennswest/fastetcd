@@ -28,7 +28,8 @@ port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); 
 
 # run <name> <fastetcd binary> [locks]: the client's exit status.
 run() {
-    local name=$1 bin=$2 mode=${3:-} dir=$WORK/$1$3
+    local name=$1 bin=$2 mode=${3:-}
+    local dir=$WORK/$1$mode
     mkdir -p "$dir"
     local cp pp ep
     cp=$(port) pp=$(port)
