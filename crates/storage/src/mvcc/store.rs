@@ -3382,20 +3382,22 @@ mod tests {
                         assert!(rev >= last, "revision went back: {rev} after {last}");
                         assert!(out.kvs.iter().all(|kv| kv.mod_revision <= rev));
                         last = rev;
-                        // 0 would mean the latest revision.
-                        let at = (rev - 2).max(1);
-                        match s.range(b"k/", b"k0", 0, at, false, false).await {
-                            Ok(old) => {
-                                if let Some(kv) = old.kvs.iter().find(|kv| kv.mod_revision > at) {
-                                    panic!(
-                                        "read at {at} (after one at {rev}) returned {} at {}",
-                                        String::from_utf8_lossy(&kv.key),
-                                        kv.mod_revision
-                                    );
+                        // Two revisions back, once there are (0 means the latest).
+                        let at = rev - 2;
+                        if at > 0 {
+                            match s.range(b"k/", b"k0", 0, at, false, false).await {
+                                Ok(old) => {
+                                    if let Some(kv) = old.kvs.iter().find(|kv| kv.mod_revision > at) {
+                                        panic!(
+                                            "read at {at} (after one at {rev}) returned {} at {}",
+                                            String::from_utf8_lossy(&kv.key),
+                                            kv.mod_revision
+                                        );
+                                    }
                                 }
+                                Err(MvccError::Compacted { .. }) => {}
+                                Err(e) => panic!("read at {at}: {e}"),
                             }
-                            Err(MvccError::Compacted { .. }) => {}
-                            Err(e) => panic!("read at {at}: {e}"),
                         }
                         n += 1;
                     }
