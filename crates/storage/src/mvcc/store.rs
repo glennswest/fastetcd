@@ -3384,7 +3384,15 @@ mod tests {
                         last = rev;
                         let at = rev - 2;
                         match s.range(b"k/", b"k0", 0, at, false, false).await {
-                            Ok(old) => assert!(old.kvs.iter().all(|kv| kv.mod_revision <= at)),
+                            Ok(old) => {
+                                if let Some(kv) = old.kvs.iter().find(|kv| kv.mod_revision > at) {
+                                    panic!(
+                                        "read at {at} (after one at {rev}) returned {} at {}",
+                                        String::from_utf8_lossy(&kv.key),
+                                        kv.mod_revision
+                                    );
+                                }
+                            }
                             Err(MvccError::Compacted { .. }) => {}
                             Err(e) => panic!("read at {at}: {e}"),
                         }
