@@ -20,7 +20,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:2379")]
     endpoint: String,
     /// put | get-lin | get-ser | read-under-load | durability-write |
-    /// durability-check | keepalive
+    /// durability-check | keepalive | idle-put
     #[arg(long, default_value = "put")]
     mode: String,
     /// durability-check: the `acked <client> <count>` lines
@@ -42,6 +42,10 @@ struct Args {
     /// read-under-load: sequential probe reads of each kind.
     #[arg(long, default_value_t = 200)]
     probes: usize,
+    /// idle-put: the quiet time before each put, in milliseconds (0: back
+    /// to back).
+    #[arg(long, default_value_t = 2000)]
+    idle_ms: u64,
 }
 
 /// Percentiles of a latency sample in microseconds, as a line in ms.
@@ -462,6 +466,38 @@ async fn durability_check(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One client, `probes` puts, each after `idle_ms` of quiet (0: back to
+/// back), after one warm-up put (fastetcd#102).
+async fn idle_put(args: &Args) -> anyhow::Result<()> {
+    let c = KvClient::connect(args.endpoint.clone()).await?;
+    let value = vec![b'x'; args.val_bytes];
+    let put = |i: usize| {
+        let req = pb::PutRequest {
+            key: format!("/idle/{}", i % args.keys).into_bytes(),
+            value: value.clone(),
+            ..Default::default()
+        };
+        let mut c = c.clone();
+        async move {
+            let t = Instant::now();
+            c.put(req).await?;
+            Ok::<u64, tonic::Status>(t.elapsed().as_micros() as u64)
+        }
+    };
+    put(0).await?;
+    let mut lat = Vec::with_capacity(args.probes);
+    for i in 0..args.probes {
+        if args.idle_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(args.idle_ms)).await;
+        }
+        lat.push(put(i).await?);
+    }
+    println!("mode=idle-put idle={}ms val={}B", args.idle_ms, args.val_bytes);
+    let what = if args.idle_ms > 0 { "lone put after idle" } else { "put back to back" };
+    println!("  {what}: {}", summary(lat));
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Arc::new(Args::parse());
@@ -470,6 +506,7 @@ async fn main() -> anyhow::Result<()> {
         "durability-write" => return durability_write(&args).await,
         "durability-check" => return durability_check(&args).await,
         "keepalive" => return keepalive(&args).await,
+        "idle-put" => return idle_put(&args).await,
         _ => {}
     }
     let value = vec![b'x'; args.val_bytes];
