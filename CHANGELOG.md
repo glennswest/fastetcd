@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-14
+- **perf:** A raft snapshot's build and install no longer hold a decoded copy of the database in RAM (#62). The body is bincode 1 (fields in order, a `Vec` as a u64 count then items), so the same bytes are now written from the engine snapshot 128 records at a time (each table's count patched in after) and decoded a record at a time into one streamed, durable engine commit (`KvStore::commit_stream`: one redb write transaction, inserted as the ops arrive; write-behind flushes, then streams into it). A body that cannot be decoded to its end, or a decoder panic, ends the stream with an error and the commit is abandoned, so an install is still atomic. redb's `DeleteRange` now removes in place (`retain_in`) instead of listing the keys. **No format, wire or version change**: old and new members exchange identical bodies. `tests/snapshot_memory.sh v1.32.2`, ~480 MiB data file, a learner caught up by a snapshot the leader builds on demand: learner peak RSS 666–679 MiB → 83–91 MiB (6 runs); leader build + send above its base +426–622 MiB → +39–271 MiB (the rest of that is redb's page cache, `--engine-cache-bytes`).
+- **test:** `tests/snapshot_memory.sh [baseline]` (#62); unit tests: the streamed body is the old encoder's bytes over several chunks; the decoder reads every older body shape; a cut-off body installs nothing; a build never reads a whole table at once.
+
 ## [v1.32.2] — 2026-10-14
 
 ### Changed

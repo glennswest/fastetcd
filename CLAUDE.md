@@ -2755,3 +2755,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       build never asks the engine for an unbounded range;
       `tests/snapshot_memory.sh`: a learner caught up by a ~300 MB
       snapshot, VmHWM of leader and learner, v1.32.2 vs tree.
+    - Done: as planned (BODY_CHUNK 128 records; the stream ends with an
+      Err on a decode error or panic; redb DeleteRange via retain_in).
+      Verified: workspace 430 pass; `tests/snapshot_memory.sh v1.32.2`
+      (~480 MiB data): learner install peak 666–679 → 83–91 MiB; leader
+      build above base +426–622 → +39–271 MiB (redb page cache). Found: a
+      restarted idle member's RSS ~480 MiB on both versions, ~100 MiB
+      over the documented budgets (filed separately).

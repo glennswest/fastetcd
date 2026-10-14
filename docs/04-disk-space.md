@@ -92,7 +92,11 @@ reading that file a chunk at a time; received into a temp file in the
 follower's `snapshots/` directory; and installed by decoding from that
 file and renaming it into place as the follower's retained snapshot. At
 no step is the encoded database held in RAM, and a received snapshot is
-never written twice. Receiving follows the same rules as any other
+never written twice. Since 1.32.3 its tables are not held decoded either
+(#62): a build writes them from the engine 128 records at a time, and an
+install decodes them a record at a time into one durable engine commit
+(still atomic: a body that cannot be read to its end installs nothing).
+The format is unchanged. Receiving follows the same rules as any other
 snapshot write: the follower's retained snapshots are rolled off before
 the first chunk lands, and on `ENOSPC` they are discarded and the chunk
 retried. If the disk still cannot take it, the snapshot is received,

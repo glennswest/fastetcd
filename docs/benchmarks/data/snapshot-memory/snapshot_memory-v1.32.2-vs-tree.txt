@@ -1,0 +1,42 @@
+mem62c.out:== v1.32.2 (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62c.out:   load:   throughput: 1536 ops/sec
+mem62c.out:   n1 at revision 29984, data file 479 MiB, retained snapshots: 1
+mem62c.out:   n1 restarted: RSS 486 MiB, peak 486 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62c.out:   n2 caught up in 3 s; n2 snapshots: 1, n1 snapshots: 1
+mem62c.out:   peak RSS: n1 (build + send) 1109 MiB (base 486), n2 (install) 666 MiB
+mem62c.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1
+mem62c.out:== tree (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62c.out:   load:   throughput: 1007 ops/sec
+mem62c.out:   n1 at revision 29984, data file 479 MiB, retained snapshots: 1
+mem62c.out:   n1 restarted: RSS 482 MiB, peak 482 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62c.out:   n2 caught up in 3 s; n2 snapshots: 0, n1 snapshots: 1
+mem62c.out:   peak RSS: n1 (build + send) 907 MiB (base 482), n2 (install) 91 MiB
+mem62c.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1
+mem62d.out:== v1.32.2 (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62d.out:   load:   throughput: 1441 ops/sec
+mem62d.out:   n1 at revision 29984, data file 479 MiB, retained snapshots: 1
+mem62d.out:   n1 restarted: RSS 480 MiB, peak 480 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62d.out:   n2 caught up in 4 s; n2 snapshots: 1, n1 snapshots: 1
+mem62d.out:   peak RSS: n1 (build + send) 906 MiB (base 480), n2 (install) 679 MiB
+mem62d.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1
+mem62d.out:== tree (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62d.out:   load:   throughput: 1217 ops/sec
+mem62d.out:   n1 at revision 29984, data file 480 MiB, retained snapshots: 1
+mem62d.out:   n1 restarted: RSS 485 MiB, peak 485 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62d.out:   n2 caught up in 3 s; n2 snapshots: 1, n1 snapshots: 1
+mem62d.out:   peak RSS: n1 (build + send) 754 MiB (base 485), n2 (install) 83 MiB
+mem62d.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1
+mem62d.out:== tree (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62d.out:   load:   throughput: 1995 ops/sec
+mem62d.out:   n1 at revision 29984, data file 480 MiB, retained snapshots: 1
+mem62d.out:   n1 restarted: RSS 487 MiB, peak 487 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62d.out:   n2 caught up in 4 s; n2 snapshots: 0, n1 snapshots: 1
+mem62d.out:   peak RSS: n1 (build + send) 526 MiB (base 487), n2 (install) 83 MiB
+mem62d.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1
+mem62d.out:== tree (fastetcd 1.32.2): 30000 keys x 10000 B
+mem62d.out:   load:   throughput: 2593 ops/sec
+mem62d.out:   n1 at revision 29984, data file 479 MiB, retained snapshots: 1
+mem62d.out:   n1 restarted: RSS 486 MiB, peak 486 MiB; fastetcd_value_cache_bytes 0 MiB  fastetcd_key_index_bytes 4 MiB  fastetcd_wal_cached_bytes 0 MiB  fastetcd_write_behind_bytes 0 MiB  
+mem62d.out:   n2 caught up in 4 s; n2 snapshots: 1, n1 snapshots: 1
+mem62d.out:   peak RSS: n1 (build + send) 757 MiB (base 486), n2 (install) 88 MiB
+mem62d.out:   after: n2 retained snapshots 1; n1 built on demand: 1; snapshot not kept (n2): 0; n2 installed: 1

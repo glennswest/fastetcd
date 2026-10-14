@@ -574,6 +574,8 @@ Memory to expect, beyond the process's own few tens of MiB:
 | Raft log cache | Up to `--wal-cache-bytes` (default 64 MiB): recent raft entries, for replication. |
 | Write-behind | Up to `--write-behind-bytes` (default 64 MiB): applied writes not yet in the data file (about 100 ms worth). |
 
+| Raft snapshot | A build or install adds about one chunk of records and a few MiB of buffers, not a copy of the database (#62, since 1.32.3; a build also fills the engine cache as it reads every page). Before 1.32.3 it was about one decoded copy of the database on each end: ~480 MiB of data cost a leader +430–620 MiB to build and a learner ~680 MiB to install, against +40–270 MiB and ~85 MiB now (`tests/snapshot_memory.sh`). |
+
 The kernel's page cache comes on top and is reclaimable. The startup log
 line `RAM cache:` gives the configured budgets and the index's size; the
 metrics below give them live.
