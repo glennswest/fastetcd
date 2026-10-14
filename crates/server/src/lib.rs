@@ -26,6 +26,7 @@ pub mod compaction;
 pub mod conv;
 pub mod etcd_errors;
 pub mod gateway;
+pub mod gateway_ws;
 pub mod health;
 pub mod kv;
 pub mod lease;

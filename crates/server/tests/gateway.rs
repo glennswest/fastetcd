@@ -52,6 +52,7 @@ async fn start() -> Env {
         watch: fastetcd_server::watch::WatchService::new(state.clone()),
         interceptor: interceptor.clone(),
         traffic: state.traffic.clone(),
+        ws_origins: std::sync::Arc::new(fastetcd_server::gateway_ws::WsOrigins::parse("")),
     };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(KvServer::with_interceptor(kv, interceptor));
@@ -435,4 +436,90 @@ async fn lease_keepalive_answers_each_request_and_ends_with_the_body() {
     }
     assert!(got.iter().any(|v| v["result"]["ID"] == id), "{got:?}");
     assert!(got.iter().any(|v| v["error"]["code"] == 3), "{got:?}");
+}
+
+/// fastetcd#66: `/v3/watch` and `/v3/lease/keepalive` over a WebSocket,
+/// as etcd's wsproxy serves them: each message one JSON request, each
+/// line of the response one message.
+mod websocket {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn connect(
+        env: &Env,
+        path: &str,
+        origin: Option<&str>,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        let mut req = format!("{}{path}", env.base.replacen("http://", "ws://", 1)).into_client_request().unwrap();
+        if let Some(o) = origin {
+            req.headers_mut().insert("origin", o.parse().unwrap());
+        }
+        tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws)
+    }
+
+    async fn next_json<S>(ws: &mut S) -> Value
+    where
+        S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
+            .await
+            .expect("a message within 10 s")
+            .expect("the socket is open")
+            .expect("a message");
+        serde_json::from_str(msg.to_text().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_watch_over_a_websocket_sees_live_events() {
+        let env = start().await;
+        let mut ws = connect(&env, "/v3/watch", None).await.expect("upgrade");
+        let create = json!({"create_request": {"key": b64("ws/"), "range_end": b64("ws0")}});
+        ws.send(Message::Text(create.to_string())).await.unwrap();
+        let created = next_json(&mut ws).await;
+        assert_eq!(created["result"]["created"], json!(true), "{created}");
+        for (k, v) in [("ws/a", "1"), ("ws/b", "2")] {
+            let (status, _) = env.post("/v3/kv/put", json!({"key": b64(k), "value": b64(v)}), None).await;
+            assert_eq!(status, 200);
+        }
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let msg = next_json(&mut ws).await;
+            for ev in msg["result"]["events"].as_array().cloned().unwrap_or_default() {
+                seen.push(ev["kv"]["key"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(seen, vec![b64("ws/a"), b64("ws/b")]);
+    }
+
+    #[tokio::test]
+    async fn a_keepalive_over_a_websocket_renews_the_lease() {
+        let env = start().await;
+        let (status, granted) = env.post("/v3/lease/grant", json!({"TTL": "30"}), None).await;
+        assert_eq!(status, 200, "{granted}");
+        let id = granted["ID"].as_str().unwrap().to_string();
+        let mut ws = connect(&env, "/v3/lease/keepalive", None).await.expect("upgrade");
+        ws.send(Message::Text(json!({"ID": id}).to_string())).await.unwrap();
+        let renewed = next_json(&mut ws).await;
+        assert_eq!(renewed["result"]["ID"], json!(id), "{renewed}");
+        assert_eq!(renewed["result"]["TTL"], json!("30"), "{renewed}");
+    }
+
+    /// Same origin and clients without an Origin may upgrade; a page from
+    /// another origin may not, unless `--gateway-ws-allowed-origins`
+    /// lists it (decided on #66).
+    #[tokio::test]
+    async fn only_the_gateways_own_origin_may_upgrade_by_default() {
+        let env = start().await;
+        let own = env.base.clone();
+        assert!(connect(&env, "/v3/watch", Some(&own)).await.is_ok(), "same origin");
+        match connect(&env, "/v3/watch", Some("http://evil.example")).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 403),
+            other => panic!("a page from another origin upgraded: {:?}", other.map(|_| ())),
+        }
+    }
 }

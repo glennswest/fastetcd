@@ -76,6 +76,8 @@ pub struct Gateway {
     pub watch: WatchService,
     pub interceptor: AuthInterceptor,
     pub traffic: Arc<Traffic>,
+    /// Pages that may open a WebSocket to these routes (#66).
+    pub ws_origins: Arc<crate::gateway_ws::WsOrigins>,
 }
 
 /// The gateway's routes, to merge into the client port's router.
@@ -168,7 +170,9 @@ pub fn router(gw: Gateway) -> Router {
     // Anything else under /v3/ is grpc-gateway's JSON 404, not the gRPC
     // router's `Unimplemented`.
     let r = r.route("/v3/*rest", axum::routing::any(not_found));
-    r.with_state(Arc::new(gw))
+    // A WebSocket upgrade of any of them, as etcd's wsproxy (#66).
+    let ws = axum::middleware::from_fn_with_state(gw.ws_origins.clone(), crate::gateway_ws::layer);
+    r.with_state(Arc::new(gw)).layer(ws)
 }
 
 async fn not_found() -> Response {

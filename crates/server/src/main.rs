@@ -237,6 +237,14 @@ struct Args {
     )]
     enable_grpc_gateway: bool,
 
+    /// Origins, besides the gateway's own host, whose pages may open a
+    /// WebSocket to the v3 gateway (`/v3/watch`, `/v3/lease/keepalive`;
+    /// fastetcd#66): comma-separated (`https://console.example:8443`), or
+    /// `*` for any, as etcd. Clients that send no `Origin` (not
+    /// browsers) are always accepted.
+    #[arg(long, env = "FASTETCD_GATEWAY_WS_ALLOWED_ORIGINS", default_value = "")]
+    gateway_ws_allowed_origins: String,
+
     /// Address to serve Prometheus `/metrics` on, with `/health`,
     /// `/livez` and `/readyz` (plain HTTP, as etcd's metrics URLs).
     /// Empty disables.
@@ -1467,6 +1475,9 @@ async fn main() -> anyhow::Result<()> {
         watch: watch.clone(),
         interceptor: interceptor.clone(),
         traffic: traffic.clone(),
+        ws_origins: std::sync::Arc::new(fastetcd_server::gateway_ws::WsOrigins::parse(
+            &args.gateway_ws_allowed_origins,
+        )),
     });
 
     // Standard gRPC health service. Mark every service we serve as

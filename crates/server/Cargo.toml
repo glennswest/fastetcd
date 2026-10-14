@@ -52,7 +52,7 @@ hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 # Must track the axum version tonic 0.12 embeds internally
 # (tonic::service::Routes converts to/from axum::Router) so the
 # client-port /health route below shares its type.
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 
 [dev-dependencies]
 tempfile = "3.13"
@@ -66,6 +66,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rcgen = "0.13"
 # Keys and values in the v3 JSON gateway tests (#28).
 base64 = "0.22"
+# A WebSocket client for the gateway's upgrade (#66), the version axum uses.
+tokio-tungstenite = "0.24"
 
 # ---------------------------------------------------------------
 # Packaging (cargo-deb / cargo-generate-rpm). Built with:
