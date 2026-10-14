@@ -3382,7 +3382,8 @@ mod tests {
                         assert!(rev >= last, "revision went back: {rev} after {last}");
                         assert!(out.kvs.iter().all(|kv| kv.mod_revision <= rev));
                         last = rev;
-                        let at = rev - 2;
+                        // 0 would mean the latest revision.
+                        let at = (rev - 2).max(1);
                         match s.range(b"k/", b"k0", 0, at, false, false).await {
                             Ok(old) => {
                                 if let Some(kv) = old.kvs.iter().find(|kv| kv.mod_revision > at) {
