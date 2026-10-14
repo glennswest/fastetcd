@@ -96,7 +96,7 @@ fn index_entry_bytes(key: &[u8], gens: &[Generation]) -> u64 {
     let revs: usize = gens.iter().map(|g| g.revs.len()).sum();
     key.len() as u64
         + INDEX_KEY_OVERHEAD
-        + (gens.len() * std::mem::size_of::<Generation>()) as u64
+        + std::mem::size_of_val(gens) as u64
         + (revs * std::mem::size_of::<Revision>()) as u64
 }
 

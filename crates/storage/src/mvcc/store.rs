@@ -2652,9 +2652,12 @@ fn plan_range(
     RangePlan { hits, total, more }
 }
 
+/// A start and an end bound over keys.
+type KeyBounds<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
+
 /// A Range's bounds for the resident index, or `None` when the range is
 /// empty (an end at or before the start; the index would panic on it).
-fn index_bounds<'a>(key: &'a [u8], range_end: &'a [u8]) -> Option<(Bound<&'a [u8]>, Bound<&'a [u8]>)> {
+fn index_bounds<'a>(key: &'a [u8], range_end: &'a [u8]) -> Option<KeyBounds<'a>> {
     if range_end.is_empty() {
         return Some((Bound::Included(key), Bound::Included(key)));
     }
