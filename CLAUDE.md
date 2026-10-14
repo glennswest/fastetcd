@@ -2731,3 +2731,27 @@ Tracked live in the Claude task system. Snapshot of the order:
     `1`; (2) mismatched member: adopt + warn + metric / refuse / refuse
     only on an explicit contradicting `--cluster-id` (rec.); (3) existing
     cluster: the leader's id (rec.) / the majority's.
+
+85. **Snapshot build and install stream their records (#62, P3).** Both
+    ends held a decoded copy of the database (`range(.., 0)` into `Vec`s
+    to build; `deserialize_from` the whole payload, then one `WriteBatch`
+    of every record to install). Plan, **no format change**: the body is
+    bincode 1 (struct = fields back to back; `Vec` = u64 length + items),
+    so the same bytes can be written and read a record at a time; old and
+    new members keep exchanging identical bodies (no gate, no upgrade).
+    - Build: header fields, then per table a placeholder length, records
+      from the one engine snapshot in chunks (`range(start, .., CHUNK)`),
+      then the length patched (the file, or the memory fallback, is
+      seekable); trailers (auth, leases: small) as now. ENOSPC retry
+      re-reads from the same engine snapshot.
+    - Install: decode header, then each table's records one by one into a
+      bounded channel feeding **one** engine write transaction
+      (`KvStore::commit_stream`, redb: begin_write, insert as they come,
+      one durable commit; write-behind: flush, then the base's), with the
+      delete_ranges first and the applied log id, membership, auth and
+      lease replacement ops last: still atomic, still one fsync.
+    - Tests: round trip byte-identical to the old encoder (both ways);
+      install atomic on a decode error mid-stream (nothing changed);
+      build never asks the engine for an unbounded range;
+      `tests/snapshot_memory.sh`: a learner caught up by a ~300 MB
+      snapshot, VmHWM of leader and learner, v1.32.2 vs tree.
