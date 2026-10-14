@@ -2723,3 +2723,11 @@ Tracked live in the Claude task system. Snapshot of the order:
       stream, resign), auth (denied without write on the prefix),
       `etcdctl lock`/`elect` against the services? (they use client-side
       concurrency; a Go client of v3lockpb in tests/).
+
+84. **A replicated cluster_id (#38, P3) — waiting on the owner (asked
+    2026-10-14).** Mechanism (technical): a log entry recording the id in
+    `mvcc_meta` (travels in snapshots), version-gated like #56/#92.
+    Asked: (1) new cluster default: random (rec.) / etcd's member hash /
+    `1`; (2) mismatched member: adopt + warn + metric / refuse / refuse
+    only on an explicit contradicting `--cluster-id` (rec.); (3) existing
+    cluster: the leader's id (rec.) / the majority's.
