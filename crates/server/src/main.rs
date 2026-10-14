@@ -1285,7 +1285,7 @@ async fn main() -> anyhow::Result<()> {
     // member's own; an explicit --cluster-id that contradicts it is
     // refused (fastetcd#38).
     let cluster_id =
-        fastetcd_server::cluster_id::reconcile(&engine, cluster_id, cluster_id_source, sm.mvcc().cluster_id())
+        fastetcd_server::cluster_id::reconcile(sm.mvcc().engine(), cluster_id, cluster_id_source, sm.mvcc().cluster_id())
             .await?;
     let server_state = Arc::new(
         ServerState::new(
