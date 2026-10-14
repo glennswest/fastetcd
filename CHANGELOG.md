@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-14
+- **test:** #79 closed: a v1.9.0 member's exit during `read_latency.sh` (2026-10-01, log lost) never recurred; `tests/read_latency.sh v1.9.0` 3x and `MEMBERS=3` on 1.32.1 found every member alive, no panic, no OOM.
 - **docs:** `--max-request-bytes` unset keeps the 4 MiB gRPC limit on purpose (owner's decision on #54: etcd's 1.5 MiB default would refuse writes that work today; the apiserver already caps objects at ~1.5 MiB, so the stormcos golden does not set it); its `--help`, 01-configuration and the README say so and how to get etcd's limit (`--max-request-bytes 1572864`).
 
 ## [v1.32.1] — 2026-10-14
