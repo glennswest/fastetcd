@@ -98,8 +98,10 @@ production system. We integrate by:
   `--wal-checkpoint-entries` applied entries, but no sooner than four
   times the last checkpoint's duration after it (so on a slow disk it
   leaves the WAL's fsyncs most of the disk, #95), writes the layers into
-  redb as one non-durable commit (dropping them from the list in the
-  same step for readers), fdatasyncs the data file with no lock held
+  redb as one non-durable commit and only then drops them from the list
+  (readers and applies are not held off meanwhile: a snapshot that pairs
+  the new redb state with layers still listed reads the same, #145),
+  fdatasyncs the data file with no lock held
   (redb's non-durable commit has already written its pages into the
   file), and then commits durably, which has little left to write
   (#93). Every redb write is serialized behind one flush lock, so an
