@@ -78,3 +78,68 @@ under 5 ms; miss (22): all under 10 ms, 21 under 5 ms.
 
 RSS could not be read on the node: fastetcd did not export it before 1.24
 (`process_resident_memory_bytes`, #84).
+
+## RSS and lease renewals over four hours (#84), pvetest2
+
+No X9 blade could run fastetcd >= 1.24 on 2026-10-13 (X9's last good
+release is 11.88; 11.99 and 12.14 did not install there), so the long
+run was done first on **pvetest2**: a pve VM installed with release
+12.21-flowsdn (**fastetcd 1.31.0**, one member, the node's real store,
+kube-controller-manager, kube-scheduler and stormcos's own leases
+renewing in kube-system). Leased, 2026-10-13 21:43Z–01:43Z.
+
+- `tests/bench/blade_rss.py <node> 4 60`: fastetcd's `/metrics` (:2381)
+  every 60 s, every kube-system Lease every second (renewals, gaps,
+  holder changes).
+- Every 30 min a `tests/bench/blade_getlatency.py` round with writes on:
+  200 idle GETs of a Lease, then 120 s of 40 clients renewing Leases
+  through the apiserver (~600–1 150 PUTs/s) while the probe GETs.
+- Defaults: `--value-cache-bytes` 128 MiB, `--engine-cache-bytes`
+  256 MiB. Raw data: `data/rss-pvetest2/`.
+
+**RSS** (240 samples, one process start throughout, open fds 21–23):
+
+| | min | max | mean, first hour | mean, last hour |
+|---|---|---|---|---|
+| RSS | 70.3 MiB | 381.8 MiB | 158.6 MiB | 202.9 MiB |
+| write-behind layers | 0 | 65.7 MiB | 8.4 MiB | 17.7 MiB |
+| key index | 0.7 MiB | 5.1 MiB | | |
+| value cache | 0.5 MiB | 1.2 MiB | | |
+| data file | 145 MiB | 290 MiB | | 290 MiB |
+
+- RSS stays inside its budget (value cache 128 + engine cache 256 +
+  index ~5 = ~389 MiB): the maximum, 381.8 MiB, is the closest it came.
+- It is not flat minute to minute: it swings 100–250 MiB between the
+  apiserver's compactions (it follows the key index, correlation 0.83:
+  the history the load writes, dropped at each compaction) and with the
+  write-behind layers (0.47).
+- Its floor rose each hour: 70, 78, 88, 102 MiB. The data file stopped
+  growing in the first hour (290 MiB), and redb's page cache, which fills
+  with the pages read up to `--engine-cache-bytes`, is the likely cause,
+  but redb does not report its cache size, so this run cannot tell a
+  cache filling from a leak. Whether the floor levels off below the budget
+  is what the blade's longer run has to show.
+
+**Lease renewals** (kube-system, polled each second), no holder change,
+no poll error:
+
+| lease | renewals | longest gap | leaseDuration |
+|---|---|---|---|
+| kube-controller-manager | 7 111 | 9.0 s | 15 s |
+| kube-scheduler | 7 114 | 3.2 s | 15 s |
+| stormipmi | 2 866 | 5.6 s | 15 s |
+| stormupdate | 1 440 | 10.1 s | 45 s |
+| vmimages | 480 | 30.1 s | 90 s |
+
+There is no cilium-operator on a flowsdn node; every lease that is there
+was renewed in time throughout, the load rounds included.
+
+**GETs with writes going on** (8 rounds): idle GET p99 8.2–43.9 ms
+(median of rounds 13.5); under the renewal load GET p50 0.9–9.5 ms,
+p99 18.6–53.9 ms, renewal PUT p50 19–38 ms, p99 62–196 ms, max 1.26 s.
+This is a VM disk shared with other test machines, not the spinning
+disk the acceptance is about; server3's read-only numbers above stay the
+reference for the 20 ms target.
+
+Left for #84: the same run on an X9 blade with a release carrying
+fastetcd >= 1.24, for many hours, to see the RSS floor level off.

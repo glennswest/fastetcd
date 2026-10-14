@@ -1,0 +1,8 @@
+== w2 on pvetest2 at 22:24:02Z, load 120 s
+idle  GET lease              n   200  p50     0.9 ms  p99    14.5 ms  max    22.8 ms
+load  GET lease              n 23400  p50     3.5 ms  p99    21.1 ms  max    77.6 ms
+load  renewal (PUT lease)    n 117577  p50    24.5 ms  p99   121.8 ms  max   631.7 ms
+load  renewals 980/s by 40 clients
+fastetcd over 120 s: 17375 WAL fsyncs, mean 3.4 ms, 7.0 proposals per fsync; 515 checkpoints using 24.5 s; write-behind back-pressure 1
+fastetcd since start: max WAL fsync 0.489 s, max checkpoint commit 0.772 s, back-pressure 130
+fastetcd value cache over the load: 1476425 hits, 829 misses (99.94% hits)
