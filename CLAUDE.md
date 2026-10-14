@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.32.1`** — Reads wait for no write in progress (#145): a Range,
+**`1.32.2`** — The unused `wal` and `iouring` storage engines and the
+`tokio-uring` dependency are gone (#55); redb is the only engine. No
+server change. Docs: Downgrade stays Unimplemented (#57), 2PC cost on a
+real disk (#67), a lone write after idle (#102).
+
+Previous: **`1.32.1`** — Reads wait for no write in progress (#145): a Range,
 `/readyz`'s reads and the leader's Txn precheck no longer take the MVCC
 write-state lock (a commit publishes its revision with its index; a
 reader pairs a snapshot with it, compaction refuses old reads before
@@ -2661,7 +2666,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     Decided (master, for the owner, 2026-10-14): (1). Work: delete
     `wal_engine.rs`, `iouring_engine.rs`, features `wal-engine`/`iouring`,
     `tokio-uring`, their bench cases and docs mentions; lock updated;
-    release 1.32.2 (PATCH).
+    release 1.32.2 (PATCH). Done: workspace 426 pass, `--locked` build,
+    clippy storage clean, bench builds.
 
 80. **A lone write after idle (#102, P3) — done (test + docs; no release).**
     `fastetcd-bench --mode idle-put`, `tests/idle_write.sh`: one member,

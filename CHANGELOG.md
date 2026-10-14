@@ -4,14 +4,41 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-14
-- **BREAKING (library only):** `fastetcd-storage` no longer has the `wal` and `iouring` engines, nor the `wal-engine` / `iouring` features and the optional `tokio-uring` dependency (#55, decided). The server never used them (it always ran on redb, which it relies on for presync, corruption handling and defragment; the raft log is its own WAL since #85), only `benches/mvcc.rs` did. No server behaviour or on-disk format changes. `deploy/packaging/run-tests.sh` no longer runs their feature tests.
-- **docs:** `Downgrade` stays `Unimplemented` (decided on #57): fastetcd has no cluster version for it to lower; its answer and 03-deploy § Downgrades point at the per-version rules a downgrade must stay within.
-- **docs:** redb two-phase commit measured on a real disk (#67): `two_phase_commit_cost` on a build VM's disk, three interleaved rounds, p50 10.0–10.7 → 16.4–20.3 ms per durable commit, 87–104 → 47–56 commits/s (tmpfs +3–5%). Since #85 it would cost about one fsync per checkpoint, not per write. Recorded in `docs/05-backup-and-recovery.md` next to the #37 decision, which stands (it rests on redb's repair behaviour).
-- **test:** `fastetcd-bench --mode idle-put` and `tests/idle_write.sh [baseline]`: a lone write after idle vs back to back, one member, disk and tmpfs, with the WAL's fsyncs and mean fsync per run (#102). `docs/benchmarks/idle-write.md`: every write is one WAL fdatasync, idle or not; the lone-write penalty is the device's slower fsync after a quiet spell (v1.12.0: lone mean 16.1 vs 6.2 ms, fsync 15.1 vs 5.7 ms; v1.32.1: 11.7 vs 9.3 ms, fsync 10.7 vs 8.8); on tmpfs a lone put costs ~0.8 ms more, no timer.
-- **chore:** Deleted branch `wip/2026-09-29-paused-metrics` on GitHub and locally (#70): its tip 800a7c9 was merged into v1.7.0 and it held nothing `main` lacks.
-- **test:** #79 closed: a v1.9.0 member's exit during `read_latency.sh` (2026-10-01, log lost) never recurred; `tests/read_latency.sh v1.9.0` 3x and `MEMBERS=3` on 1.32.1 found every member alive, no panic, no OOM.
-- **docs:** `--max-request-bytes` unset keeps the 4 MiB gRPC limit on purpose (owner's decision on #54: etcd's 1.5 MiB default would refuse writes that work today; the apiserver already caps objects at ~1.5 MiB, so the stormcos golden does not set it); its `--help`, 01-configuration and the README say so and how to get etcd's limit (`--max-request-bytes 1572864`).
+## [v1.32.2] — 2026-10-14
+
+### Changed
+- `fastetcd-storage` no longer has the `wal` and `iouring` engines, the
+  `wal-engine` / `iouring` features or the optional `tokio-uring`
+  dependency (#55, decided): the server never used them (it always ran
+  on redb and relies on its presync, corruption handling and defragment;
+  the raft log is its own WAL since #85), only `benches/mvcc.rs` did.
+  Cargo.lock loses `tokio-uring`, `io-uring`, `bitflags` 1 and `socket2`
+  0.4. No server behaviour, flag or on-disk format changes. **Library
+  only, breaking:** code that enabled those features of the (unpublished)
+  crate no longer builds; `deploy/packaging/run-tests.sh` no longer runs
+  their tests.
+
+### Documentation
+- `Downgrade` stays `Unimplemented` (decided on #57): fastetcd has no
+  cluster version for it to lower; its answer and 03-deploy § Downgrades
+  point at the per-version rules a downgrade must stay within.
+- `--max-request-bytes` unset keeps the 4 MiB gRPC limit on purpose
+  (owner's decision on #54); `--help`, 01 and the README say how to get
+  etcd's limit (`--max-request-bytes 1572864`).
+- redb two-phase commit measured on a real disk (#67): ~2x per durable
+  commit (p50 10.0–10.7 → 16.4–20.3 ms); since #85 that would be per
+  checkpoint, not per write. `docs/05-backup-and-recovery.md`.
+- A lone write after idle (#102): one WAL fdatasync, idle or not; the
+  penalty is the device's slower fsync after a quiet spell.
+  `docs/benchmarks/idle-write.md`.
+
+### Tests
+- `fastetcd-bench --mode idle-put`, `tests/idle_write.sh [baseline]` (#102).
+- #79 closed: the v1.9.0 member exit never recurred
+  (`tests/read_latency.sh v1.9.0` 3x, `MEMBERS=3`).
+
+### Chores
+- Deleted the merged branch `wip/2026-09-29-paused-metrics` (#70).
 
 ## [v1.32.1] — 2026-10-14
 
