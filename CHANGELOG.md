@@ -4,8 +4,31 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-14
-- **feat:** The cluster id is replicated, and distinct by default (#38; decided: random default, refuse only an explicit contradicting `--cluster-id`, the leader's id for an existing cluster). Once a cluster has none and every member answers as 1.33+, the leader proposes its own id in a new `FastetcdLogEntry::ClusterId` (appended last); the first applied is the cluster's, in `mvcc_meta`, carried by snapshots. Members report it from then on and persist it as their own: a different one is adopted with a warning and `fastetcd_cluster_id_adoptions`, but a member whose explicit `--cluster-id` contradicts it refuses to start (or stops if it learns of it running). A new store with neither `--cluster-id` nor `--initial-cluster-token` gets a random 63-bit id instead of `1`. `fastetcd_cluster_id_replicated`.
+## [v1.33.0] — 2026-10-14
+
+### Added
+- The cluster id is replicated cluster state, and distinct by default
+  (#38). Once a cluster has none and every member answers as 1.33 or
+  later, the leader proposes its own id in a new log entry
+  (`FastetcdLogEntry::ClusterId`, appended last); the first applied is
+  the cluster's, kept in `mvcc_meta` and carried by snapshots. Every
+  member reports it from then on and persists it as its own.
+  - A member whose id differs adopts the cluster's, with a warning and
+    `fastetcd_cluster_id_adoptions`; its pinned clients reconnect once.
+  - A member started with an explicit `--cluster-id` that contradicts
+    the cluster's refuses to start, naming both (and stops if it learns
+    of it while running).
+  - An existing cluster keeps its leader's id.
+  - `fastetcd_cluster_id_replicated` (1 once replicated).
+
+### Changed
+- A new store with neither `--cluster-id` nor `--initial-cluster-token`
+  gets a random 63-bit id instead of `1` (#38).
+
+### Upgrade notes
+- The id is proposed only once every member runs 1.33+. After that, do
+  not add a member older than 1.33 while the log may still hold the
+  entry (#134).
 
 ## [v1.32.3] — 2026-10-14
 

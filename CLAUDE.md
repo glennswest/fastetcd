@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.32.3`** — Raft snapshots are built and installed a record at a
+**`1.33.0`** — The cluster id is replicated, and random by default
+(#38): the leader proposes its id (`ClusterId` entry, once every member
+is 1.33+); members adopt the cluster's, except an explicit contradicting
+`--cluster-id`, which refuses to start.
+
+Previous: **`1.32.3`** — Raft snapshots are built and installed a record at a
 time (#62): no decoded copy of the database in RAM on either end (one
 streamed, still atomic engine commit on install); same format. ~480 MiB
 of data: learner install peak 680 → 85 MiB.
