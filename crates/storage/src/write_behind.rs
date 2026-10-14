@@ -203,10 +203,17 @@ impl WriteBehind {
         for layer in list.iter() {
             layer.to_ops(&mut batch);
         }
-        // The engine changes and the layers go in one step for readers:
-        // a snapshot is taken under the read side of this lock.
-        let mut layers = self.inner.layers.write().await;
+        // Readers are not held off while the engine commits (fastetcd#145):
+        // a snapshot taken meanwhile pairs the engine, before or after this
+        // commit, with layers that still include `list`, and a layer over
+        // an engine that already holds it reads the same. The layers go
+        // only after the commit, under the write side, which waits for any
+        // snapshot being taken (under the read side), so no snapshot pairs
+        // the engine from before the commit with the layers from after.
+        // Flushes are serialized by `flush_lock`, so the engine never holds
+        // a layer a snapshot's list lacks.
         self.inner.base.commit(batch, WriteOptions { sync: false }).await?;
+        let mut layers = self.inner.layers.write().await;
         let n = list.len();
         let rest: Vec<Arc<Layer>> = layers.list[n..].to_vec();
         let flushed: usize = list.iter().map(|l| l.bytes).sum();
@@ -522,11 +529,95 @@ impl Snapshot for OverlaySnapshot {
 mod tests {
     use super::*;
     use crate::redb_engine::RedbEngine;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
     fn open() -> (tempfile::TempDir, WriteBehind) {
         let dir = tempfile::tempdir().unwrap();
         let base: Arc<dyn KvStore> = Arc::new(RedbEngine::open(dir.path().join("db")).unwrap());
         (dir, WriteBehind::new(base, DEFAULT_MAX_BYTES))
+    }
+
+    /// An engine whose commits can be held until released.
+    struct HeldBase {
+        inner: RedbEngine,
+        hold: AtomicBool,
+        held: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl KvStore for HeldBase {
+        async fn snapshot(&self) -> StorageResult<Arc<dyn Snapshot>> {
+            self.inner.snapshot().await
+        }
+        async fn commit(&self, batch: WriteBatch, opts: WriteOptions) -> StorageResult<()> {
+            if self.hold.load(Ordering::Acquire) {
+                self.held.notify_one();
+                self.release.acquire().await.unwrap().forget();
+            }
+            self.inner.commit(batch, opts).await
+        }
+        async fn sync(&self) -> StorageResult<()> {
+            self.inner.sync().await
+        }
+        async fn size_on_disk(&self) -> StorageResult<u64> {
+            self.inner.size_on_disk().await
+        }
+        fn engine_name(&self) -> &'static str {
+            "held"
+        }
+    }
+
+    /// fastetcd#145: a flush held the layers' write lock through the
+    /// engine's commit, so every snapshot (every read) waited for it.
+    /// A snapshot taken during a held flush answers at once and reads
+    /// every write, as do snapshots after it.
+    #[tokio::test]
+    async fn a_snapshot_does_not_wait_for_a_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Arc::new(HeldBase {
+            inner: RedbEngine::open(dir.path().join("db")).unwrap(),
+            hold: AtomicBool::new(false),
+            held: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let s = Arc::new(WriteBehind::new(base.clone(), DEFAULT_MAX_BYTES));
+        let put = |k: &str, v: &str| {
+            let mut b = WriteBatch::new();
+            b.put("t", k.as_bytes(), v.as_bytes());
+            b
+        };
+        s.commit(put("a", "1"), WriteOptions { sync: false }).await.unwrap();
+        s.commit(put("b", "1"), WriteOptions { sync: false }).await.unwrap();
+        base.hold.store(true, Ordering::Release);
+        let held = base.held.notified();
+        let flusher = {
+            let s = s.clone();
+            tokio::spawn(async move { s.flush().await.unwrap() })
+        };
+        held.await;
+        // A write while the flush's engine commit is held.
+        let mut b = put("a", "2");
+        b.delete("t", b"b");
+        s.commit(b, WriteOptions { sync: false }).await.unwrap();
+        let prompt = Duration::from_millis(500);
+        let snap = tokio::time::timeout(prompt, s.snapshot()).await.expect("a snapshot waited for the flush").unwrap();
+        assert_eq!(snap.get("t", b"a").await.unwrap().as_deref(), Some(&b"2"[..]));
+        assert_eq!(snap.get("t", b"b").await.unwrap(), None);
+        base.hold.store(false, Ordering::Release);
+        base.release.add_permits(1);
+        flusher.await.unwrap();
+        for snap in [snap, s.snapshot().await.unwrap()] {
+            assert_eq!(snap.get("t", b"a").await.unwrap().as_deref(), Some(&b"2"[..]));
+            assert_eq!(snap.get("t", b"b").await.unwrap(), None);
+            let all = snap.range("t", Bound::Unbounded, Bound::Unbounded, 0).await.unwrap();
+            assert_eq!(all, vec![(b"a".to_vec(), b"2".to_vec())]);
+            assert_eq!(snap.count("t", Bound::Unbounded, Bound::Unbounded).await.unwrap(), 1);
+        }
+        s.flush().await.unwrap();
+        let snap = s.snapshot().await.unwrap();
+        assert_eq!(snap.range("t", Bound::Unbounded, Bound::Unbounded, 0).await.unwrap(), vec![(b"a".to_vec(), b"2".to_vec())]);
     }
 
     #[tokio::test]
