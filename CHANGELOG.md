@@ -4,25 +4,58 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-14
-- **fix:** A Range waits for no write in progress (#145). Every read (`/readyz`'s and `/livez`'s, GETs, LISTs, the leader's Txn compare precheck, `current_revision`) took the MVCC write-state mutex, which an apply holds through a run of up to 256 writes and its engine commit (a write-behind back-pressure flush into redb included), and compaction through its walk of every key: one `/readyz` took 57 ms on pvetest1 during an install. A commit now publishes its revision with its index changes under the index's write guard, and a reader pairs an engine snapshot with that index when no commit was published since it counted the engine's commits; compaction refuses reads below its revision before deleting anything; snapshot installs exclude readers. Tests: a read during a held commit (before and after the engine commit) and during a held compaction answers at once; reads stay consistent under writes and compaction.
-- **fix:** A write-behind flush no longer holds every read and apply off through redb's commit (#145). It held the layers' write lock while redb committed the flushed layers (the checkpoint every 100 ms, and back-pressure), and every engine snapshot takes the read side, so a GET or `/readyz` waited for that commit, and so did the next apply. The flush now commits, then takes the lock only to drop the layers it wrote. Build VM, 1000 put clients and a compaction every 2 s, `/readyz` polled (`tests/readyz_latency.sh v1.32.0`): v1.32.0 p99 250 / 262 ms with 2–3 answers per run over 50 ms; this p99 17 / 3.6 ms, 0 and 1 over 50 ms.
-- **test:** `tests/readyz_latency.sh [baseline] [rounds]`: `/readyz` (or `ROUTES`) polled every 20 ms under a put load (`CONNS`, 1000) and a compaction every 2 s, interleaved against a baseline (#145).
-- **test:** The #138 watchdog test waits for the leader's first fsync before checking that nothing is in flight: since #97 a leader does not wait for its own fsync, so it failed about half the time.
-- **fix:** Two clippy lints in the storage crate (#149).
+## [v1.32.1] — 2026-10-14
 
-### 2026-10-13
-- **docs:** `docs/benchmarks/blade-server3.md` § RSS and lease renewals over four hours: pvetest2 (fastetcd 1.31), 4 h with a write round every 30 min. RSS 70–382 MiB, inside the 389 MiB budget, one process throughout; its hourly floor rose 70 → 102 MiB (likely redb's page cache filling, not yet told from a leak); every kube-system lease renewed in time, longest gap 9 s of 15, no holder change. The blade run is still to do (#84).
-- **test:** `blade_rss.py` writes its CSVs line by line and prints the process start time (#84).
+### Fixed
+- A read waits for no write in progress (#145). Every Range (`/readyz`'s
+  and `/livez`'s, GETs, LISTs), the leader's Txn compare precheck and
+  `current_revision` took the MVCC write-state mutex, which an apply
+  holds through a run of up to 256 writes and its engine commit, and
+  compaction through its walk of every key: one `/readyz` took 57 ms on
+  pvetest1 during an install (stormd's budget: p99 50 ms). A commit now
+  publishes its revision with its index changes under the index's write
+  guard; a reader pairs an engine snapshot with that index when no commit
+  was published since it counted the engine's commits (else retries, then
+  takes the lock); compaction refuses reads below its revision before it
+  deletes anything; snapshot installs and reloads exclude readers.
+- A write-behind flush no longer holds every read and apply off through
+  redb's commit (#145): it held the layers' write lock while redb
+  committed the flushed layers (the checkpoint, every 100 ms, and
+  back-pressure); it now commits first and takes the lock only to drop
+  them. Build VM, 1000 put clients, a compaction every 2 s, `/readyz`
+  every 20 ms (`tests/readyz_latency.sh v1.32.0`): v1.32.0 (7 rounds)
+  p99 42–262 ms, 2–9 answers over 50 ms a round; v1.32.1 (11 rounds)
+  p99 3.6–17 ms, one answer over 50 ms in all (a round whose disk
+  stalled).
+- Two clippy lints in the storage crate (#149); the rest of the
+  workspace's: #152.
 
-### 2026-10-09
-- **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
-- **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.
-  SSD vs v1.11.0: writes 2.9–4.4x, linearizable p99 ~15x better. pve hard
-  power cut: 301 of 300 committed objects survived. X9 blade (server3,
-  1.18): apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms,
-  p99 1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
-  (#89)
+### Tests
+- `tests/readyz_latency.sh [baseline] [rounds]` (`ROUTES`, `CONNS`).
+- Store: a read during a held commit (before and after the engine
+  commit) and during a held compaction answers at once; reads stay
+  consistent under writes and compaction. Write-behind: a snapshot and a
+  commit during a held flush answer at once and read every write. With
+  the old locking each fails.
+- The #138 watchdog test waits for the leader's first fsync before
+  checking that nothing is in flight (since #97 it failed about half the
+  time).
+
+### Documentation
+- `docs/benchmarks/blade-server3.md` § RSS and lease renewals over four
+  hours: pvetest2 (fastetcd 1.31), 4 h with a write round every 30 min:
+  RSS 70–382 MiB, inside budget, one process; hourly floor 70 → 102 MiB;
+  every kube-system lease renewed in time (#84, blade run still to do).
+- `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and
+  every kube-system Lease's renewal gaps and holder changes, over a long
+  run on a node (#84); it writes its CSVs line by line and prints the
+  process start time.
+- `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks. SSD vs
+  v1.11.0: writes 2.9–4.4x, linearizable p99 ~15x better. pve hard power
+  cut: 301 of 300 committed objects survived. X9 blade (server3, 1.18):
+  apiserver GET p99 8–10 ms under lease churn; renewal p50 32–37 ms, p99
+  1.5–4 s with the checkpoint and the WAL sharing the spindle (#135)
+  (#89).
 
 ## [v1.32.0] — 2026-10-13
 

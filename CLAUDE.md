@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.32.0`** — The leader replicates while its own WAL fsync runs (#97):
+**`1.32.1`** — Reads wait for no write in progress (#145): a Range,
+`/readyz`'s reads and the leader's Txn precheck no longer take the MVCC
+write-state lock (a commit publishes its revision with its index; a
+reader pairs a snapshot with it, compaction refuses old reads before
+deleting), and a write-behind flush no longer holds every snapshot off
+through redb's commit. 1000 put clients + compaction: `/readyz` p99
+42–262 → 3.6–17 ms (`tests/readyz_latency.sh`).
+
+Previous: **`1.32.0`** — The leader replicates while its own WAL fsync runs (#97):
 vendored openraft 0.9.24 with one patch (`vendor/openraft/FASTETCD.md`);
 a lone write on 3 members costs ~one fsync (200 ms fsyncs: ~230 vs
 ~435 ms); the state machine applies only what the local log holds
@@ -2596,9 +2604,18 @@ Tracked live in the Claude task system. Snapshot of the order:
     - `current_revision()` / `compact_revision()` read the published
       values; the Txn precheck and watch history use the same view.
     Work items:
-    - [ ] store: read view, publish, compaction order, replace lock.
-    - [ ] Tests: a Range during a slow commit (engine that stalls commit)
-      returns at once; consistency under concurrent writes + compaction
-      (the #82/#50 tests still pass); readyz under a stalled commit.
-    - [ ] Docs (00, 03 health), changelog; release; close #145, saying
+    - [x] store: read view, publish, compaction order, replace lock.
+    - [x] Tests: a read during a held commit / compaction answers at
+      once; consistency under writes + compaction (the #82/#50 tests
+      still pass); with the lock path forced, both held tests fail.
+    - [x] Found by `tests/readyz_latency.sh` (1000 put clients, compaction
+      every 2 s): the read still waited on the engine snapshot, behind the
+      write-behind flush, which held the layers' write lock through redb's
+      commit. The flush now commits first and drops its layers after
+      (`a_snapshot_does_not_wait_for_a_flush`; the old order fails it).
+    - [x] Docs (00, 02, 03), changelog; release 1.32.1; close #145, saying
       the budget need not move.
+    - Verified: workspace 426 pass, 0 fail; vs v1.32.0 (7 rounds, p99
+      42–262 ms, 2–9 answers over 50 ms a round), this (11 rounds) p99
+      3.6–17 ms, 1 answer over 50 ms in all. Also fixed: the #138 watchdog test raced the
+      leader's first fsync since #97; clippy in storage (#149; rest #152).
