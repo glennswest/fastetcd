@@ -93,8 +93,13 @@ pub async fn layer(State(origins): State<Arc<WsOrigins>>, req: Request, next: Ne
     if !is_upgrade(&req) {
         return next.run(req).await;
     }
-    let header_str = |name: header::HeaderName| req.headers().get(name).and_then(|v| v.to_str().ok());
-    if !origins.allows(header_str(header::ORIGIN), header_str(header::HOST)) {
+    // In a block: a borrow of the request (its body is not `Sync`) must
+    // not be held across an await.
+    let allowed = {
+        let header_str = |name: header::HeaderName| req.headers().get(name).and_then(|v| v.to_str().ok());
+        origins.allows(header_str(header::ORIGIN), header_str(header::HOST))
+    };
+    if !allowed {
         return (
             StatusCode::FORBIDDEN,
             "WebSocket from this origin refused: see --gateway-ws-allowed-origins\n",
