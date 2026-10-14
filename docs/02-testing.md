@@ -121,6 +121,15 @@ election and `slow raft WAL fdatasync` log lines, so a stall can be
 put down to the disk, an election or fastetcd (#83). `DATA_ROOT=/dev/shm`
 puts the data dirs on tmpfs, where no fsync stalls.
 
+Health probes under write load (#145): `sc-build 'tests/readyz_latency.sh
+v1.32.0 2'` runs one member of each build in turn (rounds interleaved)
+under `fastetcd-bench --mode put` (`CONNS`, 1000 clients over 1000 keys)
+and a compaction every 2 s, polls `/readyz` every 20 ms throughout, and
+prints p50 / p99 / max and the answers over 50 ms (stormd's p99 budget).
+`ROUTES='readyz/non_learner readyz/serializable_read
+readyz/linearizable_read'` probes the checks one by one, to tell a slow
+read from a slow process.
+
 **On a running node: the test container (#36).** Per stormcentral's
 test standard, `test/` builds one image (`test/build.sh` stages a static
 test binary and the commit's static `fastetcd`; `test/Containerfile`
