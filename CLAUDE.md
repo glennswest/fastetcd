@@ -2452,6 +2452,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] flags, logging, decode limit, proposal check; tests
       (`compat_flags.rs` on the binary; parse tests).
     - [x] Docs (01), changelog; release 1.28.0; ask the default.
+    - Owner's decision (2026-10-09): keep the 4 MiB default, not set in
+      the stormcos golden; the difference is documented in `--help`, 01
+      and the README (2026-10-14). Closed.
 
 73. **Watch fragments large responses when asked (#58, P3) — done, shipped in v1.29.0.** Every
     `WatchResponse` went out whole with `fragment: false`; a create's

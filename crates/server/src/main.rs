@@ -513,7 +513,9 @@ struct Args {
     /// (fastetcd#54): a write whose log entry is larger is refused with
     /// `etcdserver: request is too large`, and the client port receives
     /// gRPC messages up to this plus 512 KiB. Unset: requests are limited
-    /// only by the 4 MiB gRPC receive limit (etcd's default is 1.5 MiB).
+    /// only by the 4 MiB gRPC receive limit, unlike etcd, whose default is
+    /// 1.5 MiB; kept so writes that work today keep working (owner,
+    /// #54). `--max-request-bytes 1572864` gives etcd's limit.
     #[arg(long, env = "FASTETCD_MAX_REQUEST_BYTES",
           value_parser = clap::value_parser!(u64).range(1..))]
     max_request_bytes: Option<u64>,

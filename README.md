@@ -176,7 +176,8 @@ Differences from etcd:
 - A txn inside a txn is refused until every member runs 1.22 or later
   (#56, 03-deploy).
 - `--max-request-bytes` unset means the 4 MiB gRPC limit, not etcd's 1.5
-  MiB default (#54).
+  MiB default, on purpose (#54); `--max-request-bytes 1572864` gives
+  etcd's.
 - A `Put` naming a lease that does not exist is refused with etcd's
   `etcdserver: requested lease not found`, but the check runs on the
   leader just before the write is proposed, not when it is applied as

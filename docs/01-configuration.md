@@ -143,7 +143,11 @@ startup), unless **`RUST_LOG`** is set, which wins and takes tracing's
 refused with `InvalidArgument` `etcdserver: request is too large`, and the
 client port receives gRPC messages up to it plus 512 KiB. Unset, requests
 are limited only by the 4 MiB gRPC receive limit; etcd's default is 1.5
-MiB (#54). It is also the size a watch created with `fragment` splits its
+MiB. The difference is kept on purpose (owner, 2026-10-09, #54): etcd's
+default would refuse 1.5–4 MiB writes that work today (a major version),
+and a Kubernetes apiserver, the only writer on stormcos, already caps an
+object at about 1.5 MiB, so the stormcos golden does not set it either.
+`--max-request-bytes 1572864` gives etcd's limit. It is also the size a watch created with `fragment` splits its
 responses at (#58); unset, those split at etcd's default, 1.5 MiB.
 
 These are accepted so etcd command lines and config files start, and do
