@@ -622,6 +622,14 @@ the lease intact, a pre-version backup on every member, batching only
 once no member is older than 1.10. Do the same: one member at a time,
 each back and applying before the next.
 
+**Downgrades.** etcd's `Downgrade` RPC (`etcdctl downgrade`) answers
+`Unimplemented`, and will: etcd lowers a cluster version every member
+applies, and fastetcd has none. Each feature that older members cannot
+read is gated on every member's version instead (below). So a downgrade
+is done as a rolling upgrade is, one member process at a time, and only
+to a version the rules below allow; each says which versions a cluster
+cannot go back below once it has used the feature (#57).
+
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
 a member older than 1.10 cannot decode. It does so only once every

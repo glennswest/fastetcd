@@ -2638,6 +2638,18 @@ Tracked live in the Claude task system. Snapshot of the order:
     (3) leave it until 0.10. Downgrade: fastetcd has no cluster version
     (per-feature version gates instead): (a) leave Unimplemented, (b)
     design one. Recommended: MoveLeader (1), Downgrade (a).
+    Decided (master, for the owner, 2026-10-14): MoveLeader (1), Downgrade
+    (a). Downgrade done: its answer and 03-deploy § Downgrades. MoveLeader
+    design: openraft `ExternalCommand::AcceptLeaderTransfer {leader vote,
+    to, last_log_id}` → `Engine::lease_waived_for` (handle_vote_req skips
+    the lease check for that vote only; election timers unchanged) and the
+    target elects if its log holds last_log_id; fastetcd: on the leader,
+    pause the proposer, wait for the target's matched == last log, peer RPC
+    `TransferLeader` to every voter (gated: all >= the new version), wait
+    for current_leader == target (etcd's errors: not leader, bad leader
+    transferee, leader transfer took too long). Not started: the session's
+    auto-mode classifier refused the openraft edit as "security weaken"
+    (the lease check); needs the owner's go-ahead to edit it.
 
 79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
     the owner (asked 2026-10-14).** Only `benches/mvcc.rs` uses them; the

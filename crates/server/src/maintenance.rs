@@ -19,7 +19,7 @@
 //!   `--backup-dir` backups, `crate::backup`) in 64 KiB chunks, which
 //!   `fastetcd restore` restores (fastetcd#61).
 //! - `MoveLeader` — `Status::unimplemented` until peer transport lands.
-//! - `Downgrade` — `Status::unimplemented`.
+//! - `Downgrade` — `Status::unimplemented`: no cluster version (#57).
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -347,8 +347,13 @@ impl Maintenance for MaintenanceService {
     ) -> Result<Response<pb::DowngradeResponse>, Status> {
         // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
         crate::authz::require_admin(&self.state, &request).await?;
+        // fastetcd has no cluster version for etcd's downgrade to lower:
+        // mixed versions are kept safe by per-feature version gates, and
+        // which downgrades are safe is documented per release (#57).
         Err(Status::unimplemented(
-            "Downgrade is not implemented in fastetcd",
+            "Downgrade is not implemented in fastetcd: it has no cluster version to lower. \
+             Downgrade one member at a time, within the rules in docs/03-deploy.md \
+             (Multi-node: the versions a cluster cannot go back below)",
         ))
     }
 }
