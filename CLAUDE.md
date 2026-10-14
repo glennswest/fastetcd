@@ -2680,3 +2680,46 @@ Tracked live in the Claude task system. Snapshot of the order:
     release).** `two_phase_commit_cost` on a build VM disk, 3 rounds: p50
     10–10.7 → 16.4–20.3 ms per durable commit (~2x); tmpfs +3–5%. Since
     #85 it would cost ~one fsync per checkpoint, not per write. 05-backup.
+
+82. **Range ignores sort and min/max revision filters (#154, P1).** Found
+    working #64: `sort_order`, `sort_target`, `min/max_mod_revision`,
+    `min/max_create_revision` are never read, so clientv3
+    `concurrency.Mutex` (owner = first key by create revision) is not
+    mutually exclusive on fastetcd (Cilium kvstore locks). Plan: etcd's
+    `executeRange` post-processing in the server's Range and Txn-range
+    responses (limit 0 down when sorting/filtering; count before filters;
+    NONE + non-KEY target = ASCEND; KEY + ASCEND = no re-sort), no storage
+    or wire change; tests with clientv3 (`Mutex` with lease IDs sorting
+    against creation order) and `etcdctl get --sort-by`.
+
+83. **etcd's Lock and Election services (#64, P3) — after #154.** Design
+    (etcd v3.6.11 `v3lock/lock.go`, `v3election/election.go`, clientv3
+    `concurrency` read): vendor `v3lock.proto` / `v3election.proto`
+    (strip_annotations.py; vendor.sh); services behind the auth
+    interceptor that run etcd's concurrency code server-side through
+    `KvService` / `LeaseService` with the caller's metadata+extensions
+    (so authorization is the caller's, as etcd's in-process client):
+    - session: lease 0 → LeaseGrant TTL 60; given lease used as is; no
+      keep-alive (etcd orphans the session at once).
+    - Lock: key `name/<lease %x>`; Txn If create_rev(key)=0 Then
+      put(key,"",lease)+get(owner) Else get(key)+get(owner), owner =
+      prefix sorted CREATE ASCEND limit 1; myRev = header rev or key's
+      create rev; if not owner: waitDeletes(pfx, myRev-1) = loop Range
+      prefix CREATE DESCEND limit 1 max_create_revision, wait for that
+      key's DELETE above the range's revision (MVCC event subscription
+      taken before the Range; Lagged → re-Range); then Get(key): gone →
+      "mutex: session is expired"; on wait error delete key. Unlock =
+      Delete(key).
+    - Election: Campaign (put if absent, else Proclaim if value differs,
+      waitDeletes, Resign on cancel); Proclaim / Resign (Txn If
+      create_rev(key)=rev; fail → "election: not leader"); Leader (first
+      create, none → "election: no leader"); Observe (etcd's loop:
+      leader, its PUTs, on DELETE the next); `"leader" field must be
+      provided`.
+    - Gateway routes `/v3/lock/lock|unlock`, `/v3/election/campaign|
+      proclaim|leader|observe|resign`; pbjson for the two packages.
+    - Tests: gRPC (two lockers exclude each other, lease expiry frees,
+      unlock), election (campaign order, proclaim, leader, observe
+      stream, resign), auth (denied without write on the prefix),
+      `etcdctl lock`/`elect` against the services? (they use client-side
+      concurrency; a Go client of v3lockpb in tests/).
