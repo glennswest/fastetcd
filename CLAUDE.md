@@ -2627,3 +2627,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       42–262 ms, 2–9 answers over 50 ms a round), this (11 rounds) p99
       3.6–17 ms, 1 answer over 50 ms in all. Also fixed: the #138 watchdog test raced the
       leader's first fsync since #97; clippy in storage (#149; rest #152).
+
+78. **MoveLeader and Downgrade answer Unimplemented (#57, P?) — waiting on
+    the owner (asked 2026-10-14).** MoveLeader: openraft 0.9 refuses votes
+    while a voter's leader lease is live (`handle_vote_req`), so the
+    target cannot simply elect. Options asked: (1) a second vendored
+    openraft patch backporting 0.10's `transfer_leader` (lease expiry +
+    target elects, after the target catches up; version-gated peer RPC),
+    (2) pause the leader's sends in fastetcd's network until leases expire,
+    (3) leave it until 0.10. Downgrade: fastetcd has no cluster version
+    (per-feature version gates instead): (a) leave Unimplemented, (b)
+    design one. Recommended: MoveLeader (1), Downgrade (a).
