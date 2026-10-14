@@ -2779,3 +2779,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       build above base +426–622 → +39–271 MiB (redb page cache). Found: a
       restarted idle member's RSS ~480 MiB on both versions, ~100 MiB
       over the documented budgets (filed separately).
+
+86. **WebSocket upgrades on the v3 gateway (#66, P3) — waiting on the
+    owner (asked 2026-10-14).** Mechanism read in etcd v3.6.11 (wsproxy
+    e5319fda7802): any `/v3/` upgrade → POST, body = each client message
+    + `\n`, each response line → one text message, Origin/Referer
+    forwarded, token from `Sec-WebSocket-Protocol: Bearer, <t>` or a
+    `token` cookie; axum `ws` feature (tokio-tungstenite). Asked: origins
+    (1) all, as etcd (browsers do not preflight a WebSocket: a page could
+    read watches cross-origin), (2) same-origin by default +
+    `--gateway-ws-allowed-origins`, no cookie token (recommended), (3) not
+    yet (no client needs it).
