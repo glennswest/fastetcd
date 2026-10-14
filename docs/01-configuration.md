@@ -39,7 +39,7 @@ list is bound; the rest are accepted for compatibility.
 | `--initial-cluster` | empty | `FASTETCD_INITIAL_CLUSTER` | `ETCD_INITIAL_CLUSTER` | `name=URL,...`. Empty: a cluster of one. |
 | `--initial-cluster-state` | `new` | `FASTETCD_INITIAL_CLUSTER_STATE` | `ETCD_INITIAL_CLUSTER_STATE` | `new` bootstraps; `existing` joins without initializing. |
 | `--initial-cluster-token` | none | `FASTETCD_INITIAL_CLUSTER_TOKEN` | `ETCD_INITIAL_CLUSTER_TOKEN` | Derives the cluster id on a new store (FNV-1a-64, 63 bits). |
-| `--cluster-id` | derived | `FASTETCD_CLUSTER_ID` | | Id in every response header; persisted on first start; never 0. Without it or a token: `1`, with a warning. |
+| `--cluster-id` | derived | `FASTETCD_CLUSTER_ID` | | This member's id for every response header until the cluster's is replicated; persisted on first start; never 0. Without it or a token: random (63 bits). Refused at startup if it contradicts the cluster's replicated id (#38, 03-deploy § Cluster id). |
 | `--force-new-cluster` | `false` | `FASTETCD_FORCE_NEW_CLUSTER` | | Recovery: rebuild membership as a cluster of this member, keeping the data. One surviving member only. |
 
 ## TLS

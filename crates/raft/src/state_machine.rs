@@ -1177,6 +1177,11 @@ async fn apply_request(
             let rev = mvcc.current_revision().await;
             Ok(FastetcdLogResponse::Noop { revision: rev })
         }
+        FastetcdLogEntry::ClusterId(id) => {
+            mvcc.apply_cluster_id(*id).await?;
+            let rev = mvcc.current_revision().await;
+            Ok(FastetcdLogResponse::Noop { revision: rev })
+        }
         FastetcdLogEntry::Auth(op) => {
             let (revision, result) = mvcc.apply_auth(op).await?;
             Ok(FastetcdLogResponse::Auth { revision, log_index, result })

@@ -27,7 +27,11 @@ use fastetcd_raft::{
 pub struct ServerState {
     pub raft: Raft<TypeConfig>,
     pub sm: FastetcdStateMachine,
-    pub cluster_id: u64,
+    /// The cluster id every response carries: this member's own until the
+    /// cluster's is replicated, then the cluster's (fastetcd#38).
+    pub cluster_id: Arc<AtomicU64>,
+    /// Times this member took the cluster's id in place of its own.
+    pub cluster_id_adopted: Arc<AtomicU64>,
     pub member_id: u64,
     /// Auth's in-memory state, the store's own (`sm.mvcc().auth_memory()`),
     /// so what raft apply changes is what the interceptor reads (#32).
@@ -90,7 +94,8 @@ impl ServerState {
             lessor,
             raft,
             sm,
-            cluster_id,
+            cluster_id: Arc::new(AtomicU64::new(cluster_id)),
+            cluster_id_adopted: Arc::default(),
             member_id,
             auth,
             auth_gate: Arc::new(AuthGate::default()),
@@ -435,7 +440,7 @@ pub async fn response_header(
     revision: i64,
 ) -> fastetcd_proto::etcdserverpb::ResponseHeader {
     fastetcd_proto::etcdserverpb::ResponseHeader {
-        cluster_id: state.cluster_id,
+        cluster_id: state.cluster_id.load(std::sync::atomic::Ordering::Relaxed),
         member_id: state.member_id,
         revision,
         raft_term: state.current_term().await,

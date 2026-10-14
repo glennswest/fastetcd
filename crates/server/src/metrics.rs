@@ -126,6 +126,8 @@ pub struct Metrics {
     pub compact_revision: Gauge,
     pub auth_diverged: Gauge,
     pub log_has_batched: Gauge,
+    pub cluster_id_replicated: Gauge,
+    pub cluster_id_adopted: Gauge,
     pub members_unable_to_read_batches: Gauge,
     pub is_leader: Gauge,
     pub proposals_committed: Gauge,
@@ -170,6 +172,8 @@ impl Metrics {
         let compact_revision = Gauge::default();
         let auth_diverged = Gauge::default();
         let log_has_batched = Gauge::default();
+        let cluster_id_replicated = Gauge::default();
+        let cluster_id_adopted = Gauge::default();
         let members_unable_to_read_batches = Gauge::default();
         let is_leader = Gauge::default();
         let proposals_committed = Gauge::default();
@@ -204,6 +208,8 @@ impl Metrics {
             compact_revision: compact_revision.clone(),
             auth_diverged: auth_diverged.clone(),
             log_has_batched: log_has_batched.clone(),
+            cluster_id_replicated: cluster_id_replicated.clone(),
+            cluster_id_adopted: cluster_id_adopted.clone(),
             members_unable_to_read_batches: members_unable_to_read_batches.clone(),
             is_leader: is_leader.clone(),
             proposals_committed: proposals_committed.clone(),
@@ -318,6 +324,18 @@ impl Metrics {
                 "1 once this member has applied a batched log entry (it never goes back to 0): \
                  a member older than 1.10 cannot read this cluster's log (fastetcd#77)",
                 log_has_batched,
+            );
+            reg.register(
+                "fastetcd_cluster_id_replicated",
+                "1 once the cluster's id is replicated state, which every member reports \
+                 (fastetcd#38); 0 while each member reports its own",
+                cluster_id_replicated,
+            );
+            reg.register(
+                "fastetcd_cluster_id_adoptions",
+                "Times this member replaced the cluster id it reported with the cluster's \
+                 since it started (fastetcd#38)",
+                cluster_id_adopted,
             );
             reg.register(
                 "fastetcd_members_unable_to_read_batches",
@@ -552,6 +570,9 @@ impl Metrics {
         self.compact_revision.set(comp);
         self.auth_diverged.set(state.auth_gate.diverged(&state.auth) as i64);
         self.log_has_batched.set(state.sm.mvcc().has_batched() as i64);
+        self.cluster_id_replicated.set(state.sm.mvcc().cluster_id().is_some() as i64);
+        self.cluster_id_adopted
+            .set(state.cluster_id_adopted.load(std::sync::atomic::Ordering::Relaxed) as i64);
         self.members_unable_to_read_batches
             .set(state.older_members.load(std::sync::atomic::Ordering::Relaxed) as i64);
         if let Ok(size) = state.sm.mvcc().engine().size_on_disk().await {

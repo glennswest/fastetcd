@@ -160,6 +160,12 @@ pub enum FastetcdLogEntry {
     /// proposed only once every member has answered `ConfirmLeader`,
     /// since an older member cannot decode it.
     Batch(Vec<FastetcdLogEntry>),
+
+    /// The cluster's id (fastetcd#38): recorded by the first one applied,
+    /// ignored after, so every member agrees on it. The leader proposes
+    /// its own id once the cluster has none and every member answers as
+    /// 1.33 or later (an older member cannot decode it). Appended last.
+    ClusterId(u64),
 }
 
 /// Response shape from a state machine `apply()` call. Wire RPC

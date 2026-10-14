@@ -752,16 +752,32 @@ member of one deployment the same one:
   (`ETCD_INITIAL_CLUSTER_TOKEN` works too): FNV-1a-64 of the token,
   masked to 63 bits, never 0. Pass the same token to every member,
   including ones added later with `--initial-cluster-state=existing`.
-- With neither, the id is `1`, the same as every other unconfigured
-  deployment, and fastetcd warns at startup.
+- With neither, a new store gets a random 63-bit id (since 1.33; it was
+  `1`, the same for every unconfigured deployment).
 
-The id is chosen on a store's first start and persisted in its data
-directory. Later starts use the persisted id whatever the token says,
-so a restart or an upgrade never changes it. A store created before
-v1.3.0 keeps reporting `1`. The one way to change a store's id is to
-pass `--cluster-id`, and clients pinned to the old id will reconnect.
-Members do not exchange their ids, so a member whose flags differ from
-the others' reports a different id (#38).
+Each member chooses its own id on its store's first start and persists
+it; a store created before v1.3.0 keeps `1`. **Since 1.33 the cluster's
+id is replicated** (#38): once a cluster has none and every member runs
+1.33 or later, the leader proposes its own id in a log entry, and the
+first one applied is the cluster's, kept with the replicated metadata
+(so snapshots carry it to members added later). From then on every
+member reports it and persists it as its own:
+
+- A member whose id differed (other flags or token, a store restored
+  onto a new node, members that already disagreed) switches to the
+  cluster's, logs a warning, and counts it in
+  `fastetcd_cluster_id_adoptions`: its pinned clients reconnect once.
+  `fastetcd_cluster_id_replicated` is 1 once the cluster has its id.
+- A member started with an explicit `--cluster-id` that contradicts the
+  cluster's refuses to start, naming both (and stops if it learns of it
+  while running): start it with the cluster's id, or without the flag.
+- An existing cluster keeps its leader's id at the upgrade: where the
+  members were started alike, nobody's changes.
+
+The cluster's id cannot be changed once replicated. Do not add a member
+older than 1.33 to a cluster that has replicated it while the log may
+still hold the entry: such a member cannot read it (as with #56's
+nested txns; see #134).
 
 ## Disk space
 

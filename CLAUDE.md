@@ -2736,6 +2736,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     `1`; (2) mismatched member: adopt + warn + metric / refuse / refuse
     only on an explicit contradicting `--cluster-id` (rec.); (3) existing
     cluster: the leader's id (rec.) / the majority's.
+    Decided (master, for the owner): 1(a), 2(c), 3(a). Done:
+    `FastetcdLogEntry::ClusterId(u64)` (first applied wins,
+    `MvccStore::apply_cluster_id`, `mvcc_meta` `cluster_id`, watch,
+    reloaded on install); `cluster_id::reconcile` at startup, `follow`
+    (leader proposes behind `MembersAtLeast((1,33,0))`; members adopt or,
+    with an explicit contradicting flag, exit 78); random default; served
+    id an `AtomicU64`; metrics. Release 1.33.0 (minor).
 
 85. **Snapshot build and install stream their records (#62, P3).** Both
     ends held a decoded copy of the database (`range(.., 0)` into `Vec`s

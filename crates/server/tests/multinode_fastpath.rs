@@ -852,3 +852,60 @@ async fn an_older_member_means_keep_alives_go_through_raft() {
     assert!(after >= before + 4, "keep-alives were not logged: {before} -> {after}");
     assert!(key_exists(&leader.client, b"old/k").await);
 }
+
+/// The cluster id each member's responses carry.
+async fn reported_cluster_id(client: &str) -> u64 {
+    let mut c = KvClient::connect(client.to_string()).await.unwrap();
+    let r = c
+        .range(pb::RangeRequest { key: b"x".to_vec(), serializable: true, ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    r.header.unwrap().cluster_id
+}
+
+/// fastetcd#38: members that each chose their own id (here 101, 102,
+/// 103) end up reporting one, the leader's, once it is replicated; it is
+/// in every member's store, so a restart or a snapshot keeps it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn members_agree_on_the_leaders_cluster_id() {
+    use fastetcd_server::cluster_id::{follow, Source};
+    let nodes = cluster(0).await;
+    for n in &nodes {
+        n.state.cluster_id.store(100 + n.id, Ordering::Relaxed);
+    }
+    let leader = leader_of(&nodes).id;
+    for n in &nodes {
+        follow(n.state.clone(), Source::Persisted);
+    }
+    wait_for("every member to hold the replicated id", || {
+        nodes.iter().all(|n| n.state.sm.mvcc().cluster_id() == Some(100 + leader))
+    })
+    .await;
+    wait_for("every member to report it", || {
+        nodes.iter().all(|n| n.state.cluster_id.load(Ordering::Relaxed) == 100 + leader)
+    })
+    .await;
+    for n in &nodes {
+        assert_eq!(reported_cluster_id(&n.client).await, 100 + leader, "member {}", n.id);
+        let adopted = n.state.cluster_id_adopted.load(Ordering::Relaxed);
+        assert_eq!(adopted, u64::from(n.id != leader), "member {}: adoptions", n.id);
+    }
+}
+
+/// With a member too old to read the entry, nobody proposes it: every
+/// member keeps its own id, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_cluster_id_is_proposed_while_a_member_is_older() {
+    use fastetcd_server::cluster_id::{follow, Source};
+    let nodes = cluster(1).await;
+    for n in &nodes {
+        n.state.cluster_id.store(100 + n.id, Ordering::Relaxed);
+        follow(n.state.clone(), Source::Persisted);
+    }
+    sleep(Duration::from_secs(8)).await;
+    for n in &nodes {
+        assert_eq!(n.state.sm.mvcc().cluster_id(), None, "member {}", n.id);
+        assert_eq!(n.state.cluster_id.load(Ordering::Relaxed), 100 + n.id);
+    }
+}

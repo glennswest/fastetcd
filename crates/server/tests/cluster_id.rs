@@ -80,11 +80,19 @@ async fn a_store_from_before_persisted_ids_keeps_reporting_1() {
 }
 
 #[tokio::test]
-async fn no_flag_and_no_token_falls_back_to_1() {
+async fn no_flag_and_no_token_is_random_and_kept() {
+    // fastetcd#38: a new store with nothing to derive an id from gets a
+    // random one (it was 1, the same for every deployment), and keeps it.
     let dir = tempfile::tempdir().unwrap();
-    let (engine, is_new) = open(&dir.path().join("fastetcd.redb"));
-    let got = resolve(&engine, None, is_new, None).await.unwrap();
-    assert_eq!(got, (1, Source::Default));
+    let path = dir.path().join("fastetcd.redb");
+    let (id, src) = {
+        let (engine, is_new) = open(&path);
+        resolve(&engine, None, is_new, None).await.unwrap()
+    };
+    assert_eq!(src, Source::Random);
+    assert!(id != 0 && id != 1 && id >> 63 == 0);
+    let (engine, is_new) = open(&path);
+    assert_eq!(resolve(&engine, None, is_new, None).await.unwrap(), (id, Source::Persisted));
 }
 
 #[tokio::test]

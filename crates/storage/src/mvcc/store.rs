@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 
@@ -70,6 +70,10 @@ pub const META_KEY_RAFT_BATCH: &[u8] = b"raft_batch_progress";
 /// cleared (fastetcd#77): a member older than 1.10 cannot read this log,
 /// and nothing else recorded that the cluster had batched.
 pub const META_KEY_BATCHED: &[u8] = b"batched";
+/// The cluster id, replicated (fastetcd#38): set once by the first
+/// `ClusterId` log entry applied, carried by snapshots with the rest of
+/// `mvcc_meta`. Big-endian u64.
+pub const META_KEY_CLUSTER_ID: &[u8] = b"cluster_id";
 /// On-disk data-format version. Absent on data directories written
 /// before v1.0.1 (which never persisted raft membership durably, so an
 /// upgrade could strand the cluster — see fastetcd#11). Its absence is
@@ -412,6 +416,9 @@ struct Inner {
     pending_raft_meta: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
     /// [`META_KEY_BATCHED`], as the engine holds it (fastetcd#77).
     batched: AtomicBool,
+    /// [`META_KEY_CLUSTER_ID`] as the engine holds it (0: not set yet),
+    /// with a watch for the server to follow it (fastetcd#38).
+    cluster_id: watch::Sender<u64>,
     /// Auth's in-memory half: the enabled flag and the token set
     /// (fastetcd#32). Owned here so the state machine updates it on
     /// apply and the server's interceptor reads the same state.
@@ -525,6 +532,7 @@ impl MvccStore {
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
+        let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
 
         // If meta keys were absent, persist their initial values so
@@ -555,6 +563,7 @@ impl MvccStore {
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
                 batched: AtomicBool::new(batched),
+                cluster_id: watch::channel(cluster_id).0,
                 auth: AuthMemory::default(),
                 ops: OpCounters::default(),
                 apply_sync: AtomicBool::new(true),
@@ -714,6 +723,40 @@ impl MvccStore {
             return;
         }
         self.inner.pending_raft_meta.lock().await.push((META_KEY_BATCHED.to_vec(), vec![1]));
+    }
+
+    /// The replicated cluster id, if the cluster has one yet (fastetcd#38).
+    pub fn cluster_id(&self) -> Option<u64> {
+        Some(*self.inner.cluster_id.borrow()).filter(|id| *id != 0)
+    }
+
+    /// Follow the replicated cluster id (0 until it is set).
+    pub fn watch_cluster_id(&self) -> watch::Receiver<u64> {
+        self.inner.cluster_id.subscribe()
+    }
+
+    /// Apply a `ClusterId` log entry: record `id` as the cluster's unless
+    /// it already has one (the first applied wins, alike on every member),
+    /// with the staged raft metadata, in one commit. Returns the
+    /// cluster's id.
+    pub async fn apply_cluster_id(&self, id: u64) -> MvccResult<u64> {
+        let _state = self.inner.write_state.lock().await;
+        let mut batch = WriteBatch::new();
+        let current = self.cluster_id();
+        if current.is_none() {
+            batch.put(TABLE_META, META_KEY_CLUSTER_ID, &id.to_be_bytes());
+        }
+        self.fold_raft_meta(&mut batch).await;
+        if !batch.is_empty() {
+            self.inner.engine.commit(batch, self.apply_write_options()).await?;
+        }
+        Ok(match current {
+            Some(c) => c,
+            None => {
+                self.inner.cluster_id.send_replace(id);
+                id
+            }
+        })
     }
 
     /// The batch progress as last committed, if any.
@@ -895,8 +938,13 @@ impl MvccStore {
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         // A snapshot from a batched cluster carries the marker (#77).
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
+        // A snapshot from a cluster that has replicated its id carries it.
+        let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
         self.inner.batched.fetch_or(batched, Ordering::Relaxed);
+        if cluster_id != 0 {
+            self.inner.cluster_id.send_if_modified(|v| std::mem::replace(v, cluster_id) != cluster_id);
+        }
         self.load_index().await?;
         state.current_rev = current;
         state.compact_rev = compact;
@@ -2505,6 +2553,19 @@ fn eval_compare(rec: &KvRecord, op: &CompareOp, target: &CompareTarget) -> bool 
     }
 }
 
+async fn read_u64(snap: &dyn Snapshot, key: &[u8]) -> MvccResult<Option<u64>> {
+    match snap.get(TABLE_META, key).await? {
+        Some(b) => {
+            let b: [u8; 8] = b
+                .as_slice()
+                .try_into()
+                .map_err(|_| MvccError::Internal(format!("meta key {key:?} is {} bytes, expected 8", b.len())))?;
+            Ok(Some(u64::from_be_bytes(b)))
+        }
+        None => Ok(None),
+    }
+}
+
 async fn read_i64(snap: &dyn Snapshot, key: &[u8]) -> Result<Option<i64>, StorageError> {
     let bytes = snap.get(TABLE_META, key).await?;
     Ok(bytes.and_then(|b| {
@@ -3428,6 +3489,27 @@ mod tests {
         for r in readers {
             assert!(r.await.unwrap() > 0);
         }
+    }
+
+    /// fastetcd#38: the first cluster id applied is the cluster's, a later
+    /// one changes nothing, and a snapshot install carrying it sets it
+    /// (with its watch) on the member installing it.
+    #[tokio::test]
+    async fn the_first_cluster_id_applied_wins_and_travels_in_snapshots() {
+        let (_d, s) = open_mvcc().await;
+        assert_eq!(s.cluster_id(), None);
+        assert_eq!(s.apply_cluster_id(7).await.unwrap(), 7);
+        assert_eq!(s.apply_cluster_id(9).await.unwrap(), 7);
+        assert_eq!(s.cluster_id(), Some(7));
+
+        let (_d2, other) = open_mvcc().await;
+        let mut watch = other.watch_cluster_id();
+        let mut batch = WriteBatch::new();
+        batch.put(TABLE_META, META_KEY_CLUSTER_ID, &7u64.to_be_bytes());
+        other.install_tables(batch).await.unwrap();
+        assert_eq!(other.cluster_id(), Some(7));
+        assert!(watch.has_changed().unwrap());
+        assert_eq!(*watch.borrow_and_update(), 7);
     }
 
     #[tokio::test]

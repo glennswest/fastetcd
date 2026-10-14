@@ -967,12 +967,11 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     tracing::info!(cluster_id, source = ?cluster_id_source, "cluster id");
-    if cluster_id_source == fastetcd_server::cluster_id::Source::Default {
-        tracing::warn!(
+    if cluster_id_source == fastetcd_server::cluster_id::Source::Random {
+        tracing::info!(
             cluster_id,
-            "no --cluster-id or --initial-cluster-token: this store reports cluster id 1, \
-             like every other unconfigured deployment, so clients cannot tell it apart \
-             from another. Set a distinct --cluster-id or --initial-cluster-token."
+            "no --cluster-id or --initial-cluster-token: a random cluster id for this new \
+             store (the cluster's, once replicated, may differ: its leader's wins, #38)"
         );
     }
     let cache_config = fastetcd_server::ram_cache::config(
@@ -1282,6 +1281,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The cluster's id, if it is replicated already, wins over this
+    // member's own; an explicit --cluster-id that contradicts it is
+    // refused (fastetcd#38).
+    let cluster_id =
+        fastetcd_server::cluster_id::reconcile(&engine, cluster_id, cluster_id_source, sm.mvcc().cluster_id())
+            .await?;
     let server_state = Arc::new(
         ServerState::new(
             raft.clone(),
@@ -1301,6 +1306,7 @@ async fn main() -> anyhow::Result<()> {
         .with_peer_read_index_and_batching(log_progress.clone())
         .with_max_request_bytes(args.max_request_bytes),
     );
+    fastetcd_server::cluster_id::follow(server_state.clone(), cluster_id_source);
 
     // Periodic backups to a separate volume (fastetcd#37).
     if let Some(dir) = &args.backup_dir {
