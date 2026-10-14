@@ -2713,7 +2713,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     tree every Get option, the Mutex and the Election check out. Release
     1.33.1.
 
-83. **etcd's Lock and Election services (#64, P3) — after #154.** Design
+83. **etcd's Lock and Election services (#64, P3) — in progress
+    (2026-10-14; #154 shipped in 1.33.1).** Design
     (etcd v3.6.11 `v3lock/lock.go`, `v3election/election.go`, clientv3
     `concurrency` read): vendor `v3lock.proto` / `v3election.proto`
     (strip_annotations.py; vendor.sh); services behind the auth
