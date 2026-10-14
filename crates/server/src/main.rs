@@ -1405,6 +1405,9 @@ async fn main() -> anyhow::Result<()> {
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone());
     let lease = LeaseService::new(server_state.clone());
+    // etcd's Lock and Election services (#64).
+    let lock = fastetcd_server::concurrency::LockService::new(server_state.clone());
+    let election = fastetcd_server::concurrency::ElectionService::new(server_state.clone());
     let admin = AdminService::new(server_state.clone());
     // The store's own auth state, updated by raft apply (#32).
     let auth_state = server_state.auth.clone();
@@ -1465,6 +1468,8 @@ async fn main() -> anyhow::Result<()> {
         maintenance: maintenance.clone(),
         auth: auth.clone(),
         watch: watch.clone(),
+        lock: lock.clone(),
+        election: election.clone(),
         interceptor: interceptor.clone(),
         traffic: traffic.clone(),
     });
@@ -1502,7 +1507,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             tracing::info!(
                 %client_listen,
-                "serving KV / Cluster / Maintenance / Watch / Lease / Auth / Health gRPC + HTTP /health"
+                "serving KV / Cluster / Maintenance / Watch / Lease / Lock / Election / Auth / Health gRPC + HTTP /health"
             );
             let mut grpc_routes = tonic::service::Routes::builder();
             grpc_routes.add_service(health_service);
@@ -1529,6 +1534,15 @@ async fn main() -> anyhow::Result<()> {
             ));
             grpc_routes.add_service(InterceptedService::new(
                 LeaseServer::new(lease).max_decoding_message_size(d),
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(InterceptedService::new(
+                fastetcd_proto::v3lockpb::lock_server::LockServer::new(lock).max_decoding_message_size(d),
+                interceptor.clone(),
+            ));
+            grpc_routes.add_service(InterceptedService::new(
+                fastetcd_proto::v3electionpb::election_server::ElectionServer::new(election)
+                    .max_decoding_message_size(d),
                 interceptor.clone(),
             ));
             grpc_routes.add_service(InterceptedService::new(

@@ -185,6 +185,8 @@ pub async fn start_test_server_with_space(
     let watch = WatchService::new(state.clone());
     let lease = LeaseService::new(state.clone());
     let auth = AuthService::new(state.clone());
+    let lock = fastetcd_server::concurrency::LockService::new(state.clone());
+    let election = fastetcd_server::concurrency::ElectionService::new(state.clone());
     let interceptor = AuthInterceptor::new(state.auth.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -200,7 +202,15 @@ pub async fn start_test_server_with_space(
                 interceptor.clone(),
             ))
             .add_service(WatchServer::with_interceptor(watch, interceptor.clone()))
-            .add_service(LeaseServer::with_interceptor(lease, interceptor))
+            .add_service(LeaseServer::with_interceptor(lease, interceptor.clone()))
+            .add_service(fastetcd_proto::v3lockpb::lock_server::LockServer::with_interceptor(
+                lock,
+                interceptor.clone(),
+            ))
+            .add_service(fastetcd_proto::v3electionpb::election_server::ElectionServer::with_interceptor(
+                election,
+                interceptor,
+            ))
             .add_service(AuthServer::new(auth))
             .serve_with_incoming(incoming)
             .await

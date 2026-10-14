@@ -32,6 +32,18 @@ pub mod authpb {
     include!(concat!(env!("OUT_DIR"), "/authpb.serde.rs"));
 }
 
+/// `v3lockpb` — etcd's Lock service (fastetcd#64).
+pub mod v3lockpb {
+    tonic::include_proto!("v3lockpb");
+    include!(concat!(env!("OUT_DIR"), "/v3lockpb.serde.rs"));
+}
+
+/// `v3electionpb` — etcd's Election service (fastetcd#64).
+pub mod v3electionpb {
+    tonic::include_proto!("v3electionpb");
+    include!(concat!(env!("OUT_DIR"), "/v3electionpb.serde.rs"));
+}
+
 /// fastetcd-internal Raft peer RPC. Not part of the etcd v3 wire
 /// protocol — used between fastetcd nodes for openraft messages.
 pub mod fastetcd_raft {

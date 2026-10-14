@@ -36,4 +36,17 @@ for path in etcdserverpb/rpc.proto mvccpb/kv.proto authpb/auth.proto; do
     echo "  vendored ${path}"
 done
 
-echo "done. vendored protos under ${DEST}/"
+# etcd's Lock and Election services (fastetcd#64), from etcd's server tree.
+SERVER_DEST="${SCRIPT_DIR}/protos/etcd/server"
+mkdir -p "${SERVER_DEST}/v3lockpb" "${SERVER_DEST}/v3electionpb"
+for path in v3lock/v3lockpb/v3lock.proto v3election/v3electionpb/v3election.proto; do
+    tmp="$(mktemp)"
+    curl --silent --show-error --fail --location \
+        "https://raw.githubusercontent.com/etcd-io/etcd/${ETCD_TAG}/server/etcdserver/api/${path}" \
+        > "${tmp}"
+    python3 "${STRIP}" "${tmp}" > "${SERVER_DEST}/${path#*/}"
+    rm -f "${tmp}"
+    echo "  vendored server/${path}"
+done
+
+echo "done. vendored protos under ${DEST}/ and ${SERVER_DEST}/"

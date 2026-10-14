@@ -50,6 +50,8 @@ async fn start() -> Env {
         maintenance: MaintenanceService::new(state.clone()),
         auth: AuthService::new(state.clone()),
         watch: fastetcd_server::watch::WatchService::new(state.clone()),
+        lock: fastetcd_server::concurrency::LockService::new(state.clone()),
+        election: fastetcd_server::concurrency::ElectionService::new(state.clone()),
         interceptor: interceptor.clone(),
         traffic: state.traffic.clone(),
     };
@@ -435,4 +437,23 @@ async fn lease_keepalive_answers_each_request_and_ends_with_the_body() {
     }
     assert!(got.iter().any(|v| v["result"]["ID"] == id), "{got:?}");
     assert!(got.iter().any(|v| v["error"]["code"] == 3), "{got:?}");
+}
+
+/// fastetcd#64: Lock and Election at etcd's gateway routes.
+#[tokio::test]
+async fn lock_and_election_are_on_the_gateway() {
+    let env = start().await;
+    let (_, g) = env.post("/v3/lease/grant", json!({"TTL": "60"}), None).await;
+    let id = g["ID"].as_str().unwrap().to_string();
+    let (status, locked) = env.post("/v3/lock/lock", json!({"name": b64("gl"), "lease": id}), None).await;
+    assert_eq!(status, 200, "{locked}");
+    let key = locked["key"].as_str().unwrap().to_string();
+    let (status, _) = env.post("/v3/lock/unlock", json!({"key": key}), None).await;
+    assert_eq!(status, 200);
+    let (status, won) = env.post("/v3/election/campaign", json!({"name": b64("ge"), "lease": id, "value": b64("v")}), None).await;
+    assert_eq!(status, 200, "{won}");
+    let (status, leader) = env.post("/v3/election/leader", json!({"name": b64("ge")}), None).await;
+    assert_eq!((status, leader["kv"]["value"].clone()), (200, json!(b64("v"))), "{leader}");
+    let (status, _) = env.post("/v3/election/resign", json!({"leader": won["leader"]}), None).await;
+    assert_eq!(status, 200);
 }

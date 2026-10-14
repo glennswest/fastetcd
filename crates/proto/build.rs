@@ -12,6 +12,9 @@ fn main() -> std::io::Result<()> {
         proto_root.join("etcd/api/mvccpb/kv.proto"),
         proto_root.join("etcd/api/authpb/auth.proto"),
         proto_root.join("etcd/api/etcdserverpb/rpc.proto"),
+        // etcd's Lock and Election services (fastetcd#64).
+        proto_root.join("etcd/server/v3lockpb/v3lock.proto"),
+        proto_root.join("etcd/server/v3electionpb/v3election.proto"),
         proto_root.join("fastetcd/raft.proto"),
         proto_root.join("fastetcd/admin.proto"),
     ];
@@ -39,7 +42,7 @@ fn main() -> std::io::Result<()> {
         .register_descriptors(&set)?
         .preserve_proto_field_names()
         .ignore_unknown_fields()
-        .build(&[".etcdserverpb", ".mvccpb", ".authpb"])?;
+        .build(&[".etcdserverpb", ".mvccpb", ".authpb", ".v3lockpb", ".v3electionpb"])?;
 
     Ok(())
 }

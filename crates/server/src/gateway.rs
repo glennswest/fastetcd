@@ -74,6 +74,8 @@ pub struct Gateway {
     pub maintenance: MaintenanceService,
     pub auth: AuthService,
     pub watch: WatchService,
+    pub lock: crate::concurrency::LockService,
+    pub election: crate::concurrency::ElectionService,
     pub interceptor: AuthInterceptor,
     pub traffic: Arc<Traffic>,
 }
@@ -97,7 +99,32 @@ pub fn router(gw: Gateway) -> Router {
             )
         };
     }
+    // The same, for a request type outside `etcdserverpb` (#64).
+    macro_rules! unary_of {
+        ($r:expr, $path:literal, $svc:literal, $method:literal,
+         $field:ident, $tr:path, $f:ident, $req:ty) => {
+            $r.route(
+                $path,
+                post(|State(gw): State<Arc<Gateway>>, req: Request| async move {
+                    unary(gw, req, $svc, $method, true, |gw, r: tonic::Request<$req>| async move {
+                        <_ as $tr>::$f(&gw.$field, r).await
+                    })
+                    .await
+                }),
+            )
+        };
+    }
     let r = Router::new();
+    // Lock and Election (#64), at etcd's v3lock / v3election routes.
+    use fastetcd_proto::v3electionpb as epb;
+    use fastetcd_proto::v3lockpb as lpb;
+    let r = unary_of!(r, "/v3/lock/lock", "Lock", "Lock", lock, lpb::lock_server::Lock, lock, lpb::LockRequest);
+    let r = unary_of!(r, "/v3/lock/unlock", "Lock", "Unlock", lock, lpb::lock_server::Lock, unlock, lpb::UnlockRequest);
+    let r = unary_of!(r, "/v3/election/campaign", "Election", "Campaign", election, epb::election_server::Election, campaign, epb::CampaignRequest);
+    let r = unary_of!(r, "/v3/election/proclaim", "Election", "Proclaim", election, epb::election_server::Election, proclaim, epb::ProclaimRequest);
+    let r = unary_of!(r, "/v3/election/leader", "Election", "Leader", election, epb::election_server::Election, leader, epb::LeaderRequest);
+    let r = unary_of!(r, "/v3/election/resign", "Election", "Resign", election, epb::election_server::Election, resign, epb::ResignRequest);
+    let r = r.route("/v3/election/observe", post(observe));
     // KV
     let r = unary!(r, "/v3/kv/range", "KV", "Range", kv, Kv::range, RangeRequest, true);
     let r = unary!(r, "/v3/kv/put", "KV", "Put", kv, Kv::put, PutRequest, true);
@@ -222,6 +249,26 @@ async fn snapshot(State(gw): State<Arc<Gateway>>, req: Request) -> Response {
         }
     };
     let stream = match Maintenance::snapshot(&gw.maintenance, request).await {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            counted.finish(status.code());
+            return error(&status);
+        }
+    };
+    lines(stream, counted, None)
+}
+
+async fn observe(State(gw): State<Arc<Gateway>>, req: Request) -> Response {
+    use fastetcd_proto::v3electionpb::election_server::Election;
+    let mut counted = Counted::start(&gw.traffic, "Election", "Observe", "server_stream");
+    let request = match decode::<fastetcd_proto::v3electionpb::LeaderRequest>(&gw, req, true).await {
+        Ok(r) => r,
+        Err(status) => {
+            counted.finish(status.code());
+            return error(&status);
+        }
+    };
+    let stream = match Election::observe(&gw.election, request).await {
         Ok(resp) => resp.into_inner(),
         Err(status) => {
             counted.finish(status.code());

@@ -23,6 +23,7 @@ pub mod batch_guard;
 pub mod cluster;
 pub mod cluster_id;
 pub mod compaction;
+pub mod concurrency;
 pub mod conv;
 pub mod etcd_errors;
 pub mod gateway;
