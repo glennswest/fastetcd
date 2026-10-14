@@ -431,9 +431,8 @@ A data directory holds:
 | `wal/` | The raft log and vote: a sequential write-ahead log in segments written full of zeros up front (`--wal-segment-bytes`, 16 MiB), plus `spare.wal.tmp`, the next one, made ready in the background. |
 | `snapshots/` | Retained raft snapshots. |
 
-There is no engine choice to make: `fastetcd-storage` also has `wal`
-and `iouring` key-value engines, but the server cannot use them (#55);
-`wal/` is the raft log, not one of those.
+There is no engine choice to make: redb is the only engine (the `wal` and
+`iouring` ones were removed in 1.32.2, #55); `wal/` is the raft log.
 
 ### Writes: one sequential fsync (#85)
 
@@ -952,7 +951,7 @@ from deltas between scrapes.
 `etcd_mvcc_db_total_size_in_bytes`,
 `etcd_mvcc_db_total_size_in_use_in_bytes`,
 `etcd_server_quota_backend_bytes`, `fastetcd_engine_info{engine}`
-(`redb`, `wal` or `iouring`), the RAM cache metrics in
+(`redb`), the RAM cache metrics in
 [Memory](#memory), and the disk and recovery metrics in
 [04-disk-space](04-disk-space.md) and
 [05-backup-and-recovery](05-backup-and-recovery.md).

@@ -759,9 +759,8 @@ Version locations (keep in sync):
   auth and node metadata, behind a write-behind layer (applies in RAM,
   checkpointed in). The raft log and vote are a WAL in
   `<data-dir>/wal/` (#85); raft snapshots are files in
-  `<data-dir>/snapshots/`. `fastetcd-storage` also has `wal` and
-  `iouring` (tokio-uring, feature `iouring`) engines that the server
-  cannot select (#55).
+  `<data-dir>/snapshots/`. redb is the only engine: `wal` and
+  `iouring` were removed in 1.32.2 (#55).
 - **Consensus**: `openraft` 0.9 — core, not optional. Single-node is a
   cluster-of-one. Linearizable reads and writes avoid RaftCore's queue
   where they can: `read_index.rs` (sole voter, or a `ConfirmLeader`
@@ -817,7 +816,8 @@ Tracked live in the Claude task system. Snapshot of the order:
 9. Watch service
 10. Lease service
 11. Maintenance + Cluster services
-12. iouring engine implementing `KvStore` (Linux-only, cargo feature)
+12. iouring engine implementing `KvStore` (Linux-only, cargo feature) —
+    removed in 1.32.2 with the wal engine (#55)
 13. Migration tool from etcd BoltDB
 14. Benchmarks: redb engine vs iouring engine vs upstream etcd
 15. **Bounded on-disk footprint (#14) — done, shipped in v1.1.0.** A bounded data

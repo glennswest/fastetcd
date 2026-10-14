@@ -27,7 +27,7 @@
 //!   - `etcd_server_proposals_committed_total` /
 //!     `etcd_server_proposals_applied_total` (gauges, as in etcd): the
 //!     raft committed and applied indexes
-//!   - `fastetcd_engine_info{engine=…}` (info: redb / wal / iouring)
+//!   - `fastetcd_engine_info{engine=…}` (info: the engine, `redb`)
 //!   - `fastetcd_read_index_total{path=sole_voter|quorum|raft}`
 //!     (counters): linearizable read barriers this member served, by how
 //!     (#71, #75): from local state as the only voter, confirmed by a

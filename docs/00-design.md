@@ -56,13 +56,15 @@ client's path is a sequential write, not a B-tree commit. Before 1.12
 the log was a pair of redb tables, and every append was a durable redb
 commit that also wrote the pages of every apply since the last one.
 
-**Design, not implemented (#55):** a second, Linux-only engine for
-predictable tail latency. `fastetcd-storage` has a `wal` engine (an
-append-only WAL plus an in-memory index, tokio fs) and an `iouring`
-variant of it (cargo feature `iouring`, via `tokio-uring`, not glommio),
-but O_DIRECT and group commit are not implemented, and the server has
-no way to select either: no `--storage-engine` flag, no server feature.
-Only the storage benchmarks use them.
+**One engine (#55).** The original design had a second, Linux-only
+engine for predictable tail latency (a `wal` engine, an append-only WAL
+plus an in-memory index, and an `iouring` variant of it over
+`tokio-uring`). It never had O_DIRECT or group commit, the server never
+selected it, and its aim was met another way: the raft log, the I/O on
+the client's path, became a sequential WAL (#85). Both were removed in
+1.32.2, with the `tokio-uring` dependency; the server relies on redb's
+presync (#93), corruption handling (#37) and defragment (#14). Their
+code is in git history before 1.32.2.
 
 **Alternatives considered, not adopted:** `fjall` (LSM; adds compaction
 tuning), `sled` (pre-1.0), `rocksdb` (C++ dependency, compaction
@@ -147,7 +149,7 @@ apply loop to a dedicated thread; it runs on the shared runtime today.
 ```
 crates/
   proto/      # etcd v3 + fastetcd protos: tonic stubs, pbjson serde
-  storage/    # KvStore trait; redb (used), wal / iouring (not wired);
+  storage/    # KvStore trait; redb engine, write-behind, raft WAL;
               # MVCC store: revisions, leases, auth tables, events
   raft/       # openraft adapters: log store, state machine, snapshots
               # as files, gRPC peer transport, forwarding, lease precheck

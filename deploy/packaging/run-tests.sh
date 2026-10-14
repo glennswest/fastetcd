@@ -11,10 +11,4 @@ cd "$(dirname "$0")/../.."
 echo "=== cargo test --workspace ==="
 cargo test --workspace --no-fail-fast
 
-echo "=== cargo test -p fastetcd-storage --features wal-engine ==="
-cargo test -p fastetcd-storage --features wal-engine --no-fail-fast
-
-echo "=== cargo test -p fastetcd-storage --features iouring ==="
-cargo test -p fastetcd-storage --features iouring --no-fail-fast
-
 echo "All tests passed."

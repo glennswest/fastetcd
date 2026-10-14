@@ -89,9 +89,10 @@ fastetcd-ctl status
                 redb engine (ACID single-file B-tree)
 ```
 
-`fastetcd-storage` also has `wal` and (Linux, feature `iouring`)
-`iouring` engines behind the same trait. The server does not use them:
-it always opens redb (#55).
+redb is the only engine. The `wal` and `iouring` engines that
+`fastetcd-storage` once carried were removed in 1.32.2 (#55): the server
+relies on redb's presync, corruption handling and defragment, and the raft
+log is already a sequential WAL.
 
 ## fastetcd vs etcd
 

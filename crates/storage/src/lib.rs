@@ -6,14 +6,14 @@
 //!    (see [`kvstore`]). Higher layers — the MVCC state machine, the
 //!    Raft log adapter — depend on this trait only.
 //!
-//! 2. **Concrete engines** implementing the trait:
-//!    - [`redb_engine::RedbEngine`] — default; cross-platform; ACID
-//!      single-file B-tree.
-//!    - [`iouring_engine::IoUringEngine`] — Linux only, behind cargo
-//!      feature `iouring`; `glommio` + `O_DIRECT` + custom WAL.
+//! 2. **The engine**: [`redb_engine::RedbEngine`], a single-file ACID
+//!    B-tree, behind [`write_behind::WriteBehind`]. The `wal` and
+//!    `iouring` engines were removed in 1.32.2 (fastetcd#55): the server
+//!    relies on redb's presync, corruption handling and defragment, and
+//!    the raft log is its own sequential WAL ([`raft_wal`]).
 //!
-//! The MVCC state machine layer and the lease/watch fan-out layer live
-//! in this crate too, but land in later milestones.
+//! The MVCC state machine (revisions, leases, auth, events) lives here
+//! too ([`mvcc`]).
 
 pub mod fs_space;
 pub mod kvstore;
@@ -26,12 +26,6 @@ pub mod raft_wal;
 
 #[cfg(feature = "redb-engine")]
 pub mod redb_engine;
-
-#[cfg(feature = "wal-engine")]
-pub mod wal_engine;
-
-#[cfg(all(feature = "iouring", target_os = "linux"))]
-pub mod iouring_engine;
 
 pub use fs_space::FsSpace;
 pub use kvstore::{

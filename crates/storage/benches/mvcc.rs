@@ -8,8 +8,7 @@
 //!
 //! Each benchmark uses unique keys per iteration so the underlying
 //! engine state grows over the measurement window. Numbers come from
-//! `cargo bench -p fastetcd-storage`. The `iouring` engine, once
-//! implemented, will be added as a second group for side-by-side.
+//! `cargo bench -p fastetcd-storage`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,18 +31,6 @@ fn shared_mvcc(rt: &Runtime) -> (tempfile::TempDir, MvccStore) {
         let dir = tempfile::tempdir().unwrap();
         let engine: Arc<dyn fastetcd_storage::KvStore> =
             Arc::new(RedbEngine::open(dir.path().join("mvcc.redb")).unwrap());
-        let mvcc = MvccStore::open(engine).await.unwrap();
-        (dir, mvcc)
-    })
-}
-
-#[cfg(feature = "wal-engine")]
-fn shared_mvcc_wal(rt: &Runtime) -> (tempfile::TempDir, MvccStore) {
-    use fastetcd_storage::wal_engine::WalEngine;
-    rt.block_on(async {
-        let dir = tempfile::tempdir().unwrap();
-        let engine: Arc<dyn fastetcd_storage::KvStore> =
-            Arc::new(WalEngine::open(dir.path().join("mvcc.wal")).await.unwrap());
         let mvcc = MvccStore::open(engine).await.unwrap();
         (dir, mvcc)
     })
@@ -78,23 +65,6 @@ fn bench_put_single(c: &mut Criterion) {
             });
         });
     });
-
-    #[cfg(feature = "wal-engine")]
-    {
-        let (_dir2, mvcc2) = shared_mvcc_wal(&rt);
-        let counter2 = AtomicU64::new(0);
-        group.bench_function("wal", |b| {
-            b.iter(|| {
-                let n = counter2.fetch_add(1, Ordering::Relaxed);
-                let key = format!("k-{n}");
-                rt.block_on(async {
-                    mvcc2.apply(&[put_value(key.as_bytes(), b"v")])
-                        .await
-                        .unwrap();
-                });
-            });
-        });
-    }
 
     group.finish();
 }

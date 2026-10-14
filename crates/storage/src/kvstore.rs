@@ -308,7 +308,7 @@ pub trait KvStore: Send + Sync + 'static {
         })
     }
 
-    /// Engine-defined name for logging and metrics (`"redb"`, `"iouring"`).
+    /// Engine-defined name for logging and metrics (`"redb"`; test engines name themselves).
     fn engine_name(&self) -> &'static str;
 
     /// Best-effort online defragmentation. Engines that don't
