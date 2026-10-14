@@ -874,7 +874,9 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
   `status`, `defragment`, `hash`, `hashkv`, `snapshot`,
   `transfer-leadership`, `downgrade`. Auth: `/v3/auth/enable`, `disable`,
   `status`, `authenticate`, `user/{add,get,list,delete,changepw,grant,revoke}`,
-  `role/{add,get,list,delete,grant,revoke}`.
+  `role/{add,get,list,delete,grant,revoke}`. Lock (#64): `/v3/lock/lock`,
+  `unlock`. Election: `/v3/election/campaign`, `proclaim`, `leader`,
+  `observe` (a stream), `resign`.
 - **JSON:** as etcd's gateway writes it: proto field names (`raft_term`,
   `dbSize`, `ID`, `peerURLs`), 64-bit numbers as strings, keys and values
   base64, enums by name (`"action":"GET"`, `"alarm":"NOSPACE"`), fields
@@ -884,7 +886,7 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
   invalid argument / out of range, 401 unauthenticated, 403 permission
   denied, 404 not found, 429 NOSPACE, 503 unavailable, …), body
   `{"code":<grpc code>,"message":"…"}`.
-- **Streams** (`snapshot`, `watch`, `keepalive`): one JSON object per
+- **Streams** (`snapshot`, `watch`, `keepalive`, `observe`): one JSON object per
   line, `{"result":{…}}` or `{"error":{…}}`. For `watch` and `keepalive`
   the body is a sequence of JSON requests. A watch keeps streaming after
   the body ends, until the client disconnects; a keepalive stream ends
@@ -897,6 +899,30 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
 - Gateway calls count in `grpc_server_*_total` under the method they call.
 - `--enable-grpc-gateway=false` (or `ETCD_ENABLE_GRPC_GATEWAY=false`)
   turns it off. gRPC and `/health` are unaffected.
+
+## Lock and Election
+
+etcd's `v3lockpb.Lock` and `v3electionpb.Election` services are served on
+the client port (since 1.34, #64), over gRPC and at the gateway routes
+above. As etcd's, they run clientv3's `concurrency` Mutex and Election
+for the caller, so the caller's permissions apply to every step (a Lock
+needs write on `<name>/`):
+
+- **Lock** `name`, `lease`: takes `<name>/<lease id in hex>` and returns
+  it once it is the oldest key under `<name>/`, waiting for the ones
+  before it to go. With lease `0` a lease of 60 s is granted for it (not
+  kept alive: give your own lease and keep it alive to hold a lock
+  longer). The lock goes with its key: **Unlock** `key`, or the lease
+  expiring or being revoked. A Lock whose client goes away while it waits
+  removes its key.
+- **Election** `name`: **Campaign** (as a lock, with a value; returns the
+  leader key), **Proclaim** (a new value, only while still the leader:
+  else `election: not leader`), **Leader** (`election: no leader` if
+  none), **Observe** (a stream: the leader, its changes, then the next),
+  **Resign**. Errors are etcd's texts, gRPC `Unknown`, as etcd's servers
+  return them.
+- clientv3's `concurrency` package used directly (the usual way) works
+  too, since 1.33.1 (#154).
 
 ## Health checks
 

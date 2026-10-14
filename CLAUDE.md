@@ -2713,8 +2713,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     tree every Get option, the Mutex and the Election check out. Release
     1.33.1.
 
-83. **etcd's Lock and Election services (#64, P3) — in progress
-    (2026-10-14; #154 shipped in 1.33.1).** Design
+83. **etcd's Lock and Election services (#64, P3) — done (1.34.0).**
+    `crates/server/src/concurrency.rs`, protos under
+    `crates/proto/protos/etcd/server/`; gateway routes; tests
+    `concurrency_grpc.rs`. Found: waitDeletes with a bound < 1 (a key at
+    revision 1, fastetcd's first) waited on itself; fixed. Design
     (etcd v3.6.11 `v3lock/lock.go`, `v3election/election.go`, clientv3
     `concurrency` read): vendor `v3lock.proto` / `v3election.proto`
     (strip_annotations.py; vendor.sh); services behind the auth

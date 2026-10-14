@@ -53,7 +53,7 @@ fastetcd-ctl status
 ## Goals
 
 1. **Wire compatibility** with etcd v3 gRPC: KV, Watch, Lease,
-   Maintenance, Cluster, Auth, grpc.health.v1.
+   Maintenance, Cluster, Auth, Lock, Election, grpc.health.v1.
 2. **Multi-node from day one** — Raft is foundational, not optional.
 3. **Data import** from existing etcd via
    `fastetcd-migrate --from snap.db --to data-dir --preserve-revisions`.
@@ -161,7 +161,7 @@ a running server):
 ### Compatibility boundary
 
 fastetcd implements the etcd **v3 gRPC** surface — KV, Watch, Lease,
-Txn, Maintenance, Cluster, Auth, and grpc.health.v1 — and is
+Txn, Maintenance, Cluster, Auth, Lock, Election, and grpc.health.v1 — and is
 exercised in its test suite by the third-party `etcd-client` Rust crate,
 which shares zero code with fastetcd. Anything that speaks etcd v3
 (including `etcdctl` and Kubernetes' `kube-apiserver`) is the

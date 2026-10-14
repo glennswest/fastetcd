@@ -216,8 +216,7 @@ Auth: no known authorization gap; tokens never expire (#46).
 - **Correctness first**: the lease-not-found check at apply as etcd
   does it, once members' lease tables are known to agree (#115).
 - **etcd parity gaps**: MoveLeader / Downgrade (#57),
-  Lock / Election services
-  (#64), WebSocket gateway streams (#66), a real `/health` (#69),
+  WebSocket gateway streams (#66), a real `/health` (#69),
   `--auto-compaction-mode` (#21, an owner decision).
 - **Writes on slow disks and 3 members**: more writes per fsync (#94),
   (#92), configurable election timeouts (#103).
