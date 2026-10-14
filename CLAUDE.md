@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.33.1`** — Range sorts and filters as etcd does (#154, P1): sort
+**`1.34.0`** — etcd's Lock and Election services (#64), gRPC and the
+`/v3/lock`, `/v3/election` gateway routes: clientv3's concurrency Mutex
+and Election run for the caller (`concurrency.rs`).
+
+Previous: **`1.33.1`** — Range sorts and filters as etcd does (#154, P1): sort
 order/target and min/max mod/create revision were ignored, so clientv3's
 `concurrency.Mutex` and `Election` were not exclusive on fastetcd.
 `range_options.rs`; `tests/clientv3_concurrency.sh`.

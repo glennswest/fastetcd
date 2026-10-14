@@ -4,12 +4,32 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-14
-- **docs:** WebSocket upgrades of the v3 gateway are deferred (#66, decided): 03-deploy § v3 JSON gateway and the README say why (tonic 0.12's server completes no HTTP upgrade on the client port) and where the code is (6497472, 3e7fba7, 8cf93da).
-- **feat:** etcd's Lock and Election services (#64): `v3lockpb.Lock` (Lock, Unlock) and `v3electionpb.Election` (Campaign, Proclaim, Leader, Observe, Resign), vendored from etcd v3.6.11, on the client port behind the auth interceptor and at etcd's `/v3/lock/*` and `/v3/election/*` gateway routes. As etcd's servers, they run clientv3's `concurrency` Mutex and Election steps for the caller (`crates/server/src/concurrency.rs`, through `KvService`/`LeaseService` with the caller's identity): a 60 s session lease for lease 0, owner by first create revision (#154), waits on this member's applied events, a Lock or Campaign whose client goes away removes its key. Found doing it: a wait below revision 1 meant "no bound" (`max_create_revision` 0) and a first key waited on itself, since fastetcd's first write is revision 1 (etcd's is 2).
+## [v1.34.0] — 2026-10-14
 
-### 2026-10-14
-- **chore:** WebSocket upgrades of the v3 gateway (#66) built and reverted: tonic 0.12.3's server serves the client port's connections without HTTP upgrade support, so an upgrade got 101 and then a reset. Not served; how to proceed asked on #66.
+### Added
+- etcd's Lock and Election services (#64): `v3lockpb.Lock` (Lock,
+  Unlock) and `v3electionpb.Election` (Campaign, Proclaim, Leader,
+  Observe, Resign), vendored from etcd v3.6.11, on the client port behind
+  the auth interceptor and at etcd's `/v3/lock/*` and `/v3/election/*`
+  gateway routes. As etcd's servers do, they run clientv3's `concurrency`
+  Mutex and Election steps for the caller (`concurrency.rs`, through the
+  KV and Lease services with the caller's identity, so its permissions
+  apply): a 60 s session lease for lease 0, the owner by first create
+  revision (#154), waits on this member's applied events, and a Lock or
+  Campaign whose client goes away removes its key. Errors are etcd's
+  texts. 03-deploy § Lock and Election.
+
+### Fixed
+- Found while doing it: a wait "for keys created before revision 0"
+  meant no bound at all (`max_create_revision` 0), so a lock or campaign
+  whose key was the store's first write (revision 1; etcd's first is 2)
+  waited on itself.
+
+### Documentation
+- WebSocket upgrades of the v3 gateway are deferred (#66, decided):
+  tonic 0.12's server completes no HTTP upgrade on the client port; the
+  WebSocket code was built and reverted (6497472, 3e7fba7, 8cf93da) and
+  can be restored once it does. 03-deploy, README.
 
 ## [v1.33.1] — 2026-10-14
 
