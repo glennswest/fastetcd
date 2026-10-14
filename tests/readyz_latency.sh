@@ -11,6 +11,7 @@
 # each answer's time measured by curl. Prints p50 / p99 / max of /readyz
 # and how many answers took over 50 ms (stormd's p99 budget for it).
 # Run it through sc-build: `sc-build 'tests/readyz_latency.sh v1.32.0 2'`.
+# CONNS sets the bench's clients (1000).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -54,10 +55,17 @@ compactor() {
     done
 }
 
+# ROUTES (default `readyz`): the routes probed in turn, e.g.
+# `readyz/non_learner readyz/serializable_read readyz/linearizable_read`
+# to tell which part of an answer is slow.
+ROUTES=${ROUTES:-readyz}
 prober() {
+    local r
     while :; do
-        curl -s -o /dev/null -w '%{http_code} %{time_total}\n' "$CLIENT/readyz" || echo "000 0"
-        sleep 0.02
+        for r in $ROUTES; do
+            curl -s -o /dev/null -w "$r %{http_code} %{time_total}\n" "$CLIENT/$r" || echo "$r 000 0"
+            sleep 0.02
+        done
     done
 }
 
@@ -81,7 +89,7 @@ run() {
     local probe=$!
     compactor &
     local comp=$!
-    "$BENCH" --endpoint "$CLIENT" --mode put --conns 1000 --total 300000 --keys 1000 \
+    "$BENCH" --endpoint "$CLIENT" --mode put --conns "${CONNS:-1000}" --total 300000 --keys 1000 \
         >"$dir/bench.txt" 2>"$dir/bench.err" || echo "BENCH FAILED: $(tail -n 2 "$dir/bench.err")"
     kill "$probe" "$comp" 2>/dev/null || true
     wait "$probe" "$comp" 2>/dev/null || true
@@ -93,16 +101,15 @@ run() {
     for f in idle readyz; do
         python3 - "$dir/$f.txt" "$f" <<'EOF'
 import sys
-rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
-bad = sum(1 for c, _ in rows if c != "200")
-t = sorted(float(s) * 1000 for _, s in rows)
-if not t:
-    print(f"   {sys.argv[2]:6} no answers")
-    sys.exit()
-pct = lambda q: t[min(len(t) - 1, int(q * len(t)))]
-over = sum(1 for x in t if x > 50)
-print(f"   {sys.argv[2]:6} /readyz n {len(t):5}  p50 {pct(.5):6.1f}  p99 {pct(.99):6.1f}  "
-      f"max {t[-1]:6.1f} ms  over 50 ms {over}  not 200 {bad}")
+rows = [l.split() for l in open(sys.argv[1]) if len(l.split()) == 3]
+for route in dict.fromkeys(r for r, _, _ in rows):
+    mine = [(c, s) for r, c, s in rows if r == route]
+    bad = sum(1 for c, _ in mine if c != "200")
+    t = sorted(float(s) * 1000 for _, s in mine)
+    pct = lambda q: t[min(len(t) - 1, int(q * len(t)))]
+    over = sum(1 for x in t if x > 50)
+    print(f"   {sys.argv[2]:6} /{route:26} n {len(t):5}  p50 {pct(.5):6.1f}  p99 {pct(.99):6.1f}  "
+          f"max {t[-1]:6.1f} ms  over 50 ms {over}  not 200 {bad}")
 EOF
     done
 }
