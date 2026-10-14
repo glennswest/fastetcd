@@ -1,0 +1,20 @@
+== v1.12.0 (fastetcd 1.12.0), data on disk (btrfs)
+  lone put after idle: n=30 mean=16.14 p50=8.82 p99=121.36 max=121.36 ms
+      WAL over the run: 31 fsyncs, mean fsync 15.14 ms
+  put back to back: n=30 mean=6.21 p50=5.58 p99=12.40 max=12.40 ms
+      WAL over the run: 31 fsyncs, mean fsync 5.73 ms
+== v1.12.0 (fastetcd 1.12.0), data on tmpfs (tmpfs)
+  lone put after idle: n=30 mean=0.87 p50=0.86 p99=1.29 max=1.29 ms
+      WAL over the run: 31 fsyncs, mean fsync 0.00 ms
+  put back to back: n=30 mean=0.14 p50=0.11 p99=0.34 max=0.34 ms
+      WAL over the run: 31 fsyncs, mean fsync 0.00 ms
+== tree (fastetcd 1.32.1), data on disk (btrfs)
+  lone put after idle: n=30 mean=11.69 p50=12.17 p99=23.24 max=23.24 ms
+      WAL over the run: 31 fsyncs, mean fsync 10.67 ms
+  put back to back: n=30 mean=9.30 p50=11.01 p99=18.71 max=18.71 ms
+      WAL over the run: 31 fsyncs, mean fsync 8.77 ms
+== tree (fastetcd 1.32.1), data on tmpfs (tmpfs)
+  lone put after idle: n=30 mean=0.88 p50=0.91 p99=1.43 max=1.43 ms
+      WAL over the run: 31 fsyncs, mean fsync 0.00 ms
+  put back to back: n=30 mean=0.10 p50=0.10 p99=0.23 max=0.23 ms
+      WAL over the run: 31 fsyncs, mean fsync 0.00 ms

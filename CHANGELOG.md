@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-14
+- **test:** `fastetcd-bench --mode idle-put` and `tests/idle_write.sh [baseline]`: a lone write after idle vs back to back, one member, disk and tmpfs, with the WAL's fsyncs and mean fsync per run (#102). `docs/benchmarks/idle-write.md`: every write is one WAL fdatasync, idle or not; the lone-write penalty is the device's slower fsync after a quiet spell (v1.12.0: lone mean 16.1 vs 6.2 ms, fsync 15.1 vs 5.7 ms; v1.32.1: 11.7 vs 9.3 ms, fsync 10.7 vs 8.8); on tmpfs a lone put costs ~0.8 ms more, no timer.
 - **chore:** Deleted branch `wip/2026-09-29-paused-metrics` on GitHub and locally (#70): its tip 800a7c9 was merged into v1.7.0 and it held nothing `main` lacks.
 - **test:** #79 closed: a v1.9.0 member's exit during `read_latency.sh` (2026-10-01, log lost) never recurred; `tests/read_latency.sh v1.9.0` 3x and `MEMBERS=3` on 1.32.1 found every member alive, no panic, no OOM.
 - **docs:** `--max-request-bytes` unset keeps the 4 MiB gRPC limit on purpose (owner's decision on #54: etcd's 1.5 MiB default would refuse writes that work today; the apiserver already caps objects at ~1.5 MiB, so the stormcos golden does not set it); its `--help`, 01-configuration and the README say so and how to get etcd's limit (`--max-request-bytes 1572864`).

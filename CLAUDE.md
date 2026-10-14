@@ -2646,3 +2646,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     `tokio-uring` (recommended), (2) keep as library-only, (3) make them
     selectable (`--storage-engine`, each engine brought up to the server's
     needs).
+
+80. **A lone write after idle (#102, P3) — done (test + docs; no release).**
+    `fastetcd-bench --mode idle-put`, `tests/idle_write.sh`: one member,
+    disk and tmpfs, WAL fsyncs and mean fsync per run. Every write is one
+    fdatasync, idle or not; the after-idle penalty is the device's fsync
+    (v1.12.0 lone 16.1 vs 6.2 ms, fsync 15.1 vs 5.7 ms); fastetcd's cold
+    path ~0.8 ms on tmpfs, no timer. `docs/benchmarks/idle-write.md`.

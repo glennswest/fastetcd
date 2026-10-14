@@ -192,7 +192,7 @@ users keep their etcd passwords (#60).
 
 **`fastetcd-bench`** — load generator. `--endpoint`, `--mode put |
 get-lin | get-ser | read-under-load | durability-write | durability-check
-| keepalive` (default `put`), `--conns 64`,
+| keepalive | idle-put` (default `put`), `--conns 64`,
 `--total 50000`, `--val-bytes 256`, `--keys 10000`. `read-under-load`
 (#71): `--conns` clients loop GET + CAS Txn on their own key (a prefix
 Range every fifth loop) for `--duration-secs 20` while a probe makes
@@ -200,7 +200,9 @@ Range every fifth loop) for `--duration-secs 20` while a probe makes
 prints write rate and latency and both probes' percentiles. `keepalive`
 (#92): `--conns` clients, each with its own lease (TTL 60 s) and
 keep-alive stream, `--total` keep-alives in all, each awaited; prints
-throughput and latency (etcd's `benchmark lease-keepalive`). A failed RPC
+throughput and latency (etcd's `benchmark lease-keepalive`). `idle-put`
+(#102): one client, one warm-up put, then `--probes` puts each after
+`--idle-ms 2000` of quiet (0: back to back); prints their latency. A failed RPC
 does not stop the bench (#104): transient errors (`Unavailable` during a
 leader change, a broken connection) are retried with a growing backoff,
 up to 8 tries, and the summary adds `errors: N attempts failed (by

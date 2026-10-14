@@ -121,6 +121,13 @@ election and `slow raft WAL fdatasync` log lines, so a stall can be
 put down to the disk, an election or fastetcd (#83). `DATA_ROOT=/dev/shm`
 puts the data dirs on tmpfs, where no fsync stalls.
 
+A lone write after idle (#102): `sc-build 'tests/idle_write.sh v1.12.0'`
+runs `fastetcd-bench --mode idle-put` (one client: `PROBES` puts each after
+`IDLE_MS` of quiet, then back to back) on one member on the disk and on
+tmpfs, and the WAL's fsync count and mean fsync over each run, so a slow
+lone write splits into the device's fsync and the rest
+(`docs/benchmarks/idle-write.md`).
+
 Health probes under write load (#145): `sc-build 'tests/readyz_latency.sh
 v1.32.0 2'` runs one member of each build in turn (rounds interleaved)
 under `fastetcd-bench --mode put` (`CONNS`, 1000 clients over 1000 keys)
