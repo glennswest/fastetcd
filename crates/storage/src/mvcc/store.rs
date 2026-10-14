@@ -29,13 +29,13 @@
 //! drives this `MvccStore` via the same `apply_*` entrypoints.
 
 use std::ops::Bound;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::kvstore::{KvStore, Snapshot, StorageError, WriteBatch, WriteOptions};
 
@@ -389,8 +389,15 @@ struct Inner {
     /// Write-side state: current revision and compact revision.
     /// Protected by a mutex because `apply_*` is single-threaded by
     /// contract but exposing a clonable handle still requires interior
-    /// mutability. Read methods do not contend on this lock.
+    /// mutability. Reads do not take it (fastetcd#145): they use `view`.
     write_state: Mutex<WriteState>,
+    /// What reads see: the revisions published with the resident index
+    /// (fastetcd#145; see [`ReadView`]).
+    view: ReadView,
+    /// Taken for write while the MVCC tables are replaced wholesale (a
+    /// snapshot install, a reload, a bulk load), and for read while a
+    /// reader puts its view together, so none mixes old and new tables.
+    replace: RwLock<()>,
     /// Broadcast channel for events emitted by successful commits.
     /// Watch subscribers receive every committed batch in order. Slow
     /// subscribers may receive `Lagged`; they should treat that as a
@@ -429,12 +436,77 @@ pub type GetObserver = Arc<dyn Fn(bool, Duration) + Send + Sync>;
 /// Index entries read per engine call while loading the resident index.
 const INDEX_LOAD_CHUNK: usize = 10_000;
 
+/// The revisions reads are served at, published by each commit
+/// together with the resident index it changed, so a read takes no lock
+/// that the write path holds through its work (fastetcd#145).
+///
+/// A commit bumps `engine_commits` once its engine commit has returned,
+/// then, under the index's write guard, changes the index, stores the
+/// revisions and bumps `published`. A reader reads `engine_commits`,
+/// takes an engine snapshot, then the index's read guard: if `published`
+/// is not above what it read first, every commit the index and the
+/// revisions describe is in its snapshot. Its snapshot may also hold a
+/// commit not yet published; commits only add records, except
+/// compaction, which publishes `compact` before it deletes any.
+#[derive(Default)]
+struct ReadView {
+    current: AtomicI64,
+    compact: AtomicI64,
+    engine_commits: AtomicU64,
+    published: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Revs {
+    current: i64,
+    compact: i64,
+}
+
+impl ReadView {
+    fn revs(&self) -> Revs {
+        Revs {
+            current: self.current.load(Ordering::Acquire),
+            compact: self.compact.load(Ordering::Acquire),
+        }
+    }
+
+    /// Store `revs` as what reads see, with no commit to publish.
+    /// Callers hold the index's write guard, or exclude readers through
+    /// `replace`.
+    fn store(&self, revs: Revs) {
+        self.current.store(revs.current, Ordering::Release);
+        self.compact.store(revs.compact, Ordering::Release);
+    }
+
+    /// Publish a commit whose engine commit was counted in
+    /// `engine_commits`, under the index's write guard, with the index
+    /// changes it made.
+    fn publish(&self, revs: Revs) {
+        self.store(revs);
+        self.published.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Tries at a consistent view without the write-state lock before a
+/// reader takes it (a commit published between its engine count and its
+/// index guard each time).
+const READ_VIEW_TRIES: usize = 8;
+
 #[derive(Debug, Clone, Copy)]
 struct WriteState {
     current_rev: i64,
     compact_rev: i64,
     /// High-water mark for auto-allocated lease IDs.
     next_lease_id: i64,
+}
+
+impl WriteState {
+    fn revs(&self) -> Revs {
+        Revs {
+            current: self.current_rev,
+            compact: self.compact_rev,
+        }
+    }
 }
 
 impl MvccStore {
@@ -474,6 +546,12 @@ impl MvccStore {
                     compact_rev: compact,
                     next_lease_id: next_lease,
                 }),
+                view: ReadView {
+                    current: AtomicI64::new(current),
+                    compact: AtomicI64::new(compact),
+                    ..ReadView::default()
+                },
+                replace: RwLock::new(()),
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
                 batched: AtomicBool::new(batched),
@@ -757,8 +835,9 @@ impl MvccStore {
         &self.inner.engine
     }
 
+    /// The latest revision reads see (published with its commit).
     pub async fn current_revision(&self) -> i64 {
-        self.inner.write_state.lock().await.current_rev
+        self.inner.view.current.load(Ordering::Acquire)
     }
 
     /// Reload the cached write-side counters from `mvcc_meta`.
@@ -775,6 +854,7 @@ impl MvccStore {
     /// The resident key index is rebuilt and the value cache emptied
     /// with them (fastetcd#82).
     pub async fn reload_write_state(&self) -> MvccResult<()> {
+        let _replace = self.inner.replace.write().await;
         let mut state = self.inner.write_state.lock().await;
         self.reload_locked(&mut state).await
     }
@@ -784,6 +864,7 @@ impl MvccStore {
     /// keeps of them, all under the write-state lock: no read sees the
     /// new tables with the old revision or index, or the reverse.
     pub async fn install_tables(&self, batch: WriteBatch) -> MvccResult<()> {
+        let _replace = self.inner.replace.write().await;
         let mut state = self.inner.write_state.lock().await;
         self.inner
             .engine
@@ -805,6 +886,7 @@ impl MvccStore {
         state.current_rev = current;
         state.compact_rev = compact;
         state.next_lease_id = next_lease;
+        self.inner.view.store(Revs { current, compact });
         Ok(())
     }
 
@@ -854,7 +936,7 @@ impl MvccStore {
     }
 
     pub async fn compact_revision(&self) -> i64 {
-        self.inner.write_state.lock().await.compact_rev
+        self.inner.view.compact.load(Ordering::Acquire)
     }
 
     /// Bulk-load records into a freshly-opened store, preserving the
@@ -877,6 +959,7 @@ impl MvccStore {
         per_key: Vec<BulkKey>,
         next_rev: i64,
     ) -> MvccResult<()> {
+        let _replace = self.inner.replace.write().await;
         let mut state = self.inner.write_state.lock().await;
         if state.current_rev != 0 {
             return Err(MvccError::Internal(format!(
@@ -949,6 +1032,10 @@ impl MvccStore {
             .await?;
         self.load_index().await?;
         state.current_rev = next_rev;
+        self.inner.view.store(Revs {
+            current: next_rev,
+            compact: state.compact_rev,
+        });
         Ok(())
     }
 
@@ -980,10 +1067,9 @@ impl MvccStore {
         start_rev: i64,
         end_rev: i64,
     ) -> MvccResult<Vec<MvccEvent>> {
-        let state = self.inner.write_state.lock().await;
-        let current = state.current_rev.min(end_rev);
-        let compact = state.compact_rev;
-        drop(state);
+        let revs = self.inner.view.revs();
+        let current = revs.current.min(end_rev);
+        let compact = revs.compact;
 
         if start_rev < compact && compact > 0 {
             return Err(MvccError::Compacted {
@@ -1187,16 +1273,14 @@ impl MvccStore {
     /// Evaluate a Txn's compares against the current state, without
     /// applying anything: which branch the txn would take now.
     pub async fn txn_would_succeed(&self, compares: &[Compare]) -> MvccResult<bool> {
-        // The write-state lock is held only while the engine snapshot and
-        // the compared keys' indexes are taken, so the two agree; the
-        // records are read after it is released. It is not held for the
-        // reads: every Txn the leader proposes passes through here, and
-        // the apply loop waits on the same lock.
-        let state = self.inner.write_state.lock().await;
-        let snap = self.inner.engine.snapshot().await?;
+        // The engine snapshot and the compared keys' revisions come from
+        // one read view, so they agree; every Txn the leader proposes
+        // passes through here, so it takes no lock the apply loop holds
+        // (fastetcd#145).
         let ctx = ApplyContext::default();
-        let targets = self.compare_targets(&ctx, compares);
-        drop(state);
+        let (snap, _, targets) = self
+            .read_view(|index, _| Ok(compare_targets_in(index, &ctx, compares)))
+            .await?;
         self.evaluate_compares_with(&*snap, &ctx, compares, &targets).await
     }
 
@@ -1400,10 +1484,25 @@ impl MvccStore {
         write_i64(&mut batch, META_KEY_COMPACT_REV, rev);
         self.fold_raft_meta(&mut batch).await;
 
-        self.inner
+        // Reads below `rev` are refused before any record goes: a read
+        // view whose snapshot is taken after the deletes may still pair
+        // it with the index from before them (fastetcd#145).
+        let before = state.revs();
+        {
+            let _index = self.inner.cache.index.write();
+            self.inner.view.store(Revs { compact: rev, ..before });
+        }
+        if let Err(e) = self
+            .inner
             .engine
             .commit(batch, self.apply_write_options())
-            .await?;
+            .await
+        {
+            let _index = self.inner.cache.index.write();
+            self.inner.view.store(before);
+            return Err(e.into());
+        }
+        self.inner.view.engine_commits.fetch_add(1, Ordering::AcqRel);
         {
             // A key's latest live record survives compaction, so the
             // value cache is unaffected; deleted keys are not in it.
@@ -1411,6 +1510,7 @@ impl MvccStore {
             for idx in compacted {
                 index.set(&idx.key, idx.generations);
             }
+            self.inner.view.publish(Revs { compact: rev, ..before });
         }
         state.compact_rev = rev;
 
@@ -1547,21 +1647,17 @@ impl MvccStore {
     ) -> MvccResult<(RangeResult, i64)> {
         let started = Instant::now();
         self.inner.ops.range.fetch_add(1, Ordering::Relaxed);
-        let state = self.inner.write_state.lock().await;
-        let state_copy = *state;
-        let read_rev = check_read_rev(state_copy, target_rev)?;
-        let snap = self.inner.engine.snapshot().await?;
         let ctx = ApplyContext::default();
-        // The index guard is taken before the write-state lock is let
-        // go, so the index agrees with `snap` and `state_copy`: a commit
-        // changes the index only while it holds that lock (fastetcd#82).
-        let plan = {
-            let index = self.inner.cache.index.read();
-            drop(state);
-            plan_range(&index, &ctx, key, range_end, read_rev, limit, count_only)
-        };
+        // The index, the revisions and `snap` agree (fastetcd#82), from
+        // a read view that waits for no commit (fastetcd#145).
+        let (snap, state_copy, plan) = self
+            .read_view(|index, revs| {
+                let read_rev = check_read_rev(revs, target_rev)?;
+                Ok(plan_range(index, &ctx, key, range_end, read_rev, limit, count_only))
+            })
+            .await?;
         // Only a read of the latest revision fills the value cache.
-        let fill = target_rev == 0 || target_rev == state_copy.current_rev;
+        let fill = target_rev == 0 || target_rev == state_copy.current;
         let (kvs, disk_reads) = self
             .fetch_records(&*snap, &ctx, &plan.hits, keys_only, fill)
             .await?;
@@ -1570,7 +1666,38 @@ impl MvccStore {
                 observe(disk_reads == 0, started.elapsed());
             }
         }
-        Ok((plan.into_result(kvs, count_only), state_copy.current_rev))
+        Ok((plan.into_result(kvs, count_only), state_copy.current))
+    }
+
+    /// An engine snapshot, the revisions reads see and `f` run over the
+    /// resident index, all describing the same commits (see
+    /// [`ReadView`]), without waiting for a commit in progress. Falls
+    /// back to the write-state lock if commits keep landing in between.
+    async fn read_view<R>(
+        &self,
+        f: impl FnOnce(&IndexRead<'_>, Revs) -> MvccResult<R>,
+    ) -> MvccResult<(Arc<dyn Snapshot>, Revs, R)> {
+        let view = &self.inner.view;
+        let _replace = self.inner.replace.read().await;
+        for _ in 0..READ_VIEW_TRIES {
+            let engine_commits = view.engine_commits.load(Ordering::Acquire);
+            let snap = self.inner.engine.snapshot().await?;
+            let index = self.inner.cache.index.read();
+            if view.published.load(Ordering::Acquire) <= engine_commits {
+                let revs = view.revs();
+                let r = f(&index, revs)?;
+                drop(index);
+                return Ok((snap, revs, r));
+            }
+        }
+        let state = self.inner.write_state.lock().await;
+        let snap = self.inner.engine.snapshot().await?;
+        let revs = state.revs();
+        let index = self.inner.cache.index.read();
+        drop(state);
+        let r = f(&index, revs)?;
+        drop(index);
+        Ok((snap, revs, r))
     }
 
     /// Transactional execute: evaluate `compares` against the current
@@ -1924,6 +2051,7 @@ impl MvccStore {
             .engine
             .commit(ctx.batch, self.apply_write_options())
             .await?;
+        self.inner.view.engine_commits.fetch_add(1, Ordering::AcqRel);
         // Only now, with the commit in the engine and the write-state
         // lock still held, does RAM learn of it (fastetcd#82).
         let values = &self.inner.cache.values;
@@ -1940,6 +2068,10 @@ impl MvccStore {
             for (key, idx) in ctx.idx_cache.drain() {
                 index.set(&key, idx.generations);
             }
+            self.inner.view.publish(Revs {
+                current: new_rev,
+                compact: state.compact_rev,
+            });
         }
         state.current_rev = new_rev;
         // Broadcast the event batch. Send error here means no
@@ -1984,7 +2116,7 @@ impl MvccStore {
         count_only: bool,
     ) -> MvccResult<RangeResult> {
         self.inner.ops.range.fetch_add(1, Ordering::Relaxed);
-        let read_rev = check_read_rev(state, target_rev)?;
+        let read_rev = check_read_rev(state.revs(), target_rev)?;
         let plan = {
             let index = self.inner.cache.index.read();
             plan_range(&index, ctx, key, range_end, read_rev, limit, count_only)
@@ -2147,37 +2279,7 @@ impl MvccStore {
     /// one guard. Only the revision is taken, not the key's history: a
     /// compare on a hot key used to copy all of it (fastetcd#142).
     fn compare_targets(&self, ctx: &ApplyContext, compares: &[Compare]) -> Vec<CompareTargets> {
-        let index = self.inner.cache.index.read();
-        let current = |k: &[u8], resident: Option<&[Generation]>| match ctx.idx_cache.get(k) {
-            Some(idx) => idx.current().map(|(rev, _)| rev),
-            None => resident.and_then(current_of),
-        };
-        compares
-            .iter()
-            .map(|cmp| {
-                if cmp.range_end.is_empty() {
-                    let resident = index.get_generations(&cmp.key);
-                    if resident.is_none() && !ctx.idx_cache.contains_key(&cmp.key) {
-                        return Vec::new();
-                    }
-                    return vec![(cmp.key.clone(), current(&cmp.key, resident))];
-                }
-                let mut out: CompareTargets = match index_bounds(&cmp.key, &cmp.range_end) {
-                    Some((start, end)) => index
-                        .range(start, end)
-                        .map(|(k, g)| (k.clone(), current(k, Some(g))))
-                        .collect(),
-                    None => Vec::new(),
-                };
-                // Keys this context created.
-                for (k, idx) in &ctx.idx_cache {
-                    if in_range(k, &cmp.key, &cmp.range_end) && !index.contains(k) {
-                        out.push((k.clone(), idx.current().map(|(rev, _)| rev)));
-                    }
-                }
-                out
-            })
-            .collect()
+        compare_targets_in(&self.inner.cache.index.read(), ctx, compares)
     }
 
     async fn evaluate_compares_with(
@@ -2406,23 +2508,61 @@ fn write_i64(batch: &mut WriteBatch, key: &[u8], value: i64) {
 /// The revision a Range reads at, after etcd's checks: the current
 /// revision for `target_rev == 0`, else `target_rev` if it is neither in
 /// the future nor compacted.
-fn check_read_rev(state: WriteState, target_rev: i64) -> MvccResult<Revision> {
+/// [`MvccStore::compare_targets`] over an index guard the caller holds.
+fn compare_targets_in(
+    index: &IndexRead<'_>,
+    ctx: &ApplyContext,
+    compares: &[Compare],
+) -> Vec<CompareTargets> {
+    let current = |k: &[u8], resident: Option<&[Generation]>| match ctx.idx_cache.get(k) {
+        Some(idx) => idx.current().map(|(rev, _)| rev),
+        None => resident.and_then(current_of),
+    };
+    compares
+        .iter()
+        .map(|cmp| {
+            if cmp.range_end.is_empty() {
+                let resident = index.get_generations(&cmp.key);
+                if resident.is_none() && !ctx.idx_cache.contains_key(&cmp.key) {
+                    return Vec::new();
+                }
+                return vec![(cmp.key.clone(), current(&cmp.key, resident))];
+            }
+            let mut out: CompareTargets = match index_bounds(&cmp.key, &cmp.range_end) {
+                Some((start, end)) => index
+                    .range(start, end)
+                    .map(|(k, g)| (k.clone(), current(k, Some(g))))
+                    .collect(),
+                None => Vec::new(),
+            };
+            // Keys this context created.
+            for (k, idx) in &ctx.idx_cache {
+                if in_range(k, &cmp.key, &cmp.range_end) && !index.contains(k) {
+                    out.push((k.clone(), idx.current().map(|(rev, _)| rev)));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+fn check_read_rev(state: Revs, target_rev: i64) -> MvccResult<Revision> {
     if target_rev > 0 {
-        if target_rev > state.current_rev {
+        if target_rev > state.current {
             return Err(MvccError::FutureRevision {
                 requested: target_rev,
-                current_rev: state.current_rev,
+                current_rev: state.current,
             });
         }
-        if target_rev < state.compact_rev {
+        if target_rev < state.compact {
             return Err(MvccError::Compacted {
                 requested: target_rev,
-                compact_rev: state.compact_rev,
+                compact_rev: state.compact,
             });
         }
     }
     let main = if target_rev == 0 {
-        state.current_rev
+        state.current
     } else {
         target_rev
     };
@@ -3063,6 +3203,201 @@ mod tests {
             let want: std::collections::BTreeSet<Vec<u8>> =
                 acked.iter().filter(|(_, r)| *r <= rev).map(|(k, _)| k.clone()).collect();
             assert_eq!(got, want, "range at revision {rev}");
+        }
+    }
+
+    /// An engine whose commits can be held, before or after the inner
+    /// commit (redb busy; a write-behind layer visible while its
+    /// back-pressure flush runs), to show what a read waits for.
+    struct HeldCommits {
+        inner: RedbEngine,
+        hold: std::sync::Mutex<Option<bool>>,
+        held: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
+    impl HeldCommits {
+        /// Hold the next commits until [`release`]; `after`: once the
+        /// inner commit is done.
+        fn hold(&self, after: bool) {
+            *self.hold.lock().unwrap() = Some(after);
+        }
+        fn release(&self) {
+            *self.hold.lock().unwrap() = None;
+            self.release.add_permits(1_000);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for HeldCommits {
+        async fn snapshot(&self) -> crate::kvstore::StorageResult<Arc<dyn Snapshot>> {
+            self.inner.snapshot().await
+        }
+        async fn commit(
+            &self,
+            batch: WriteBatch,
+            opts: WriteOptions,
+        ) -> crate::kvstore::StorageResult<()> {
+            let hold = *self.hold.lock().unwrap();
+            if hold == Some(false) {
+                self.held.notify_one();
+                self.release.acquire().await.unwrap().forget();
+            }
+            self.inner.commit(batch, opts).await?;
+            if hold == Some(true) {
+                self.held.notify_one();
+                self.release.acquire().await.unwrap().forget();
+            }
+            Ok(())
+        }
+        async fn sync(&self) -> crate::kvstore::StorageResult<()> {
+            self.inner.sync().await
+        }
+        async fn size_on_disk(&self) -> crate::kvstore::StorageResult<u64> {
+            self.inner.size_on_disk().await
+        }
+        fn engine_name(&self) -> &'static str {
+            "held-commits"
+        }
+    }
+
+    async fn open_held() -> (tempfile::TempDir, Arc<HeldCommits>, MvccStore) {
+        let dir = tempdir().unwrap();
+        let eng = Arc::new(HeldCommits {
+            inner: RedbEngine::open(dir.path().join("mvcc.redb")).unwrap(),
+            hold: std::sync::Mutex::new(None),
+            held: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let store = MvccStore::open(eng.clone()).await.unwrap();
+        (dir, eng, store)
+    }
+
+    const PROMPT: Duration = Duration::from_millis(500);
+
+    /// fastetcd#145: a read (readyz's, a GET, the leader's Txn precheck)
+    /// took the write-state lock, which a commit holds through its engine
+    /// commit, so it waited for the write path. It answers at once now,
+    /// at the last published revision, before and after the inner commit.
+    #[tokio::test]
+    async fn a_read_does_not_wait_for_a_commit_in_progress() {
+        for after in [false, true] {
+            let (_d, eng, s) = open_held().await;
+            s.apply(&[put(b"k", b"v1")]).await.unwrap();
+            eng.hold(after);
+            let held = eng.held.notified();
+            let writer = {
+                let s = s.clone();
+                tokio::spawn(async move { s.apply(&[put(b"k", b"v2")]).await.unwrap() })
+            };
+            held.await;
+            let (out, rev) = tokio::time::timeout(PROMPT, s.range_with_revision(b"k", b"", 0, 0, false, false))
+                .await
+                .unwrap_or_else(|_| panic!("a Range waited for the commit (after = {after})"))
+                .unwrap();
+            assert_eq!((out.kvs[0].value.as_slice(), rev), (&b"v1"[..], 1), "after = {after}");
+            let ok = tokio::time::timeout(PROMPT, s.txn_would_succeed(&[cmp_value_eq(b"k", b"v1")]))
+                .await
+                .expect("the Txn precheck waited for the commit")
+                .unwrap();
+            assert!(ok);
+            assert_eq!(tokio::time::timeout(PROMPT, s.current_revision()).await.unwrap(), 1);
+            eng.release();
+            assert_eq!(writer.await.unwrap().0, 2);
+            let (out, rev) = s.range_with_revision(b"k", b"", 0, 0, false, false).await.unwrap();
+            assert_eq!((out.kvs[0].value.as_slice(), rev), (&b"v2"[..], 2));
+        }
+    }
+
+    /// Compaction refuses reads below its revision before it deletes
+    /// anything, so a read during it never looks for a deleted record.
+    #[tokio::test]
+    async fn a_read_during_compaction_does_not_wait_and_sees_no_hole() {
+        for after in [false, true] {
+            let (_d, eng, s) = open_held().await;
+            for v in [b"v1", b"v2", b"v3"] {
+                s.apply(&[put(b"k", v)]).await.unwrap();
+            }
+            eng.hold(after);
+            let held = eng.held.notified();
+            let compactor = {
+                let s = s.clone();
+                tokio::spawn(async move { s.compact(3).await.unwrap() })
+            };
+            held.await;
+            let old = tokio::time::timeout(PROMPT, s.range(b"k", b"", 0, 1, false, false))
+                .await
+                .expect("a Range waited for the compaction");
+            assert!(matches!(old, Err(MvccError::Compacted { .. })), "after = {after}: {:?}", old.as_ref().err());
+            let now = tokio::time::timeout(PROMPT, s.range(b"k", b"", 0, 3, false, false))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(now.kvs[0].value, b"v3");
+            eng.release();
+            compactor.await.unwrap();
+            assert_eq!(s.compact_revision().await, 3);
+        }
+    }
+
+    /// Reads, writes and compactions at once: every read answers, at a
+    /// revision no older than its last, with records no newer than it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reads_stay_consistent_under_writes_and_compaction() {
+        let (_d, s) = open_mvcc().await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..3)
+            .map(|w| {
+                let s = s.clone();
+                tokio::spawn(async move {
+                    for i in 0..300 {
+                        let key = format!("k/{}", (w * 7 + i) % 10);
+                        s.apply(&[put(key.as_bytes(), format!("{w}-{i}").as_bytes())]).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        let compactor = {
+            let (s, stop) = (s.clone(), stop.clone());
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let rev = s.current_revision().await - 5;
+                    if rev > s.compact_revision().await {
+                        s.compact(rev).await.unwrap();
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let (s, stop) = (s.clone(), stop.clone());
+                tokio::spawn(async move {
+                    let (mut last, mut n) = (0, 0);
+                    while !stop.load(Ordering::Relaxed) {
+                        let (out, rev) = s.range_with_revision(b"k/", b"k0", 0, 0, false, false).await.unwrap();
+                        assert!(rev >= last, "revision went back: {rev} after {last}");
+                        assert!(out.kvs.iter().all(|kv| kv.mod_revision <= rev));
+                        last = rev;
+                        let at = rev - 2;
+                        match s.range(b"k/", b"k0", 0, at, false, false).await {
+                            Ok(old) => assert!(old.kvs.iter().all(|kv| kv.mod_revision <= at)),
+                            Err(MvccError::Compacted { .. }) => {}
+                            Err(e) => panic!("read at {at}: {e}"),
+                        }
+                        n += 1;
+                    }
+                    n
+                })
+            })
+            .collect();
+        for w in writers {
+            w.await.unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        compactor.await.unwrap();
+        for r in readers {
+            assert!(r.await.unwrap() > 0);
         }
     }
 
