@@ -321,7 +321,9 @@ async fn serve_range(
         let read = fastetcd_raft::ForwardedRead {
             key: req.key.clone(),
             range_end: req.range_end.clone(),
-            limit: req.limit.max(0) as u64,
+            // With a sort or a filter, the whole range: they apply here,
+            // to the leader's result, as to a local one (#154).
+            limit: crate::range_options::store_limit(req) as u64,
             revision: req.revision,
             keys_only: req.keys_only,
             count_only: req.count_only,
@@ -345,7 +347,7 @@ async fn serve_range(
                     state.sm.mvcc().current_revision().await
                 }
             };
-            return Ok((result, revision));
+            return Ok((crate::range_options::apply(req, result), revision));
         }
     }
     state
@@ -354,12 +356,13 @@ async fn serve_range(
         .range_with_revision(
             &req.key,
             &req.range_end,
-            req.limit.max(0) as usize,
+            crate::range_options::store_limit(req),
             req.revision,
             req.keys_only,
             req.count_only,
         )
         .await
+        .map(|(result, revision)| (crate::range_options::apply(req, result), revision))
         .map_err(mvcc_error_to_status)
 }
 
@@ -424,7 +427,11 @@ fn txn_responses(
     for (op, result) in ops.iter().zip(results) {
         let response = match (&op.request, result) {
             (Some(Request::RequestRange(r)), TxnOpResult::Range(res)) => {
-                Resp::ResponseRange(range_result_to_response(header, res, r.count_only))
+                Resp::ResponseRange(range_result_to_response(
+                    header,
+                    crate::range_options::apply(r, res),
+                    r.count_only,
+                ))
             }
             (Some(Request::RequestPut(_)), TxnOpResult::Mutation(m)) => {
                 Resp::ResponsePut(pb::PutResponse {

@@ -50,7 +50,8 @@ pub fn range_request_to_op(req: &pb::RangeRequest) -> RangeOp {
     RangeOp {
         key: req.key.clone(),
         range_end: req.range_end.clone(),
-        limit: req.limit.max(0) as usize,
+        // Read whole when the response sorts or filters (#154).
+        limit: crate::range_options::store_limit(req),
         revision: req.revision,
         keys_only: req.keys_only,
         count_only: req.count_only,

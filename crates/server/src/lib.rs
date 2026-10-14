@@ -34,6 +34,7 @@ pub mod maintenance;
 pub mod metrics;
 pub mod process_metrics;
 pub mod ram_cache;
+pub mod range_options;
 pub mod recovery;
 pub mod sizing;
 pub mod space;
