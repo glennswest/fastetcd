@@ -89,6 +89,12 @@ async fn lock_with_no_lease_gets_a_session_lease() {
     assert_eq!(ttl.keys, vec![r.key]);
 }
 
+/// The next leader value an Observe stream reports.
+async fn next(o: &mut tonic::Streaming<epb::LeaderResponse>) -> String {
+    let m = tokio::time::timeout(Duration::from_secs(10), o.message()).await.expect("observe").unwrap().unwrap();
+    String::from_utf8(m.kv.unwrap().value).unwrap()
+}
+
 fn campaign(name: &str, lease: i64, value: &str) -> epb::CampaignRequest {
     epb::CampaignRequest { name: name.as_bytes().to_vec(), lease, value: value.as_bytes().to_vec() }
 }
@@ -102,13 +108,6 @@ async fn an_election_moves_to_the_next_candidate_on_resign() {
     let mut c = ElectionClient::connect(h.endpoint.clone()).await.unwrap();
     let leader_b = c.campaign(campaign("el", lb, "b")).await.unwrap().into_inner().leader.unwrap();
     let mut observe = c.observe(epb::LeaderRequest { name: b"el".to_vec() }).await.unwrap().into_inner();
-    let next = |o: &mut tonic::Streaming<epb::LeaderResponse>| {
-        let fut = o.message();
-        async move {
-            let m = tokio::time::timeout(Duration::from_secs(10), fut).await.expect("observe").unwrap().unwrap();
-            String::from_utf8(m.kv.unwrap().value).unwrap()
-        }
-    };
     assert_eq!(next(&mut observe).await, "b");
     let a_campaign = {
         let mut c = c.clone();
