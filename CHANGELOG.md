@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-13
+- **docs:** `docs/benchmarks/blade-server3.md` § RSS and lease renewals over four hours: pvetest2 (fastetcd 1.31), 4 h with a write round every 30 min. RSS 70–382 MiB, inside the 389 MiB budget, one process throughout; its hourly floor rose 70 → 102 MiB (likely redb's page cache filling, not yet told from a leak); every kube-system lease renewed in time, longest gap 9 s of 15, no holder change. The blade run is still to do (#84).
+- **test:** `blade_rss.py` writes its CSVs line by line and prints the process start time (#84).
+
 ### 2026-10-09
 - **test:** `tests/bench/blade_rss.py`: RSS and the RAM budgets every minute, and every kube-system Lease's renewal gaps and holder changes, over a long run on a blade (#84).
 - **docs:** `docs/benchmarks/acceptance-85.md`: #85 measured as #89 asks.

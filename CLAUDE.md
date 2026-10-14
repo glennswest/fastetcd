@@ -2245,6 +2245,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     `blade_rss.py` 4 h + a `blade_getlatency.py` round (writes on) every
     30 min, `tmp/rss84-pvetest2/`. Then the same on an X9 blade with 12.21
     after the blades' power-on (11:00Z) — the issue's acceptance.
+    Done on pvetest2 (`docs/benchmarks/blade-server3.md` § RSS …): RSS
+    70–382 MiB, inside budget, no restart; hourly floor 70/78/88/102 MiB
+    (redb page cache filling? redb reports no cache size); leases renewed
+    in time (longest 9 s of 15), no holder change. Left: a longer run on
+    an X9 blade with fastetcd >= 1.24, to see the floor level off.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
