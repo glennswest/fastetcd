@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-14
+- **fix:** A Range waits for no write in progress (#145). Every read (`/readyz`'s and `/livez`'s, GETs, LISTs, the leader's Txn compare precheck, `current_revision`) took the MVCC write-state mutex, which an apply holds through a run of up to 256 writes and its engine commit (a write-behind back-pressure flush into redb included), and compaction through its walk of every key: one `/readyz` took 57 ms on pvetest1 during an install. A commit now publishes its revision with its index changes under the index's write guard, and a reader pairs an engine snapshot with that index when no commit was published since it counted the engine's commits; compaction refuses reads below its revision before deleting anything; snapshot installs exclude readers. Tests: a read during a held commit (before and after the engine commit) and during a held compaction answers at once; reads stay consistent under writes and compaction.
+- **fix:** Two clippy lints in the storage crate (#149).
+
 ### 2026-10-13
 - **docs:** `docs/benchmarks/blade-server3.md` § RSS and lease renewals over four hours: pvetest2 (fastetcd 1.31), 4 h with a write round every 30 min. RSS 70–382 MiB, inside the 389 MiB budget, one process throughout; its hourly floor rose 70 → 102 MiB (likely redb's page cache filling, not yet told from a leak); every kube-system lease renewed in time, longest gap 9 s of 15, no holder change. The blade run is still to do (#84).
 - **test:** `blade_rss.py` writes its CSVs line by line and prints the process start time (#84).

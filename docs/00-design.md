@@ -200,8 +200,15 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 4. State machine snapshot read at the established revision.
 5. The response header's `revision` is the revision that snapshot was
    read at (etcd: the read txn's revision), taken together with the
-   engine snapshot under the write-state lock, never read again
-   afterwards. A forwarded read carries the leader's read revision back
+   engine snapshot and the resident index, never read again afterwards.
+   The read takes no lock the write path holds through its work (#145):
+   each commit publishes its revision with its index changes under the
+   index's write guard, and a reader uses its engine snapshot with that
+   index only if no commit was published since it counted the engine's
+   commits (else it retries, and after 8 tries takes the write lock).
+   Compaction refuses reads below its revision before deleting a record.
+   So a GET, a LIST, a `/readyz` read and the leader's Txn precheck do
+   not wait for an apply run, its commit or a compaction. A forwarded read carries the leader's read revision back
    to the follower. This is the LIST → WATCH contract: a client that
    lists at header revision R and watches from R + 1 sees every write
    exactly once (#50). For a historical `revision`, the contents are at

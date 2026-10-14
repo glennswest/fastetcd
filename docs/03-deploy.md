@@ -884,6 +884,13 @@ always shows. Each check also has its own route (`/readyz/linearizable_read`).
 while it passes (checked every second). Counters
 `etcd_server_health_success_total` / `etcd_server_health_failures_total`.
 
+The reads behind them wait for no write in progress (#145): a
+serializable read is a lookup in the resident index (and the value
+cache or one engine read); a linearizable one on a sole voter waits only
+for the state machine to reach its term's first entry, and on a
+multi-member leader for one `ConfirmLeader` round. A slow answer under
+load is then the CPU (or, on a cache miss, the disk), not a commit.
+
 Point a **liveness** probe at `/livez` (it never fails on quorum loss,
 so a partition does not get members restarted) and **readiness** at
 `/readyz`; the Helm chart does. Alarms are this member's: fastetcd raises
