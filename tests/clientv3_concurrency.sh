@@ -26,9 +26,9 @@ cargo build -q --release --locked -p fastetcd-server
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
-# run <name> <fastetcd binary>: the client's exit status.
+# run <name> <fastetcd binary> [locks]: the client's exit status.
 run() {
-    local name=$1 bin=$2 dir=$WORK/$1
+    local name=$1 bin=$2 mode=${3:-} dir=$WORK/$1$3
     mkdir -p "$dir"
     local cp pp ep
     cp=$(port) pp=$(port)
@@ -37,9 +37,9 @@ run() {
         --listen-peer-urls "http://127.0.0.1:$pp" --listen-metrics-url "" >>"$dir/log" 2>&1 &
     local pid=$!
     for _ in $(seq 100); do curl -sf "$ep/health" >/dev/null && break; sleep 0.2; done
-    echo "== $name ($("$bin" --version))"
+    echo "== $name ($("$bin" --version))${mode:+, $mode only}"
     local rc=0
-    timeout 120 "$WORK/client" "$ep" || rc=$?
+    timeout 120 "$WORK/client" "$ep" $mode || rc=$?
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return $rc
@@ -54,6 +54,7 @@ if [ $# -ge 1 ]; then
     git worktree add --detach "$WORK/base-src" "$base" >/dev/null
     (cd "$WORK/base-src" && CARGO_TARGET_DIR=$TARGET/baseline cargo build -q --release --locked -p fastetcd-server)
     run "baseline $1" "$TARGET/baseline/release/fastetcd" || echo "   (baseline failed, as expected before #154)"
+    run "baseline $1" "$TARGET/baseline/release/fastetcd" locks || echo "   (baseline failed, as expected before #154)"
     git worktree remove --force "$WORK/base-src"
 fi
 run "this tree" "$TARGET/release/fastetcd"

@@ -161,8 +161,10 @@ mod tests {
             r.max_create_revision = 29;
         });
         let out = apply(&r, store());
+        // l/3 (20) and l/2 (10) are below 29: the newest of them, and
+        // `more` for the one cut off, as etcd's limit sets it.
         assert_eq!(keys(&out), vec!["l/3".to_string()]);
-        assert!(!out.more);
+        assert!(out.more);
     }
 
     #[test]

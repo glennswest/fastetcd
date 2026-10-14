@@ -1,9 +1,10 @@
 // etcd's Go client, sort and revision filters on Range, and its
 // concurrency package's Mutex and Election on fastetcd (fastetcd#154).
 //
-//	clientv3_concurrency <endpoint>
+//	clientv3_concurrency <endpoint> [locks]
 //
-// Prints "ok <what>" per check and exits 1 at the first failure.
+// Prints "ok <what>" per check and exits 1 at the first failure. With
+// "locks", only the Mutex and Election checks.
 package main
 
 import (
@@ -38,7 +39,13 @@ func main() {
 		fail("connect: %v", err)
 	}
 	ctx := context.Background()
+	if len(os.Args) < 3 || os.Args[2] != "locks" {
+		ranges(ctx, c)
+	}
+	locks(ctx, c)
+}
 
+func ranges(ctx context.Context, c *clientv3.Client) {
 	// Created in the order c, a, b: key order is not creation order.
 	for _, k := range []string{"s/c", "s/a", "s/b"} {
 		if _, err := c.Put(ctx, k, k); err != nil {
@@ -67,6 +74,9 @@ func main() {
 	get("max create revision", "s/a,s/c", clientv3.WithMaxCreateRev(createdA))
 	get("min mod revision", "s/a,s/b", clientv3.WithMinModRev(createdA))
 	get("sort by value descending", "s/c,s/b,s/a", clientv3.WithSort(clientv3.SortByValue, clientv3.SortDescend))
+}
+
+func locks(ctx context.Context, c *clientv3.Client) {
 
 	// Two sessions; b's lease is granted second, so its key sorts after
 	// a's: "pfx/<lease id hex>".
