@@ -171,6 +171,13 @@ impl Caller {
     /// clientv3 `waitDeletes`: until no key under `pfx` was created at or
     /// below `max_create_rev`, wait for the last of them to be deleted.
     async fn wait_deletes(&self, pfx: &[u8], max_create_rev: i64) -> Result<(), Status> {
+        // Nothing is created at or below revision 0, and a
+        // `max_create_revision` of 0 would mean no bound at all: the
+        // first write here is revision 1 (in etcd it is 2), so a key at
+        // revision 1 waited on itself.
+        if max_create_rev < 1 {
+            return Ok(());
+        }
         loop {
             // Subscribed first: a delete applied after the read below is
             // in this stream, one applied before it is not in the read.
