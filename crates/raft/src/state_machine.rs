@@ -9,15 +9,16 @@
 //! - `last_membership` — also required by openraft.
 //! - The current MVCC snapshot for serving `get_current_snapshot()`.
 //!
-//! Snapshot strategy: the entire MVCC state plus `last_applied_log_id`
-//! + `last_membership`, `bincode`-encoded into one file per snapshot.
-//! A snapshot moves between memory, disk and the network as a
-//! [`SnapshotFile`]: it is serialized straight into its file, sent by
+//! Snapshot strategy: the entire MVCC state, `last_applied_log_id` and
+//! `last_membership`, `bincode`-encoded into one file per snapshot. A
+//! snapshot moves between memory, disk and the network as a
+//! [`SnapshotFile`]: it is written straight into its file, sent by
 //! reading that file chunk by chunk, received into a temp file and
 //! decoded from it, so no step holds the encoded snapshot in RAM
-//! (fastetcd#30). Building still collects the three tables as `Vec`s,
-//! and install still decodes them whole — streaming those needs a new
-//! on-disk format.
+//! (fastetcd#30). Its tables are written from the engine a chunk of
+//! records at a time and installed a record at a time into one streamed
+//! engine commit, so no step holds them decoded either (fastetcd#62);
+//! the format is unchanged.
 
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
