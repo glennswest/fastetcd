@@ -6,11 +6,12 @@
 # Builds this tree (release) and, if given, a baseline ref. For each:
 #   1. one member, n1, loaded with KEYS keys of VAL_BYTES (30000 x 10 KB,
 #      ~300 MB), with a small --snapshot-count so its log is purged;
-#   2. n1 stopped, its retained snapshots removed, and started again: its
-#      peak RSS so far (VmHWM) is the base;
+#   2. n1 restarted (its snapshot kept, so nothing is built at start):
+#      its peak RSS so far (VmHWM) is the base, with the memory gauges
+#      that explain it; then its retained snapshot file is deleted;
 #   3. n2 added as a learner (the JSON gateway's member add) and started:
-#      n1 has no snapshot and its log is purged, so it builds one and n2
-#      installs it;
+#      n1's log is purged and its snapshot gone, so it builds one on
+#      demand ("the retained snapshot is gone") and n2 installs it;
 #   4. once n2 holds n1's revision: n1's VmHWM (what the build and send
 #      cost above the base) and n2's (its whole life: the install).
 # Run it through sc-build: `sc-build 'tests/snapshot_memory.sh v1.32.2'`.
@@ -57,7 +58,7 @@ revision() {
 start_n1() {
     "$1" --name n1 --data-dir "$2/n1" --listen-client-urls "$c1" \
         --listen-peer-urls "$p1" --initial-advertise-peer-urls "$p1" \
-        --initial-cluster "n1=$p1" --listen-metrics-url "" \
+        --initial-cluster "n1=$p1" --listen-metrics-url 127.0.0.1:23811 \
         --snapshot-count 1000 --max-in-snapshot-log-to-keep 100 \
         >>"$2/log1" 2>&1 &
     N1=$!
@@ -81,12 +82,13 @@ run() {
     echo "   n1 at revision $rev, data file $(du -m "$dir/n1/fastetcd.redb" | cut -f1) MiB, \
 retained snapshots: $(ls "$dir/n1/snapshots" | grep -c '\.snap$' || true)"
     kill "$N1"; wait "$N1" 2>/dev/null || true
-    rm -rf "$dir/n1/snapshots"
     start_n1 "$bin" "$dir"
-    sleep 2
+    sleep 3
     local base
     base=$(hwm "$N1")
-    echo "   n1 restarted with no snapshot: RSS $(rss "$N1") MiB, peak $base MiB"
+    echo "   n1 restarted: RSS $(rss "$N1") MiB, peak $base MiB; $(curl -sf http://127.0.0.1:23811/metrics |
+        awk '/^(fastetcd_wal_cached_bytes|fastetcd_write_behind_bytes|fastetcd_value_cache_bytes|fastetcd_key_index_bytes) /{printf "%s %.0f MiB  ", $1, $2/1048576}')"
+    rm -f "$dir"/n1/snapshots/*
 
     curl -sf -X POST "$c1/v3/cluster/member/add" -d "{\"peerURLs\":[\"$p2\"],\"isLearner\":true}" >/dev/null
     "$bin" --name n2 --data-dir "$dir/n2" --listen-client-urls "$c2" \
