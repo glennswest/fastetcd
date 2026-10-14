@@ -59,9 +59,11 @@ compactor() {
 # `readyz/non_learner readyz/serializable_read readyz/linearizable_read`
 # to tell which part of an answer is slow.
 ROUTES=${ROUTES:-readyz}
+# Polls until the file $1 exists, so no curl is cut off half-way (a
+# killed loop leaves its curl running, which then fails as the member stops).
 prober() {
     local r
-    while :; do
+    while [ ! -e "$1" ]; do
         for r in $ROUTES; do
             curl -s -o /dev/null -w "$r %{http_code} %{time_total}\n" "$CLIENT/$r" || echo "$r 000 0"
             sleep 0.02
@@ -81,17 +83,19 @@ run() {
         sleep 0.2
     done
     sleep 2
-    prober >"$dir/idle.txt" &
+    prober "$dir/idle.stop" >"$dir/idle.txt" &
     local p=$!
     sleep 5
-    kill "$p"
-    prober >"$dir/readyz.txt" &
+    touch "$dir/idle.stop"
+    wait "$p"
+    prober "$dir/load.stop" >"$dir/readyz.txt" &
     local probe=$!
     compactor &
     local comp=$!
     "$BENCH" --endpoint "$CLIENT" --mode put --conns "${CONNS:-1000}" --total 300000 --keys 1000 \
         >"$dir/bench.txt" 2>"$dir/bench.err" || echo "BENCH FAILED: $(tail -n 2 "$dir/bench.err")"
-    kill "$probe" "$comp" 2>/dev/null || true
+    touch "$dir/load.stop"
+    kill "$comp" 2>/dev/null || true
     wait "$probe" "$comp" 2>/dev/null || true
     kill "$pid"
     wait "$pid" 2>/dev/null || true
