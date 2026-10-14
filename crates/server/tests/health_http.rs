@@ -6,34 +6,14 @@
 
 use std::time::Duration;
 
-async fn pick_free_port() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
+mod spawned;
 
 #[tokio::test]
 async fn client_port_serves_http_health_alongside_grpc() {
     let dir = tempfile::tempdir().unwrap();
-    let client_port = pick_free_port().await;
-    let peer_port = pick_free_port().await;
-
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_fastetcd"))
-        .arg("--data-dir")
-        .arg(dir.path())
-        .arg("--listen-client-urls")
-        .arg(format!("http://127.0.0.1:{client_port}"))
-        .arg("--listen-peer-urls")
-        .arg(format!("http://127.0.0.1:{peer_port}"))
-        .arg("--listen-metrics-url")
-        .arg("")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn fastetcd");
-
-    let base = format!("http://127.0.0.1:{client_port}");
+    // Ports it cannot lose, and its output kept for a failure (#63).
+    let mut member = spawned::spawn_fastetcd(&[std::ffi::OsStr::new("--data-dir"), dir.path().as_os_str()]).await;
+    let base = member.client_url();
     let client = reqwest::Client::new();
 
     // Poll for the listener to come up — under a loaded test runner
@@ -49,8 +29,8 @@ async fn client_port_serves_http_health_alongside_grpc() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 let _ = other;
             }
-            Ok(resp) => panic!("/health never healthy: {} {}", resp.status(), resp.text().await.unwrap_or_default()),
-            Err(e) => panic!("GET /health did not come up in time: {e}"),
+            Ok(resp) => panic!("/health never healthy: {} {}\n{}", resp.status(), resp.text().await.unwrap_or_default(), member.log_tail()),
+            Err(e) => panic!("GET /health did not come up in time: {e}\n{}", member.log_tail()),
         }
     };
     assert!(health.status().is_success(), "status: {}", health.status());
@@ -96,5 +76,5 @@ async fn client_port_serves_http_health_alongside_grpc() {
     .await
     .expect("PUT over gRPC on the same port");
 
-    child.kill().await.ok();
+    member.child.kill().await.ok();
 }

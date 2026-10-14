@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-14
+- **test:** Tests that start the real binary no longer lose its ports to another job (#63, the #40 race): `crates/server/tests/spawned` starts it on a random 127.0.0.0/8 address (other tests bind 127.0.0.1), starts it again on new ports if it still finds one taken, and keeps its output for every failure message (it went to /dev/null). Used by `health_http.rs`, `wal_upgrade.rs`, `apply_replay.rs`; `metrics.rs` binds its in-process server on a random loopback address too; `snapshot_restore.rs` already retried.
+
 ## [v1.33.0] — 2026-10-14
 
 ### Added

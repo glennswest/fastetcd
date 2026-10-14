@@ -2790,3 +2790,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     read watches cross-origin), (2) same-origin by default +
     `--gateway-ws-allowed-origins`, no cookie token (recommended), (3) not
     yet (no client needs it).
+
+87. **Spawned-binary tests lose their ports (#63, P3) — done (tests).**
+    `crates/server/tests/spawned`: random 127.x.y.z address + new ports
+    on "in use" + the child's log in failures; health_http, wal_upgrade,
+    apply_replay; metrics.rs's in-process server on a random loopback
+    address.

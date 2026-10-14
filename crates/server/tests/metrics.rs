@@ -2,6 +2,7 @@
 //! expected etcd-compatible metric names.
 
 mod common;
+mod spawned;
 use common::start_test_server_full;
 
 use std::sync::Arc;
@@ -11,9 +12,9 @@ async fn metrics_endpoint_exposes_etcd_compatible_names() {
     let h = start_test_server_full().await;
 
     let m = fastetcd_server::metrics::Metrics::new();
-    let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    // Bind ourselves so we can capture the actual port.
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    // A random loopback address, so nothing else takes the port between
+    // this probe and the server's own bind (#63).
+    let listener = tokio::net::TcpListener::bind((spawned::random_loopback(), 0)).await.unwrap();
     let bound = listener.local_addr().unwrap();
     drop(listener);
     fastetcd_server::metrics::spawn_server(bound, m, Arc::new(reconstruct(&h)));
@@ -104,7 +105,9 @@ async fn client_port(state: Arc<ServerState>) -> String {
 
 /// Start `/metrics` for `state`; returns its URL.
 async fn metrics_url(state: Arc<ServerState>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // A random loopback address, so nothing else takes the port between
+    // this probe and the server's own bind (#63).
+    let listener = tokio::net::TcpListener::bind((spawned::random_loopback(), 0)).await.unwrap();
     let bound = listener.local_addr().unwrap();
     drop(listener);
     fastetcd_server::metrics::spawn_server(bound, fastetcd_server::metrics::Metrics::new(), state);
