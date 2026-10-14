@@ -140,6 +140,30 @@ impl RedbEngine {
     }
 }
 
+/// Apply one op inside `txn`.
+fn apply_op(txn: &redb::WriteTransaction, op: &BatchOp) -> StorageResult<()> {
+    let mut t = txn
+        .open_table(RedbEngine::table_def(match op {
+            BatchOp::Put { table, .. } | BatchOp::Delete { table, .. } | BatchOp::DeleteRange { table, .. } => table,
+        }))
+        .map_err(StorageError::io)?;
+    match op {
+        BatchOp::Put { key, value, .. } => {
+            t.insert(key.as_slice(), value.as_slice()).map_err(StorageError::io)?;
+        }
+        BatchOp::Delete { key, .. } => {
+            t.remove(key.as_slice()).map_err(StorageError::io)?;
+        }
+        BatchOp::DeleteRange { start, end, .. } => {
+            // In place: no list of the keys removed (a snapshot install
+            // clears whole tables, fastetcd#62).
+            t.retain_in(start.as_slice()..end.as_slice(), |_, _| false)
+                .map_err(StorageError::io)?;
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl KvStore for RedbEngine {
     async fn snapshot(&self) -> StorageResult<Arc<dyn Snapshot>> {
@@ -180,41 +204,7 @@ impl KvStore for RedbEngine {
                 txn.set_durability(Durability::None);
             }
             for op in batch.ops() {
-                match op {
-                    BatchOp::Put { table, key, value } => {
-                        let mut t = txn
-                            .open_table(RedbEngine::table_def(table))
-                            .map_err(StorageError::io)?;
-                        t.insert(key.as_slice(), value.as_slice())
-                            .map_err(StorageError::io)?;
-                    }
-                    BatchOp::Delete { table, key } => {
-                        let mut t = txn
-                            .open_table(RedbEngine::table_def(table))
-                            .map_err(StorageError::io)?;
-                        t.remove(key.as_slice()).map_err(StorageError::io)?;
-                    }
-                    BatchOp::DeleteRange { table, start, end } => {
-                        let mut t = txn
-                            .open_table(RedbEngine::table_def(table))
-                            .map_err(StorageError::io)?;
-                        // Collect keys first to avoid invalidating
-                        // the iterator while we mutate.
-                        let mut to_remove: Vec<Vec<u8>> = Vec::new();
-                        {
-                            let r = t
-                                .range::<&[u8]>(start.as_slice()..end.as_slice())
-                                .map_err(StorageError::io)?;
-                            for entry in r {
-                                let (k, _v) = entry.map_err(StorageError::io)?;
-                                to_remove.push(k.value().to_vec());
-                            }
-                        }
-                        for k in to_remove {
-                            t.remove(k.as_slice()).map_err(StorageError::io)?;
-                        }
-                    }
-                }
+                apply_op(&txn, op)?;
             }
             txn.commit().map_err(StorageError::io)?;
             drop(db_guard);
@@ -224,6 +214,31 @@ impl KvStore for RedbEngine {
         .map_err(|e| StorageError::Io(Box::new(e)))?;
         result?;
         Ok(())
+    }
+
+    async fn commit_stream(
+        &self,
+        ops: std::sync::mpsc::Receiver<StorageResult<BatchOp>>,
+        opts: WriteOptions,
+    ) -> StorageResult<()> {
+        // One write transaction fed as the ops arrive (fastetcd#62): the
+        // caller never holds them all, and an `Err` drops the transaction
+        // uncommitted, so nothing it carried is applied.
+        let db_guard = self.inner.db.clone().read_owned().await;
+        task::spawn_blocking(move || -> StorageResult<()> {
+            let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
+            if !opts.sync {
+                txn.set_durability(Durability::None);
+            }
+            for op in ops {
+                apply_op(&txn, &op?)?;
+            }
+            txn.commit().map_err(StorageError::io)?;
+            drop(db_guard);
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))?
     }
 
     async fn sync(&self) -> StorageResult<()> {

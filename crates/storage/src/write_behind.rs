@@ -274,6 +274,31 @@ impl KvStore for WriteBehind {
         Ok(())
     }
 
+    async fn commit_stream(
+        &self,
+        ops: std::sync::mpsc::Receiver<StorageResult<BatchOp>>,
+        opts: WriteOptions,
+    ) -> StorageResult<()> {
+        // Durable, as a durable `commit`: the layers into the engine, then
+        // the stream straight into the engine's own streamed commit, so it
+        // is never held as a layer or a batch (fastetcd#62).
+        if opts.sync {
+            let _g = self.inner.flush_lock.lock().await;
+            self.flush_locked().await?;
+            return self.inner.base.commit_stream(ops, opts).await;
+        }
+        let batch = tokio::task::spawn_blocking(move || -> StorageResult<WriteBatch> {
+            let mut batch = WriteBatch::new();
+            for op in ops {
+                batch.push(op?);
+            }
+            Ok(batch)
+        })
+        .await
+        .map_err(|e| crate::kvstore::StorageError::Io(Box::new(e)))??;
+        self.commit(batch, opts).await
+    }
+
     async fn sync(&self) -> StorageResult<()> {
         // The layers into the engine (non-durable), then the file's fsync
         // with the flush lock free, then the durable commit of whatever is

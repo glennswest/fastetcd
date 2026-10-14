@@ -101,9 +101,13 @@ fn decode_progress(b: &[u8]) -> Option<(u64, usize)> {
     Some((index, done as usize))
 }
 
-/// Encoded snapshot payload. The MVCC state itself is large; we lean
-/// on `MvccStore::snapshot` to read a consistent view and bincode the
-/// raw `(key, KvRecord)` and `(key, KeyIndex)` pairs.
+/// The snapshot payload's layout (bincode 1): the applied log id, the
+/// membership, then the `mvcc_kv`, `mvcc_idx` and `mvcc_meta` tables as
+/// `Vec<(key, value)>`, raw engine bytes. Written and read a record at a
+/// time ([`write_body`], [`stream_body`], fastetcd#62); this whole-value
+/// form is the reference the tests hold them to, and what older members
+/// decode.
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotPayload {
     last_applied_log_id: Option<LogId<NodeId>>,
@@ -147,7 +151,8 @@ struct LeaseTrailer {
 }
 
 /// A decoded snapshot body: the payload and, if present, the trailers'
-/// tables.
+/// tables. Test-only: the reference encoder and decoder.
+#[cfg(test)]
 #[derive(Debug)]
 struct SnapshotBody {
     payload: SnapshotPayload,
@@ -155,6 +160,7 @@ struct SnapshotBody {
     leases: Option<LeaseTables>,
 }
 
+#[cfg(test)]
 impl SnapshotBody {
     fn write_to(&self, w: &mut impl Write) -> std::io::Result<()> {
         bincode::serialize_into(&mut *w, &self.payload).map_err(bincode_io)?;
@@ -277,8 +283,10 @@ impl FastetcdStateMachine {
     /// Write a snapshot through the retained store and return a handle
     /// to its body.
     ///
-    /// The payload is serialized straight into the snapshot file; the
-    /// encoded snapshot never exists as a `Vec` (fastetcd#30). The store
+    /// The body is written straight into the snapshot file, a record at
+    /// a time from `source`'s engine snapshot: neither the encoded
+    /// snapshot (#30) nor its tables (#62) are ever whole in RAM. A retry
+    /// reads them again from the same engine snapshot. The store
     /// rolls older snapshots off before it writes and, on ENOSPC,
     /// discards every retained snapshot and retries (fastetcd#14).
     ///
@@ -291,14 +299,19 @@ impl FastetcdStateMachine {
     async fn write_snapshot(
         &self,
         meta: &SnapshotMeta<NodeId, openraft::BasicNode>,
-        payload: SnapshotBody,
+        source: BodySource,
     ) -> Result<WrittenSnapshot, StorageError<NodeId>> {
         let snapshots = self.snapshots.clone();
         let meta = meta.clone();
         let signature = meta.signature();
+        let rt = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || -> Result<WrittenSnapshot, StorageError<NodeId>> {
             let written = snapshots
-                .store_with(&meta, |f| serialize_payload(f, &payload))
+                .store_with(&meta, |f| {
+                    let mut w = BufWriter::with_capacity(1 << 20, f);
+                    write_body(&mut w, &source, &rt)?;
+                    w.flush()
+                })
                 .and_then(|_| snapshots.open_body(&meta));
             match written {
                 Ok(file) => Ok(WrittenSnapshot {
@@ -315,9 +328,11 @@ impl FastetcdStateMachine {
                          `etcdctl compact`, `etcdctl defrag`, or `fastetcd defrag` \
                          with the server stopped)."
                     );
-                    let bytes = payload.to_bytes().map_err(|e| {
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    write_body(&mut bytes, &source, &rt).map_err(|e| {
                         StorageIOError::write_snapshot(Some(meta.signature()), AnyError::new(&e))
                     })?;
+                    let bytes = bytes.into_inner();
                     Ok(WrittenSnapshot {
                         body: SnapshotFile::memory(bytes),
                         persisted: false,
@@ -534,29 +549,172 @@ fn bincode_io(e: bincode::Error) -> std::io::Error {
     }
 }
 
-fn serialize_payload(f: &mut std::fs::File, payload: &SnapshotBody) -> std::io::Result<()> {
-    let mut w = BufWriter::with_capacity(1 << 20, f);
-    payload.write_to(&mut w)?;
-    w.flush()
+/// Records read from the engine per call while writing a snapshot.
+const BODY_CHUNK: usize = 4096;
+
+/// What a snapshot is written from: one engine snapshot (every table
+/// read from it, so they agree), the applied log id and membership taken
+/// with it, and the trailers' small tables.
+struct BodySource {
+    snap: Arc<dyn fastetcd_storage::Snapshot>,
+    last_applied_log_id: Option<LogId<NodeId>>,
+    last_membership: StoredMembership<NodeId, openraft::BasicNode>,
+    auth: AuthTables,
+    leases: LeaseTables,
 }
 
-/// Decode a snapshot body. A file is read through a buffer, never
-/// loaded whole.
-fn decode_payload(content: &Content) -> Result<SnapshotBody, std::io::Error> {
-    let from_file = |mut f: &std::fs::File| -> std::io::Result<SnapshotBody> {
-        f.seek(SeekFrom::Start(0))?;
-        SnapshotBody::read_from(&mut BufReader::with_capacity(1 << 20, f))
+/// The MVCC tables of a snapshot body, in body order.
+const BODY_TABLES: [&str; 3] = ["mvcc_kv", "mvcc_idx", "mvcc_meta"];
+
+/// Write a snapshot body a record at a time (fastetcd#62): the same
+/// bytes [`SnapshotBody::write_to`] wrote, without the tables in RAM.
+/// bincode 1 writes a struct as its fields in order and a `Vec` as a u64
+/// count then the items, so each table is a count, patched in once its
+/// records are written, then `(key, value)` pairs read from the engine
+/// in chunks. Runs on a blocking thread; `rt` drives the engine reads.
+fn write_body<W: Write + Seek>(
+    w: &mut W,
+    src: &BodySource,
+    rt: &tokio::runtime::Handle,
+) -> std::io::Result<()> {
+    use std::ops::Bound;
+    bincode::serialize_into(&mut *w, &src.last_applied_log_id).map_err(bincode_io)?;
+    bincode::serialize_into(&mut *w, &src.last_membership).map_err(bincode_io)?;
+    for table in BODY_TABLES {
+        let count_at = w.stream_position()?;
+        w.write_all(&0u64.to_le_bytes())?;
+        let mut n: u64 = 0;
+        let mut start: Bound<Vec<u8>> = Bound::Unbounded;
+        loop {
+            let chunk = rt
+                .block_on(src.snap.range(table, start.clone(), Bound::Unbounded, BODY_CHUNK))
+                .map_err(std::io::Error::other)?;
+            for (k, v) in &chunk {
+                bincode::serialize_into(&mut *w, &(k, v)).map_err(bincode_io)?;
+            }
+            n += chunk.len() as u64;
+            match chunk.last() {
+                Some((k, _)) if chunk.len() == BODY_CHUNK => start = Bound::Excluded(k.clone()),
+                _ => break,
+            }
+        }
+        let end = w.stream_position()?;
+        w.seek(SeekFrom::Start(count_at))?;
+        w.write_all(&n.to_le_bytes())?;
+        w.seek(SeekFrom::Start(end))?;
+    }
+    let trailer = SnapshotTrailer { magic: TRAILER_MAGIC, auth: Some(src.auth.clone()) };
+    bincode::serialize_into(&mut *w, &trailer).map_err(bincode_io)?;
+    let leases = LeaseTrailer { magic: LEASE_TRAILER_MAGIC, leases: Some(src.leases.clone()) };
+    bincode::serialize_into(&mut *w, &leases).map_err(bincode_io)
+}
+
+/// Ops a snapshot install sends ahead of the engine's commit.
+const INSTALL_QUEUE: usize = 1024;
+
+/// What a snapshot body says besides its tables.
+struct BodyHeader {
+    last_applied_log_id: Option<LogId<NodeId>>,
+    last_membership: StoredMembership<NodeId, openraft::BasicNode>,
+}
+
+/// Decode a snapshot body a record at a time into the ops that install
+/// it, sent to `tx` as they are read (fastetcd#62): clear the MVCC
+/// tables, put every record, then the applied log id and membership,
+/// then the trailers' auth and lease tables (replacing this member's,
+/// `current_leases`) when the body has them. Reads any body an older
+/// member wrote, as [`SnapshotBody::read_from`] did.
+fn stream_body(
+    r: &mut impl Read,
+    tx: &std::sync::mpsc::SyncSender<fastetcd_storage::StorageResult<fastetcd_storage::kvstore::BatchOp>>,
+    current_leases: &LeaseTables,
+) -> std::io::Result<BodyHeader> {
+    use fastetcd_storage::kvstore::BatchOp;
+    use fastetcd_storage::mvcc::store::{META_KEY_RAFT_APPLIED, META_KEY_RAFT_MEMBERSHIP};
+    use fastetcd_storage::WriteBatch;
+    let send = |op: BatchOp| {
+        tx.send(Ok(op))
+            .map_err(|_| std::io::Error::other("the install's commit stopped"))
     };
-    match content {
+    let last_applied_log_id: Option<LogId<NodeId>> = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
+    let last_membership: StoredMembership<NodeId, openraft::BasicNode> =
+        bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
+    for table in BODY_TABLES {
+        send(BatchOp::DeleteRange { table: table.to_string(), start: Vec::new(), end: vec![0xFF; 64] })?;
+    }
+    for table in BODY_TABLES {
+        let n: u64 = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
+        for _ in 0..n {
+            let (key, value): (Vec<u8>, Vec<u8>) = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
+            send(BatchOp::Put { table: table.to_string(), key, value })?;
+        }
+    }
+    // The data and the log id it corresponds to land in one commit:
+    // otherwise a crash mid-install leaves a follower with the leader's
+    // data and its own old last_applied, which replays entries over it.
+    let mut tail = WriteBatch::new();
+    tail.put("mvcc_meta", META_KEY_RAFT_APPLIED, &bincode::serialize(&last_applied_log_id).map_err(bincode_io)?);
+    tail.put("mvcc_meta", META_KEY_RAFT_MEMBERSHIP, &bincode::serialize(&last_membership).map_err(bincode_io)?);
+    // Each trailer is optional: a body from a member older than it ends
+    // before it, and leaves those tables as they are (#32, #41).
+    if let Some(t) = read_trailer::<SnapshotTrailer>(r)? {
+        if t.magic != TRAILER_MAGIC {
+            return Err(unknown_magic("snapshot trailer"));
+        }
+        if let Some(auth) = &t.auth {
+            auth.replace_into(&mut tail);
+        }
+        match read_trailer::<LeaseTrailer>(r)? {
+            Some(l) if l.magic == LEASE_TRAILER_MAGIC => {
+                if let Some(leases) = &l.leases {
+                    leases.replace_into(current_leases, &mut tail);
+                }
+            }
+            Some(_) => return Err(unknown_magic("snapshot lease trailer")),
+            None => {}
+        }
+    }
+    for op in tail.into_ops() {
+        send(op)?;
+    }
+    Ok(BodyHeader { last_applied_log_id, last_membership })
+}
+
+/// Stream the body in `content` (synced first if it was received) into
+/// `tx`. If decoding fails, or panics, the stream ends with an `Err`, so
+/// the commit it feeds is abandoned rather than committing a part.
+fn stream_content(
+    content: &Content,
+    tx: std::sync::mpsc::SyncSender<fastetcd_storage::StorageResult<fastetcd_storage::kvstore::BatchOp>>,
+    current_leases: &LeaseTables,
+) -> std::io::Result<BodyHeader> {
+    struct AbortUnlessDone<'a>(&'a std::sync::mpsc::SyncSender<fastetcd_storage::StorageResult<fastetcd_storage::kvstore::BatchOp>>, bool);
+    impl Drop for AbortUnlessDone<'_> {
+        fn drop(&mut self) {
+            if !self.1 {
+                let _ = self.0.send(Err(fastetcd_storage::StorageError::Io(Box::new(std::io::Error::other(
+                    "the snapshot body could not be read to its end",
+                )))));
+            }
+        }
+    }
+    let mut guard = AbortUnlessDone(&tx, false);
+    let from_file = |mut f: &std::fs::File| -> std::io::Result<BodyHeader> {
+        f.seek(SeekFrom::Start(0))?;
+        stream_body(&mut BufReader::with_capacity(1 << 20, f), &tx, current_leases)
+    };
+    let header = match content {
         Content::Incoming { file, .. } => {
-            // Durable before it is decoded and applied: it is about to
-            // become this node's retained snapshot.
+            // Durable before it is applied: it is about to become this
+            // node's retained snapshot.
             file.sync_all()?;
             from_file(file)
         }
         Content::Retained(file) => from_file(file),
-        Content::Memory(bytes) => SnapshotBody::read_from(&mut bytes.as_slice()),
-    }
+        Content::Memory(bytes) => stream_body(&mut bytes.as_slice(), &tx, current_leases),
+    }?;
+    guard.1 = true;
+    Ok(header)
 }
 
 /// Keep a copy of an installed snapshot as this node's retained one.
@@ -757,40 +915,56 @@ impl RaftStateMachine<TypeConfig> for FastetcdStateMachine {
         snapshot: Box<SnapshotFile>,
     ) -> Result<(), StorageError<NodeId>> {
         let content = snapshot.into_content();
+        let fail = |e: &dyn std::fmt::Display| -> StorageError<NodeId> {
+            StorageIOError::write_snapshot(
+                Some(meta.signature()),
+                AnyError::error(format!("install snapshot: {e}")),
+            )
+            .into()
+        };
 
-        // Decode straight from the file (no raw-bytes copy in RAM). A
-        // received file that fails to decode is deleted here; the live
-        // database has not been touched.
-        let (payload, content) = tokio::task::spawn_blocking(move || {
-            let decoded = decode_payload(&content);
-            if decoded.is_err() {
+        // The body is decoded a record at a time on a blocking thread and
+        // streamed into one durable engine commit (fastetcd#62): neither
+        // the encoded body nor its tables are ever whole in RAM, and a
+        // body that fails to decode aborts the commit with nothing
+        // applied. The lease tables are replaced against this member's
+        // current ones (#41), read first: they are small.
+        let current_leases = match self.mvcc.engine().snapshot().await {
+            Ok(snap) => LeaseTables::read(&*snap).await.map_err(|e| fail(&e))?,
+            Err(e) => return Err(fail(&e)),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(INSTALL_QUEUE);
+        let decoder = tokio::task::spawn_blocking(move || {
+            let header = stream_content(&content, tx, &current_leases);
+            (header, content)
+        });
+        // The MvccStore handle keeps the revision counters and every
+        // key's index in RAM (#8, #82): `install_tables_stream` commits
+        // and reloads them under its write lock, so no read sees the new
+        // tables with the old index or revision.
+        let committed = self.mvcc.install_tables_stream(rx).await;
+        let (header, content) = decoder.await.map_err(|e| fail(&e))?;
+        let outcome = match (header, committed) {
+            (Ok(h), Ok(())) => Ok(h),
+            (Err(e), _) => Err(format!("decode snapshot: {e}")),
+            (Ok(_), Err(e)) => Err(format!("rebuild mvcc from snapshot: {e}")),
+        };
+        let header = match outcome {
+            Ok(h) => h,
+            Err(e) => {
+                // A received file that cannot be installed is deleted;
+                // the live database is untouched (the commit never ran).
                 if let Content::Incoming { path, .. } = &content {
                     let _ = std::fs::remove_file(path);
                 }
+                return Err(fail(&e));
             }
-            decoded.map(|p| (p, content))
-        })
-        .await
-        .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?
-        .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
-
-        // Replace the MVCC engine contents.
-        let applied = rebuild_mvcc(&self.mvcc, &payload).await;
-        if let Err(e) = applied {
-            if let Content::Incoming { path, .. } = &content {
-                let _ = std::fs::remove_file(path);
-            }
-            return Err(StorageIOError::write_snapshot(
-                Some(meta.signature()),
-                AnyError::error(format!("rebuild mvcc from snapshot: {e}")),
-            )
-            .into());
-        }
-        let SnapshotPayload {
+        };
+        self.mvcc.reload_auth().await.map_err(|e| fail(&e))?;
+        let BodyHeader {
             last_applied_log_id,
             last_membership,
-            ..
-        } = payload.payload;
+        } = header;
 
         // Keep the installed snapshot as this node's retained one, so it
         // survives restart; only the meta stays in RAM. A received file
@@ -873,7 +1047,7 @@ pub struct FastetcdSnapshotBuilder {
 
 impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        let payload = build_payload(&self.sm).await.map_err(|e| {
+        let source = body_source(&self.sm).await.map_err(|e| {
             StorageIOError::read_state_machine(AnyError::error(format!(
                 "build snapshot payload: {e}"
             )))
@@ -883,8 +1057,8 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
             let mut g = self.sm.inner.lock().await;
             g.snapshot_idx += 1;
             SnapshotMeta {
-                last_log_id: payload.payload.last_applied_log_id,
-                last_membership: payload.payload.last_membership.clone(),
+                last_log_id: source.last_applied_log_id,
+                last_membership: source.last_membership.clone(),
                 snapshot_id: format!("snap-{}", g.snapshot_idx),
             }
         };
@@ -900,7 +1074,7 @@ impl RaftSnapshotBuilder<TypeConfig> for FastetcdSnapshotBuilder {
         // state machine's data and `last_applied` are already committed,
         // so `write_snapshot` falls back to holding this snapshot in
         // memory, and no current snapshot is recorded on disk.
-        let written = self.sm.write_snapshot(&meta, payload).await?;
+        let written = self.sm.write_snapshot(&meta, source).await?;
         self.sm.inner.lock().await.current_snapshot =
             written.persisted.then(|| meta.clone());
         Ok(Snapshot {
@@ -1010,108 +1184,25 @@ async fn apply_request(
     }
 }
 
-async fn build_payload(sm: &FastetcdStateMachine) -> Result<SnapshotBody, anyhow::Error> {
-    use std::ops::Bound;
-    // Capture the consistent MVCC snapshot handle AND last_applied atomically
-    // under the state-machine lock. `apply()` mutates the MVCC store and
-    // last_applied together under this lock; if we took the snapshot outside it,
-    // an apply could interleave and the snapshot would carry data from an
-    // earlier revision than its last_applied_log_id. A learner installing that
-    // mismatch is marked caught-up at a log id ahead of its data and never
-    // receives the gap, so it stays stuck at the old revision (fastetcd#8).
-    // The frozen snapshot handle is then scanned WITHOUT the lock so builds
-    // don't block writes.
+/// The engine snapshot a snapshot is written from, with the applied log
+/// id and membership taken atomically with it, under the state-machine
+/// lock: `apply()` changes the MVCC store and last_applied together under
+/// it, so an engine snapshot taken outside could carry data from another
+/// revision than its last_applied_log_id, and a learner installing that
+/// would be marked caught up ahead of its data (fastetcd#8). The tables
+/// are read from the engine snapshot later, without the lock, a chunk at
+/// a time (#62), so a build does not block writes.
+async fn body_source(sm: &FastetcdStateMachine) -> Result<BodySource, anyhow::Error> {
     let (snap, last_applied_log_id, last_membership) = {
         let g = sm.inner.lock().await;
         let snap = sm.mvcc.engine().snapshot().await?;
         (snap, g.last_applied_log_id, g.last_membership.clone())
     };
-
-    let kv_table = snap
-        .range("mvcc_kv", Bound::Unbounded, Bound::Unbounded, 0)
-        .await?;
-    let idx_table = snap
-        .range("mvcc_idx", Bound::Unbounded, Bound::Unbounded, 0)
-        .await?;
-    let meta_table = snap
-        .range("mvcc_meta", Bound::Unbounded, Bound::Unbounded, 0)
-        .await?;
-
-    // The auth tables (fastetcd#32) and the lease tables (#41), from
-    // the same engine snapshot.
+    // The auth tables (#32) and the lease tables (#41), small, from the
+    // same engine snapshot.
     let auth = AuthTables::read(&*snap).await?;
     let leases = LeaseTables::read(&*snap).await?;
-
-    Ok(SnapshotBody {
-        payload: SnapshotPayload {
-            last_applied_log_id,
-            last_membership,
-            kv_table,
-            idx_table,
-            meta_table,
-        },
-        auth: Some(auth),
-        leases: Some(leases),
-    })
-}
-
-async fn rebuild_mvcc(
-    mvcc: &MvccStore,
-    body: &SnapshotBody,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = &body.payload;
-    use fastetcd_storage::mvcc::store::{META_KEY_RAFT_APPLIED, META_KEY_RAFT_MEMBERSHIP};
-    use fastetcd_storage::WriteBatch;
-
-    // Delete-everything is implemented as: delete_range over each
-    // table's full key space.
-    let mut batch = WriteBatch::new();
-    batch.delete_range("mvcc_kv", b"", &[0xFFu8; 64]);
-    batch.delete_range("mvcc_idx", b"", &[0xFFu8; 64]);
-    batch.delete_range("mvcc_meta", b"", &[0xFFu8; 64]);
-    for (k, v) in &payload.kv_table {
-        batch.put("mvcc_kv", k, v);
-    }
-    for (k, v) in &payload.idx_table {
-        batch.put("mvcc_idx", k, v);
-    }
-    for (k, v) in &payload.meta_table {
-        batch.put("mvcc_meta", k, v);
-    }
-    // The installed data and the log id it corresponds to must land in
-    // one batch. Otherwise a crash mid-install leaves a follower whose
-    // MVCC state is the leader's but whose last_applied is its own old
-    // one — it then replays already-applied entries over the snapshot.
-    batch.put(
-        "mvcc_meta",
-        META_KEY_RAFT_APPLIED,
-        &bincode::serialize(&payload.last_applied_log_id)?,
-    );
-    batch.put(
-        "mvcc_meta",
-        META_KEY_RAFT_MEMBERSHIP,
-        &bincode::serialize(&payload.last_membership)?,
-    );
-    // The auth tables, in the same batch, when the sender included them
-    // (fastetcd#32). A body from an older member has none: the local
-    // tables are left as they were, as before.
-    if let Some(auth) = &body.auth {
-        auth.replace_into(&mut batch);
-    }
-    // The lease tables likewise (fastetcd#41): every row this member
-    // holds is replaced, so a lease the cluster revoked does not linger
-    // here and one granted before the snapshot is not missing.
-    if let Some(leases) = &body.leases {
-        let current = LeaseTables::read(&*mvcc.engine().snapshot().await?).await?;
-        leases.replace_into(&current, &mut batch);
-    }
-    // The MvccStore handle keeps the revision counters and every key's
-    // index in RAM (fastetcd#8, #82). `install_tables` commits the batch
-    // and reloads them under its write lock, so no read sees the new
-    // tables with the old index or revision.
-    mvcc.install_tables(batch).await?;
-    mvcc.reload_auth().await?;
-    Ok(())
+    Ok(BodySource { snap, last_applied_log_id, last_membership, auth, leases })
 }
 
 #[cfg(test)]
@@ -1199,6 +1290,181 @@ mod tests {
         let body = SnapshotBody::read_from(&mut old.as_slice()).unwrap();
         assert_eq!(body.auth, Some(auth()));
         assert!(body.leases.is_none());
+    }
+
+    use fastetcd_storage::kvstore::BatchOp;
+    use fastetcd_storage::redb_engine::RedbEngine;
+    use fastetcd_storage::{KvStore, WriteBatch, WriteOptions};
+
+    /// A redb engine holding `n` records in `mvcc_kv` (more than one
+    /// write chunk), some in `mvcc_idx` and `mvcc_meta`, and the payload
+    /// the old encoder would have made from them.
+    async fn engine_with(n: usize) -> (tempfile::TempDir, Arc<RedbEngine>, SnapshotPayload) {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Arc::new(RedbEngine::open(dir.path().join("db")).unwrap());
+        let mut b = WriteBatch::new();
+        let mut p = payload();
+        p.kv_table.clear();
+        p.meta_table.clear();
+        for i in 0..n {
+            let (k, v) = (format!("k{i:07}").into_bytes(), vec![(i % 251) as u8; i % 40]);
+            b.put("mvcc_kv", &k, &v);
+            p.kv_table.push((k, v));
+        }
+        for i in 0..7 {
+            let (k, v) = (format!("i{i}").into_bytes(), vec![i as u8]);
+            b.put("mvcc_idx", &k, &v);
+            p.idx_table.push((k, v));
+        }
+        b.put("mvcc_meta", b"m", b"1");
+        p.meta_table.push((b"m".to_vec(), b"1".to_vec()));
+        eng.commit(b, WriteOptions::default()).await.unwrap();
+        (dir, eng, p)
+    }
+
+    async fn written(snap: Arc<dyn fastetcd_storage::Snapshot>, p: &SnapshotPayload) -> Vec<u8> {
+        let src = BodySource {
+            snap,
+            last_applied_log_id: p.last_applied_log_id,
+            last_membership: p.last_membership.clone(),
+            auth: auth(),
+            leases: leases(),
+        };
+        let rt = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let mut w = std::io::Cursor::new(Vec::new());
+            write_body(&mut w, &src, &rt).unwrap();
+            w.into_inner()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// fastetcd#62: the streamed writer writes exactly the bytes the
+    /// whole-value encoder wrote, so every member, old or new, reads it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_streamed_body_is_the_old_encoders_bytes() {
+        let (_d, eng, p) = engine_with(3 * BODY_CHUNK + 17).await;
+        let streamed = written(eng.snapshot().await.unwrap(), &p).await;
+        let whole = SnapshotBody { payload: p, auth: Some(auth()), leases: Some(leases()) }.to_bytes().unwrap();
+        assert_eq!(streamed.len(), whole.len());
+        assert!(streamed == whole, "the streamed body differs from the old encoder's");
+    }
+
+    /// A snapshot of an engine that counts what it is asked: the build
+    /// reads the MVCC tables in bounded chunks, never a whole table.
+    struct Counting {
+        inner: Arc<dyn fastetcd_storage::Snapshot>,
+        unbounded: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl fastetcd_storage::Snapshot for Counting {
+        async fn get(&self, table: &str, key: &[u8]) -> fastetcd_storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.get(table, key).await
+        }
+        async fn range(
+            &self,
+            table: &str,
+            start: std::ops::Bound<Vec<u8>>,
+            end: std::ops::Bound<Vec<u8>>,
+            limit: usize,
+        ) -> fastetcd_storage::StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+            if limit == 0 && BODY_TABLES.contains(&table) {
+                self.unbounded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.inner.range(table, start, end, limit).await
+        }
+        async fn count(
+            &self,
+            table: &str,
+            start: std::ops::Bound<Vec<u8>>,
+            end: std::ops::Bound<Vec<u8>>,
+        ) -> fastetcd_storage::StorageResult<u64> {
+            self.inner.count(table, start, end).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_build_never_reads_a_whole_table_at_once() {
+        let (_d, eng, p) = engine_with(2 * BODY_CHUNK).await;
+        let unbounded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let snap = Arc::new(Counting { inner: eng.snapshot().await.unwrap(), unbounded: unbounded.clone() });
+        written(snap, &p).await;
+        assert_eq!(unbounded.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// The ops the streamed decoder sends for `bytes`.
+    fn decode_ops(bytes: Vec<u8>) -> (std::io::Result<BodyHeader>, Vec<fastetcd_storage::StorageResult<BatchOp>>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1 << 20);
+        let current = LeaseTables { leases: Vec::new(), keys: Vec::new() };
+        let header = stream_content(&Content::Memory(bytes), tx, &current);
+        (header, rx.into_iter().collect())
+    }
+
+    fn puts(ops: &[fastetcd_storage::StorageResult<BatchOp>], table: &str) -> usize {
+        ops.iter()
+            .filter(|op| matches!(op, Ok(BatchOp::Put { table: t, .. }) if t == table))
+            .count()
+    }
+
+    /// The streamed decoder reads every body an older member writes:
+    /// payload only (< 1.5), payload + auth trailer (1.5–1.15), and the
+    /// whole body; the trailers' tables are installed only if present.
+    #[test]
+    fn the_streamed_decoder_reads_every_older_body() {
+        let only_payload = bincode::serialize(&payload()).unwrap();
+        let mut with_auth = only_payload.clone();
+        bincode::serialize_into(&mut with_auth, &SnapshotTrailer { magic: TRAILER_MAGIC, auth: Some(auth()) }).unwrap();
+        let whole = SnapshotBody { payload: payload(), auth: Some(auth()), leases: Some(leases()) }.to_bytes().unwrap();
+        for (name, bytes, users, leases_rows) in
+            [("payload", only_payload, 0, 0), ("auth", with_auth, 1, 0), ("whole", whole, 1, 1)]
+        {
+            let (header, ops) = decode_ops(bytes);
+            let header = header.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(header.last_applied_log_id, None, "{name}");
+            assert!(ops.iter().all(|op| op.is_ok()), "{name}: an op is an error");
+            assert_eq!(puts(&ops, "mvcc_kv"), 1, "{name}");
+            // The record, plus the applied log id and the membership.
+            assert_eq!(puts(&ops, "mvcc_meta"), 3, "{name}");
+            assert_eq!(puts(&ops, "auth_users"), users, "{name}");
+            assert_eq!(puts(&ops, "lease"), leases_rows, "{name}");
+        }
+    }
+
+    /// A body cut off in a table ends the stream with an error, and the
+    /// install's one commit is abandoned: the store keeps what it had.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_off_body_installs_nothing() {
+        let (_d, eng, p) = engine_with(BODY_CHUNK).await;
+        let bytes = written(eng.snapshot().await.unwrap(), &p).await;
+        let cut = bytes[..bytes.len() / 2].to_vec();
+        let (header, ops) = decode_ops(cut.clone());
+        assert!(header.is_err());
+        assert!(matches!(ops.last(), Some(Err(_))), "the stream does not end with an error");
+
+        let dir = tempfile::tempdir().unwrap();
+        let target: Arc<dyn KvStore> = Arc::new(RedbEngine::open(dir.path().join("t")).unwrap());
+        let mvcc = MvccStore::open(target.clone()).await.unwrap();
+        mvcc.apply(&[fastetcd_storage::Mutation::Put {
+            key: b"before".to_vec(),
+            value: b"x".to_vec(),
+            lease: 0,
+            ignore_value: false,
+            ignore_lease: false,
+            prev_kv: false,
+        }])
+        .await
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(INSTALL_QUEUE);
+        let current = LeaseTables { leases: Vec::new(), keys: Vec::new() };
+        let decoder = tokio::task::spawn_blocking(move || stream_content(&Content::Memory(cut), tx, &current).is_err());
+        assert!(mvcc.install_tables_stream(rx).await.is_err());
+        assert!(decoder.await.unwrap());
+        let got = mvcc.range(b"before", b"", 0, 0, false, false).await.unwrap();
+        assert_eq!(got.kvs.len(), 1, "the old data is gone");
+        let snap = target.snapshot().await.unwrap();
+        assert!(snap.get("mvcc_kv", b"k0000000").await.unwrap().is_none(), "part of the snapshot was applied");
     }
 
     #[test]

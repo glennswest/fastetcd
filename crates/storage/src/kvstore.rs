@@ -167,6 +167,17 @@ impl WriteBatch {
         &self.ops
     }
 
+    /// Append an op as built elsewhere.
+    pub fn push(&mut self, op: BatchOp) -> &mut Self {
+        self.ops.push(op);
+        self
+    }
+
+    /// The ops, by value.
+    pub fn into_ops(self) -> Vec<BatchOp> {
+        self.ops
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
@@ -278,6 +289,28 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Atomically apply `batch` and (if `opts.sync`) flush durably.
     async fn commit(&self, batch: WriteBatch, opts: WriteOptions) -> StorageResult<()>;
+
+    /// [`commit`](Self::commit) the ops `ops` yields, in order, as one
+    /// atomic commit, without the caller holding them all at once: a raft
+    /// snapshot install streams a whole database through it (fastetcd#62).
+    /// An `Err` from `ops` aborts the commit and is returned; nothing it
+    /// carried is applied. The default collects them into one batch.
+    async fn commit_stream(
+        &self,
+        ops: std::sync::mpsc::Receiver<StorageResult<BatchOp>>,
+        opts: WriteOptions,
+    ) -> StorageResult<()> {
+        let batch = tokio::task::spawn_blocking(move || -> StorageResult<WriteBatch> {
+            let mut batch = WriteBatch::new();
+            for op in ops {
+                batch.push(op?);
+            }
+            Ok(batch)
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))??;
+        self.commit(batch, opts).await
+    }
 
     /// Durably flush every batch committed with `sync = false` so far.
     async fn sync(&self) -> StorageResult<()>;

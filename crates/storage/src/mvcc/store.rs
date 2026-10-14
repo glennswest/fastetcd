@@ -873,6 +873,21 @@ impl MvccStore {
         self.reload_locked(&mut state).await
     }
 
+    /// [`install_tables`](Self::install_tables) from a stream of ops, as
+    /// one durable commit that never holds them all (fastetcd#62).
+    pub async fn install_tables_stream(
+        &self,
+        ops: std::sync::mpsc::Receiver<crate::kvstore::StorageResult<crate::kvstore::BatchOp>>,
+    ) -> MvccResult<()> {
+        let _replace = self.inner.replace.write().await;
+        let mut state = self.inner.write_state.lock().await;
+        self.inner
+            .engine
+            .commit_stream(ops, WriteOptions::default())
+            .await?;
+        self.reload_locked(&mut state).await
+    }
+
     async fn reload_locked(&self, state: &mut WriteState) -> MvccResult<()> {
         let snap = self.inner.engine.snapshot().await?;
         let current = read_i64(&*snap, META_KEY_CURRENT_REV).await?.unwrap_or(0);
