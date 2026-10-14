@@ -104,57 +104,34 @@ fn campaign(name: &str, lease: i64, value: &str) -> epb::CampaignRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_election_moves_to_the_next_candidate_on_resign() {
     let h = start_test_server_full().await;
-    eprintln!("step 1");
     let (la, lb) = (grant(&h.endpoint, 60).await, grant(&h.endpoint, 60).await);
-    eprintln!("step 2");
     let mut c = ElectionClient::connect(h.endpoint.clone()).await.unwrap();
-    eprintln!("step 3");
     let leader_b = c.campaign(campaign("el", lb, "b")).await.unwrap().into_inner().leader.unwrap();
-    eprintln!("step 4");
     let mut observe = c.observe(epb::LeaderRequest { name: b"el".to_vec() }).await.unwrap().into_inner();
-    eprintln!("step 5");
     assert_eq!(next(&mut observe).await, "b");
-    eprintln!("step 6");
     let a_campaign = {
         let mut c = c.clone();
         tokio::spawn(async move { c.campaign(campaign("el", la, "a")).await.map(|r| r.into_inner()) })
     };
-    eprintln!("step 7");
     tokio::time::sleep(Duration::from_millis(500)).await;
-    eprintln!("step 8");
     assert!(!a_campaign.is_finished(), "a is elected while b leads");
-    eprintln!("step 9");
     let leader = c.leader(epb::LeaderRequest { name: b"el".to_vec() }).await.unwrap().into_inner();
-    eprintln!("step 10");
     assert_eq!(leader.kv.unwrap().value, b"b");
-    eprintln!("step 11");
 
     c.proclaim(epb::ProclaimRequest { leader: Some(leader_b.clone()), value: b"b2".to_vec() }).await.unwrap();
-    eprintln!("step 12");
     assert_eq!(next(&mut observe).await, "b2");
-    eprintln!("step 13");
     c.resign(epb::ResignRequest { leader: Some(leader_b.clone()) }).await.unwrap();
-    eprintln!("step 14");
     let a = tokio::time::timeout(Duration::from_secs(10), a_campaign).await.expect("a is elected").unwrap().unwrap();
-    eprintln!("step 15");
     assert_eq!(a.leader.unwrap().key, format!("el/{la:x}").into_bytes());
-    eprintln!("step 16");
     assert_eq!(next(&mut observe).await, "a");
-    eprintln!("step 17");
 
     // b is no longer the leader: proclaiming fails with etcd's error.
     let e = c.proclaim(epb::ProclaimRequest { leader: Some(leader_b), value: b"x".to_vec() }).await.unwrap_err();
-    eprintln!("step 18");
     assert_eq!((e.code(), e.message()), (Code::Unknown, "election: not leader"));
-    eprintln!("step 19");
     let e = c.leader(epb::LeaderRequest { name: b"nobody".to_vec() }).await.unwrap_err();
-    eprintln!("step 20");
     assert_eq!(e.message(), "election: no leader");
-    eprintln!("step 21");
     let e = c.resign(epb::ResignRequest { leader: None }).await.unwrap_err();
-    eprintln!("step 22");
     assert_eq!(e.message(), "\"leader\" field must be provided");
-    eprintln!("step 23");
 }
 
 /// The services act as their caller: a user who cannot write the lock's

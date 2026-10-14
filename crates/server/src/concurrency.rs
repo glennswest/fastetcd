@@ -192,7 +192,6 @@ impl Caller {
                 ..Default::default()
             };
             let resp = self.range(read).await?;
-            eprintln!("DEBUG wait_deletes max_create={max_create_rev} got {:?}", resp.kvs.iter().map(|k| (String::from_utf8_lossy(&k.key).into_owned(), k.create_revision)).collect::<Vec<_>>());
             let Some(last) = resp.kvs.first() else {
                 return Ok(());
             };
@@ -379,7 +378,6 @@ impl epb::election_server::Election for ElectionService {
                 failure: vec![op_get(&key)],
             })
             .await?;
-        eprintln!("DEBUG campaign txn succeeded={} header={:?}", resp.succeeded, resp.header);
         let mut leader = epb::LeaderKey {
             name: req.name.clone(),
             key: key.clone(),
