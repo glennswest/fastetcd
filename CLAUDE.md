@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.32.2`** — The unused `wal` and `iouring` storage engines and the
+**`1.32.3`** — Raft snapshots are built and installed a record at a
+time (#62): no decoded copy of the database in RAM on either end (one
+streamed, still atomic engine commit on install); same format. ~480 MiB
+of data: learner install peak 680 → 85 MiB.
+
+Previous: **`1.32.2`** — The unused `wal` and `iouring` storage engines and the
 `tokio-uring` dependency are gone (#55); redb is the only engine. No
 server change. Docs: Downgrade stays Unimplemented (#57), 2PC cost on a
 real disk (#67), a lone write after idle (#102).
