@@ -218,6 +218,13 @@ The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
    exactly once (#50). For a historical `revision`, the contents are at
    that revision and the header is still the store's revision at the
    read, as in etcd.
+6. Sort (`sort_order`, `sort_target`) and the `min`/`max` mod and create
+   revision filters are applied to the result as etcd's `executeRange`
+   does (#154, `crates/server/src/range_options.rs`): with either, the
+   range is read whole, filtered, sorted (stably; NONE with a target
+   other than KEY is ascending), then cut to `limit` with `more`; `count`
+   is the count before the filters. clientv3's `concurrency` Mutex and
+   Election rely on it.
 
 ## Write path
 

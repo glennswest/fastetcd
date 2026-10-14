@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.33.0`** — The cluster id is replicated, and random by default
+**`1.33.1`** — Range sorts and filters as etcd does (#154, P1): sort
+order/target and min/max mod/create revision were ignored, so clientv3's
+`concurrency.Mutex` and `Election` were not exclusive on fastetcd.
+`range_options.rs`; `tests/clientv3_concurrency.sh`.
+
+Previous: **`1.33.0`** — The cluster id is replicated, and random by default
 (#38): the leader proposes its id (`ClusterId` entry, once every member
 is 1.33+); members adopt the cluster's, except an explicit contradicting
 `--cluster-id`, which refuses to start.
@@ -2701,6 +2706,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     NONE + non-KEY target = ASCEND; KEY + ASCEND = no re-sort), no storage
     or wire change; tests with clientv3 (`Mutex` with lease IDs sorting
     against creation order) and `etcdctl get --sort-by`.
+    Done: `range_options.rs` as planned, in serve_range (local and
+    forwarded), conv (Txn Range read whole) and the Txn response.
+    Verified: `tests/clientv3_concurrency.sh v1.33.0`: on 1.33.0 a second
+    session's TryLock succeeded while the first held the lock; on the
+    tree every Get option, the Mutex and the Election check out. Release
+    1.33.1.
 
 83. **etcd's Lock and Election services (#64, P3) — after #154.** Design
     (etcd v3.6.11 `v3lock/lock.go`, `v3election/election.go`, clientv3

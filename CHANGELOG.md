@@ -4,8 +4,31 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-14
-- **test:** Tests that start the real binary no longer lose its ports to another job (#63, the #40 race): `crates/server/tests/spawned` starts it on a random 127.0.0.0/8 address (other tests bind 127.0.0.1), starts it again on new ports if it still finds one taken, and keeps its output for every failure message (it went to /dev/null). Used by `health_http.rs`, `wal_upgrade.rs`, `apply_replay.rs`; `metrics.rs` binds its in-process server on a random loopback address too; `snapshot_restore.rs` already retried.
+## [v1.33.1] — 2026-10-14
+
+### Fixed
+- Range sorts and filters as etcd does (#154, P1). `sort_order`,
+  `sort_target`, `min_mod_revision`, `max_mod_revision`,
+  `min_create_revision` and `max_create_revision` were never read, so
+  results came back in key order, unfiltered, and clientv3's
+  `concurrency.Mutex` was **not mutually exclusive** on fastetcd: its
+  owner is the first key under the prefix by create revision, and here
+  that was the first key by name (`tests/clientv3_concurrency.sh v1.33.0`:
+  a second session's `TryLock` succeeded while the first held the lock).
+  `Election` likewise; Cilium's etcd kvstore locks this way. The server
+  now applies etcd's `executeRange` rules (`range_options.rs`): read the
+  range whole when sorting or filtering, drop records outside the
+  filters, sort stably by the target (NONE with a target other than KEY
+  is ascending), cut to `limit` with `more`; `count` stays the count
+  before the filters. Same for a local read, a read forwarded to the
+  leader and a Range in a Txn; no storage, raft or peer change.
+
+### Tests
+- `tests/clientv3_concurrency.sh [baseline]` (clientv3 v3.5.17: Get with
+  each sort and filter option, `concurrency.Mutex` and `Election`);
+  `range_options` unit tests.
+- Spawned-binary tests can no longer lose their ports to another job,
+  and keep the child's log for failures (#63, `tests/spawned`).
 
 ## [v1.33.0] — 2026-10-14
 
