@@ -110,6 +110,9 @@ for route in dict.fromkeys(r for r, _, _ in rows):
     over = sum(1 for x in t if x > 50)
     print(f"   {sys.argv[2]:6} /{route:26} n {len(t):5}  p50 {pct(.5):6.1f}  p99 {pct(.99):6.1f}  "
           f"max {t[-1]:6.1f} ms  over 50 ms {over}  not 200 {bad}")
+    for c, s in mine:
+        if c != "200":
+            print(f"          not 200: code {c} after {float(s) * 1000:.1f} ms")
 EOF
     done
 }
