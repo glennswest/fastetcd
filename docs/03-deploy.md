@@ -774,10 +774,23 @@ member reports it and persists it as its own:
 - An existing cluster keeps its leader's id at the upgrade: where the
   members were started alike, nobody's changes.
 
-The cluster's id cannot be changed once replicated. Do not add a member
-older than 1.33 to a cluster that has replicated it while the log may
-still hold the entry: such a member cannot read it (as with #56's
-nested txns; see #134).
+The cluster's id cannot be changed once replicated.
+
+**Mixed versions.** A member older than 1.33 cannot decode the entry,
+and the leader proposes it by itself within seconds of every member
+running 1.33. While the entry is still in the members' logs (until a
+snapshot and a log purge have passed since `fastetcd_cluster_id_replicated`
+became 1):
+
+- do not add a member older than 1.33 (#134);
+- a rolling **downgrade** below 1.33, one member at a time with clean
+  stops, works (`tests/rolling_upgrade.sh tree v1.32.3`: the entry was
+  proposed 2 s before the first member went back, 0 failures), because
+  an older member reads a log entry only to apply it or to send it. But
+  a 1.32 member that has to do either stops at the entry: one restarted
+  after a crash before the data file held the entry (within ~100 ms of
+  it), or one that leads while a member behind still lacks it. After the
+  purge, a downgrade carries no such risk.
 
 ## Disk space
 

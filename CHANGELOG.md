@@ -26,9 +26,13 @@
   gets a random 63-bit id instead of `1` (#38).
 
 ### Upgrade notes
-- The id is proposed only once every member runs 1.33+. After that, do
-  not add a member older than 1.33 while the log may still hold the
-  entry (#134).
+- The id is proposed only once every member runs 1.33+, by the leader,
+  within seconds. Until a snapshot and log purge have passed since then:
+  do not add a member older than 1.33 (#134), and a downgrade below 1.33
+  is safe only with clean stops and every member caught up (a 1.32
+  member stops at the entry if it must apply it after a crash or send it
+  to a member behind; 03-deploy § Cluster id). Tested:
+  `tests/rolling_upgrade.sh v1.32.3` and `tree v1.32.3`, 0 failures.
 
 ## [v1.32.3] — 2026-10-14
 
