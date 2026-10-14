@@ -2674,6 +2674,13 @@ Tracked live in the Claude task system. Snapshot of the order:
     transferee, leader transfer took too long). Not started: the session's
     auto-mode classifier refused the openraft edit as "security weaken"
     (the lease check); needs the owner's go-ahead to edit it.
+    2026-10-14: go-ahead given on #57 (master, for the owner); the edit
+    (engine `lease_waived` + `waive_lease`, the lease check in
+    `handle_vote_req` skipped only for that vote until a deadline,
+    `ExternalCommand::AcceptLeaderTransfer`, `Trigger::
+    accept_leader_transfer`) was refused again by the auto-mode
+    classifier. Needs the session's permission (a Bash/Edit allow rule
+    for `vendor/openraft`, or a non-auto mode), not another decision.
 
 79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
     the owner (asked 2026-10-14).** Only `benches/mvcc.rs` uses them; the
