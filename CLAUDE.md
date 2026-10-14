@@ -2571,3 +2571,34 @@ Tracked live in the Claude task system. Snapshot of the order:
       databendlabs/openraft#2163 (upstream's tests crate passes on it as
       on its base); close #97. When it ships in an openraft release,
       drop `vendor/openraft` (FASTETCD.md § Dropping it).
+
+77. **A Range does not wait on the write path (#145, P2).** One /readyz
+    took 57 ms (p50 0) on pvetest1 during an install (stormd's budget:
+    p99 50 ms). Cause: every `MvccStore::range_with_revision` (readyz's
+    serializable and linearizable reads, every client GET/LIST, the
+    leader's Txn compare precheck) takes the `write_state` mutex, which
+    an apply holds for its whole run (up to 256 writes, the engine
+    commit, a write-behind back-pressure flush into redb) and compaction
+    for its walk of every key. The read barrier is not it (a sole voter's
+    read index is its term's first index). Plan:
+    - Readers stop taking `write_state`. A commit, after its engine
+      commit, publishes under the index's write guard: the index, the
+      current revision, and a published-commit count; an engine-commit
+      count is bumped just before. A reader reads the engine count, takes
+      an engine snapshot, then the index read guard, and uses them only
+      if published <= engine count read first (every published commit is
+      in its snapshot); else retries, and after a few tries takes the
+      lock as today. A snapshot newer than the index is fine: commits
+      only add records, except compaction, which publishes its compact
+      revision before deleting anything.
+    - Wholesale replaces (snapshot install, reload, bulk load) hold a
+      `replace` lock readers share while building their view.
+    - `current_revision()` / `compact_revision()` read the published
+      values; the Txn precheck and watch history use the same view.
+    Work items:
+    - [ ] store: read view, publish, compaction order, replace lock.
+    - [ ] Tests: a Range during a slow commit (engine that stalls commit)
+      returns at once; consistency under concurrent writes + compaction
+      (the #82/#50 tests still pass); readyz under a stalled commit.
+    - [ ] Docs (00, 03 health), changelog; release; close #145, saying
+      the budget need not move.
