@@ -2258,6 +2258,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     (redb page cache filling? redb reports no cache size); leases renewed
     in time (longest 9 s of 15), no holder change. Left: a longer run on
     an X9 blade with fastetcd >= 1.24, to see the floor level off.
+    2026-10-14 04:35Z: no X9 blade can run it yet (blades off until
+    ~11:00Z; 12.21 passed on server1 but fails on the Dell, stormcos#561,
+    so X9 stays on 11.88). Queued after stormcos#561; start at power-on if
+    server1 is still on 12.21 (lease it; blade_rss.py 8+ h + a
+    blade_getlatency.py round every 30 min).
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
