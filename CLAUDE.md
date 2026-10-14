@@ -2638,3 +2638,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     (3) leave it until 0.10. Downgrade: fastetcd has no cluster version
     (per-feature version gates instead): (a) leave Unimplemented, (b)
     design one. Recommended: MoveLeader (1), Downgrade (a).
+
+79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
+    the owner (asked 2026-10-14).** Only `benches/mvcc.rs` uses them; the
+    server depends on redb's presync, corruption handling and defragment,
+    and its raft log is its own WAL (#85). Asked: (1) drop them and
+    `tokio-uring` (recommended), (2) keep as library-only, (3) make them
+    selectable (`--storage-engine`, each engine brought up to the server's
+    needs).
