@@ -2658,6 +2658,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     `tokio-uring` (recommended), (2) keep as library-only, (3) make them
     selectable (`--storage-engine`, each engine brought up to the server's
     needs).
+    Decided (master, for the owner, 2026-10-14): (1). Work: delete
+    `wal_engine.rs`, `iouring_engine.rs`, features `wal-engine`/`iouring`,
+    `tokio-uring`, their bench cases and docs mentions; lock updated;
+    release 1.32.2 (PATCH).
 
 80. **A lone write after idle (#102, P3) — done (test + docs; no release).**
     `fastetcd-bench --mode idle-put`, `tests/idle_write.sh`: one member,
