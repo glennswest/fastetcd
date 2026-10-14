@@ -550,8 +550,11 @@ fn bincode_io(e: bincode::Error) -> std::io::Error {
     }
 }
 
-/// Records read from the engine per call while writing a snapshot.
-const BODY_CHUNK: usize = 4096;
+/// Records read from the engine per call while writing a snapshot. A
+/// count, not bytes (the engine's range takes a count): 128 x the usual
+/// few KiB of a Kubernetes object is well under a MiB, and even 1.5 MiB
+/// objects (the apiserver's cap) stay under 200 MiB.
+const BODY_CHUNK: usize = 128;
 
 /// What a snapshot is written from: one engine snapshot (every table
 /// read from it, so they agree), the applied log id and membership taken
