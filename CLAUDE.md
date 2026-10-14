@@ -2653,3 +2653,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     fdatasync, idle or not; the after-idle penalty is the device's fsync
     (v1.12.0 lone 16.1 vs 6.2 ms, fsync 15.1 vs 5.7 ms); fastetcd's cold
     path ~0.8 ms on tmpfs, no timer. `docs/benchmarks/idle-write.md`.
+
+81. **redb two-phase commit on a real disk (#67, P3) — done (docs; no
+    release).** `two_phase_commit_cost` on a build VM disk, 3 rounds: p50
+    10–10.7 → 16.4–20.3 ms per durable commit (~2x); tmpfs +3–5%. Since
+    #85 it would cost ~one fsync per checkpoint, not per write. 05-backup.

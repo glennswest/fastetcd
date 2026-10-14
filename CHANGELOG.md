@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-14
+- **docs:** redb two-phase commit measured on a real disk (#67): `two_phase_commit_cost` on a build VM's disk, three interleaved rounds, p50 10.0–10.7 → 16.4–20.3 ms per durable commit, 87–104 → 47–56 commits/s (tmpfs +3–5%). Since #85 it would cost about one fsync per checkpoint, not per write. Recorded in `docs/05-backup-and-recovery.md` next to the #37 decision, which stands (it rests on redb's repair behaviour).
 - **test:** `fastetcd-bench --mode idle-put` and `tests/idle_write.sh [baseline]`: a lone write after idle vs back to back, one member, disk and tmpfs, with the WAL's fsyncs and mean fsync per run (#102). `docs/benchmarks/idle-write.md`: every write is one WAL fdatasync, idle or not; the lone-write penalty is the device's slower fsync after a quiet spell (v1.12.0: lone mean 16.1 vs 6.2 ms, fsync 15.1 vs 5.7 ms; v1.32.1: 11.7 vs 9.3 ms, fsync 10.7 vs 8.8); on tmpfs a lone put costs ~0.8 ms more, no timer.
 - **chore:** Deleted branch `wip/2026-09-29-paused-metrics` on GitHub and locally (#70): its tip 800a7c9 was merged into v1.7.0 and it held nothing `main` lacks.
 - **test:** #79 closed: a v1.9.0 member's exit during `read_latency.sh` (2026-10-01, log lost) never recurred; `tests/read_latency.sh v1.9.0` 3x and `MEMBERS=3` on 1.32.1 found every member alive, no panic, no OOM.

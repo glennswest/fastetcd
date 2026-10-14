@@ -174,7 +174,27 @@ fsync'd writes, a torn last commit becomes an unopenable file, and a
 full restore from backup loses up to the backup interval. Without it,
 the same tear is rolled back to the previous commit, losing only that
 write. Its protection is against a deliberate attacker who controls
-flush order and crashes, and it costs a second fsync on every write.
-What was measured (on tmpfs its bookkeeping is ~4%; on a contended disk
-the fsync noise hid it) is in the changelog for v1.4.0. The decision
-rests on the repair behaviour, not the cost.
+flush order and crashes, and it costs a second fsync on every durable
+redb commit. The decision rests on the repair behaviour, not the cost.
+
+**What it costs (#67).** `crates/storage/tests/two_phase_commit_cost.rs`
+(500 one-key commits, off and on, interleaved; `--ignored`), sc-build on a
+build VM, 2026-10-14: a QEMU disk on pve's LVM-thin pool (btrfs), three
+rounds, off/on pairs alternating:
+
+| | off | on |
+|---|---|---|
+| p50 per commit | 10.0–10.7 ms | 16.4–20.3 ms |
+| p99 per commit | 22–29 ms (one pair 155 ms) | 37–60 ms |
+| commits/s | 87–104 | 47–56 |
+| tmpfs (bookkeeping only) | 9.4–9.7 µs | 9.9 µs (+3–5%) |
+
+With a real fsync it roughly doubles a durable commit (6 pairs of 6).
+Since #85 a client write's fsync is the raft WAL's, and redb commits
+durably only at a checkpoint (at most every 100 ms, paced to 4x its own
+duration), so 2PC would no longer be paid per write: it would lengthen
+every checkpoint by about one fsync, and with the pacing, space them
+further apart. On a spindle, where checkpoints already compete with the
+WAL for the disk (#135), that is not free either. If a redb release
+makes repair fall back past a torn two-phase commit, this is the number
+to weigh.

@@ -8,9 +8,11 @@
 //! cargo test --release -p fastetcd-storage --test two_phase_commit_cost -- --ignored --nocapture
 //! ```
 //!
-//! Each commit is one small key, the shape of a single etcd put, and
-//! redb fsyncs every commit either way; two-phase commit adds a second
-//! fsync to flip the commit slot.
+//! Each commit is one small key, and redb fsyncs every commit either
+//! way; two-phase commit adds a second fsync to flip the commit slot.
+//! Since #85 fastetcd commits redb durably only at checkpoints, not per
+//! write. Results (a build VM's disk: ~2x per commit; tmpfs ~4%) are in
+//! `docs/05-backup-and-recovery.md` (#67).
 //!
 //! The file goes in cargo's per-target temp dir (on the build disk), or
 //! `$TWO_PC_DIR` if set, never the system temp dir: `/tmp` is often a
