@@ -570,9 +570,9 @@ mod tests {
     }
 
     /// fastetcd#145: a flush held the layers' write lock through the
-    /// engine's commit, so every snapshot (every read) waited for it.
-    /// A snapshot taken during a held flush answers at once and reads
-    /// every write, as do snapshots after it.
+    /// engine's commit, so every snapshot (every read) and every commit
+    /// waited for it. During a held flush both answer at once, and the
+    /// snapshot reads every write, as do snapshots after it.
     #[tokio::test]
     async fn a_snapshot_does_not_wait_for_a_flush() {
         let dir = tempfile::tempdir().unwrap();
@@ -597,11 +597,15 @@ mod tests {
             tokio::spawn(async move { s.flush().await.unwrap() })
         };
         held.await;
-        // A write while the flush's engine commit is held.
+        // A write while the flush's engine commit is held: it does not
+        // wait for it either.
+        let prompt = Duration::from_millis(500);
         let mut b = put("a", "2");
         b.delete("t", b"b");
-        s.commit(b, WriteOptions { sync: false }).await.unwrap();
-        let prompt = Duration::from_millis(500);
+        tokio::time::timeout(prompt, s.commit(b, WriteOptions { sync: false }))
+            .await
+            .expect("a commit waited for the flush")
+            .unwrap();
         let snap = tokio::time::timeout(prompt, s.snapshot()).await.expect("a snapshot waited for the flush").unwrap();
         assert_eq!(snap.get("t", b"a").await.unwrap().as_deref(), Some(&b"2"[..]));
         assert_eq!(snap.get("t", b"b").await.unwrap(), None);
