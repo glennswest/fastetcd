@@ -109,6 +109,10 @@ n1 snapshots: $(ls "$dir/n1/snapshots" 2>/dev/null | grep -c '\.snap$' || true)"
     fi
     sleep 2
     echo "   peak RSS: n1 (build + send) $(hwm "$N1") MiB (base $base), n2 (install) $(hwm "$n2") MiB"
+    echo "   after: n2 retained snapshots $(ls "$dir/n2/snapshots" 2>/dev/null | grep -c '\.snap$' || true); \
+n1 built on demand: $(grep -c 'retained snapshot is gone' "$dir/log1" || true); \
+snapshot not kept (n2): $(grep -c 'could not be kept' "$dir/log2" || true); \
+n2 installed: $(grep -ciE 'install(ed|ing)? snapshot' "$dir/log2" || true)"
     kill "$N1" "$n2"; wait "$N1" "$n2" 2>/dev/null || true
 }
 
