@@ -2811,6 +2811,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     Asked again (2026-10-14): (1) serve the client port ourselves with
     `serve_connection_with_upgrades`, (2) upgrade tonic (+ axum 0.8,
     prost), (3) defer (recommended).
+    Decided (3), defer: documented (03, README); closed. A browser client
+    needing live watches gets its own issue (serving with upgrades or a
+    tonic upgrade), the reverted code restored on top.
 
 87. **Spawned-binary tests lose their ports (#63, P3) — done (tests).**
     `crates/server/tests/spawned`: random 127.x.y.z address + new ports

@@ -172,6 +172,8 @@ Differences from etcd:
 
 - `--auto-compaction-retention` counts revisions; etcd's default mode
   counts hours (#21).
+- The v3 JSON gateway serves no WebSocket upgrades (#66, deferred): its
+  watch and keep-alive streams need a client that streams a request body.
 - `MoveLeader` and `Downgrade` answer `Unimplemented` (#57). Downgrade
   stays so: fastetcd has no cluster version; downgrade a member at a time
   within 03-deploy's per-version rules. Raising an

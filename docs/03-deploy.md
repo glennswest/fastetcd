@@ -890,7 +890,14 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
   line, `{"result":{…}}` or `{"error":{…}}`. For `watch` and `keepalive`
   the body is a sequence of JSON requests. A watch keeps streaming after
   the body ends, until the client disconnects; a keepalive stream ends
-  with its requests. WebSocket upgrades are not supported.
+  with its requests. **WebSocket upgrades are not served** (etcd's
+  wsproxy, #66; decided: deferred): the client port is served by tonic
+  0.12's server, which completes no HTTP upgrade. A browser, which cannot
+  stream a request body, therefore cannot watch through the gateway; a
+  console can poll `range` or use gRPC-Web from a proxy. The WebSocket
+  code (same-origin by default, `--gateway-ws-allowed-origins`) is in
+  commits 6497472, 3e7fba7, 8cf93da, to restore once the port can serve
+  upgrades.
 - **Auth:** the same as gRPC. Send the token from `/v3/auth/authenticate`
   as the `Authorization` header (no `Bearer` prefix, as with etcd). Under
   `--client-cert-auth` a client certificate's CN names the user, as over

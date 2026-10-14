@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-14
+- **docs:** WebSocket upgrades of the v3 gateway are deferred (#66, decided): 03-deploy § v3 JSON gateway and the README say why (tonic 0.12's server completes no HTTP upgrade on the client port) and where the code is (6497472, 3e7fba7, 8cf93da).
 - **feat:** etcd's Lock and Election services (#64): `v3lockpb.Lock` (Lock, Unlock) and `v3electionpb.Election` (Campaign, Proclaim, Leader, Observe, Resign), vendored from etcd v3.6.11, on the client port behind the auth interceptor and at etcd's `/v3/lock/*` and `/v3/election/*` gateway routes. As etcd's servers, they run clientv3's `concurrency` Mutex and Election steps for the caller (`crates/server/src/concurrency.rs`, through `KvService`/`LeaseService` with the caller's identity): a 60 s session lease for lease 0, owner by first create revision (#154), waits on this member's applied events, a Lock or Campaign whose client goes away removes its key. Found doing it: a wait below revision 1 meant "no bound" (`max_create_revision` 0) and a first key waited on itself, since fastetcd's first write is revision 1 (etcd's is 2).
 
 ### 2026-10-14
