@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-14
+- **chore:** WebSocket upgrades of the v3 gateway (#66) built and reverted: tonic 0.12.3's server serves the client port's connections without HTTP upgrade support, so an upgrade got 101 and then a reset. Not served; how to proceed asked on #66.
+
 ## [v1.33.1] — 2026-10-14
 
 ### Fixed

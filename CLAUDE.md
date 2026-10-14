@@ -2801,6 +2801,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     read watches cross-origin), (2) same-origin by default +
     `--gateway-ws-allowed-origins`, no cookie token (recommended), (3) not
     yet (no client needs it).
+    Decided (2). Built (6497472, 3e7fba7, 8cf93da) and reverted (8eca892):
+    tonic 0.12.3's server serves connections without upgrades
+    (`serve_connection`, mod.rs:694), so a 101 is followed by a reset.
+    Asked again (2026-10-14): (1) serve the client port ourselves with
+    `serve_connection_with_upgrades`, (2) upgrade tonic (+ axum 0.8,
+    prost), (3) defer (recommended).
 
 87. **Spawned-binary tests lose their ports (#63, P3) — done (tests).**
     `crates/server/tests/spawned`: random 127.x.y.z address + new ports
