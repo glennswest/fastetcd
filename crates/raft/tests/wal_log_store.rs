@@ -625,7 +625,13 @@ async fn a_stuck_fsync_or_checkpoint_says_which_it_is() {
     let dir = tempfile::tempdir().unwrap();
     let (raft, log, sm) = slow_node(dir.path(), Duration::ZERO, Duration::from_millis(2500)).await;
     let stats = log.stats();
-    assert!(stats.stalls(Duration::ZERO).is_empty(), "nothing in flight at rest");
+    // The leader's first entry may still be syncing: since #97 a leader
+    // does not wait for its own fsync, so `wait_leader` can return first.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !stats.stalls(Duration::ZERO).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "still in flight at rest: {:?}", stats.stalls(Duration::ZERO));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // The WAL's fdatasync, held 2.5 s.
     log.set_sync_delay(Duration::from_millis(2500));
