@@ -4,6 +4,15 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-17
+- **docs:** Deploy description matches stormcos: fastetcd runs as a kubelet
+  static pod with mutual-TLS peers and `/livez`/`/readyz` probes on :2381
+  (not a stormd-supervised plaintext-peer process with a TCP probe);
+  `component build fastetcd` exists; `FASTETCD_DATA_DIR` awaits
+  stormcluster#21; started by role; `fastetcd-backup` volume (03-deploy,
+  deck, CLAUDE.md; #158, #140). Deck's open-issue list refreshed; CLAUDE.md
+  notes on Lock/Election and the metrics listener corrected.
+
 ## [v1.34.0] — 2026-10-14
 
 ### Added

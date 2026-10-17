@@ -795,12 +795,14 @@ Version locations (keep in sync):
   `.proto` files; pbjson serde for the v3 JSON gateway.
 - **Client port**: gRPC + `/health` `/livez` `/readyz` + `/v3/...`
   gateway (tonic routes → axum). **Peer port**: `fastetcd.raft.RaftPeer`.
-  **Metrics port**: hyper, `/metrics`.
+  **Metrics port**: axum, `/metrics` + the health routes (plain HTTP).
 - **Async runtime**: `tokio`.
 - **Logging/tracing**: `tracing` + `tracing-subscriber`, `RUST_LOG`.
 - **Ships as**: a special golden, `stormcentral component stage
   fastetcd` (stormcos `build-goldens.sh` in stage mode, at main's tip;
-  `docs/03-deploy.md`); no stormcentral component entry.
+  `docs/03-deploy.md`); the registry lists `fastetcd` (kind special), and
+  `component build fastetcd` starts the same stage. Runs on the node as
+  a kubelet static pod `etcd` (stormcos#559), mTLS on client and peer ports.
 - **Docs**: `docs/01-configuration.md` is the flag reference, generated
   by hand from the binaries' `--help`. Keep it in step when adding a
   flag.
@@ -1306,9 +1308,8 @@ Tracked live in the Claude task system. Snapshot of the order:
       etcd's JSON byte for byte; `--enable-grpc-gateway=false` and
       `ETCD_ENABLE_GRPC_GATEWAY=false` turn it off. With the interceptor
       bypassed, the auth test fails (a tokenless range gets 200).
-    - Not served: WebSocket upgrades of the streams (etcd's wsproxy), and
-      the v3lock / v3election gateways (fastetcd has no Lock/Election
-      services).
+    - Not served: WebSocket upgrades of the streams (etcd's wsproxy;
+      deferred, #66). The v3lock / v3election routes came with #64.
 
 32. **Deploy docs say how fastetcd really ships; no GHCR (#24) — done, shipped in v1.9.0.**
     GHCR is deliberately unused on this platform, yet `docs/03-deploy.md`,
@@ -1475,6 +1476,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     sizing model's raft-log term assumes 2 KiB entries (04, filed #80,
     P2); README architecture shows the read index and proposer; #24/#26
     shipped in v1.9.0; #21's decision is #68; layout.
+
+88. **Documentation refreshed from the code, since 2026-10-09 — done (docs).**
+    Re-checked README, docs/ and this file against the commits since
+    2026-10-09 (#145, #97, #55, #62, #38, #154, #64, #66, #57 docs).
+    Those pass already said what the code does. Fixed: the deploy text
+    (03, deck, pillar): a kubelet static pod with mTLS peers and :2381
+    probes, `component build fastetcd` in the registry, `FASTETCD_DATA_DIR`
+    awaiting stormcluster#21, role-based start, the `fastetcd-backup`
+    volume (#158, #140); the deck's open-issue table; stale "no Lock/
+    Election" and "hyper" notes. Nothing promised that the code lacks.
 
 ## Constraints & rules
 

@@ -181,13 +181,14 @@ ahead, #94).
   x86_64-unknown-linux-musl` (static binaries, so `Cargo.lock` must be
   current).
 - **Golden `fastetcd`** (64M, stormdbase): `fastetcd`, `fastetcd-ctl`,
-  `fastetcd-migrate` in `/usr/bin`. PID 1 is **stormd** (API :9081): it
-  starts fastetcd on `0.0.0.0:2379/2380/2381` advertising `${NODE_IP}`,
-  restarts it on exit, TCP-probes :2379.
-- **Golden `fastetcd-data`** (1G blank) is `/data/fastetcd`.
-- **Starts**: stormpump's `30-kube` manifest, first, before the
-  apiserver (sno / storage / bastion profiles). A worker carries the
-  golden unstarted, so promoting it to a master is a container start.
+  `fastetcd-migrate` in `/usr/bin`. It runs as a **kubelet static pod**
+  `etcd` on `0.0.0.0:2379/2380/2381` advertising `${NODE_IP}`: client and
+  peer ports are mutual TLS; the kubelet probes `/livez` and `/readyz` on
+  :2381.
+- **Golden `fastetcd-data`** (1G blank) is `/data/fastetcd`;
+  **`fastetcd-backup`** (2G) is `/data/backup`.
+- **Starts**: stormpump's `30-kube`, first, before the apiserver, by role
+  (sno, master). A worker carries the golden unstarted.
 - **Updated** by a stormcos release that carries a new golden; the data
   directory converts itself in place on the new version's first start.
 - Elsewhere: build your own container image, Helm chart, rpm/deb,
@@ -201,10 +202,10 @@ ahead, #94).
 
 | | Issue |
 |---|---|
-| P1 | #94 write throughput capped on a slow disk · #36 test containers per the stormcos test standard |
-| P2 | #69 `/health` always healthy · #103 leadership lost under heavy load (fixed election timeouts) · #92 keepalive through Raft · #105 unknown-token error text breaks clientv3 re-auth · #84 #89 #101 verify on an X9 spinning disk |
+| P1 | #57 MoveLeader (Downgrade stays `Unimplemented`, decided) · #151 restart logs `Can not initialize` |
+| P2 | #155 idle RSS of a restarted member tracks its data file · #115 lease check at apply · #135 / #84 spinning-disk checks on a blade · #153 safety-backup pruning · #157 h2 / rustls advisories |
 
-Auth: no known authorization gap; tokens never expire (#46).
+Auth: no known authorization gap; tokens expire `--auth-token-ttl` after last use.
 `gh issue list` for everything.
 
 ---

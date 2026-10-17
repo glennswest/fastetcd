@@ -13,8 +13,9 @@ are the authority; as of stormcos 27add14 (2026-10-07):
 
 - **Built by** `stormcentral component stage fastetcd --url
   http://stormcentral.g8.lo`, the one way to make a fastetcd golden.
-  fastetcd has no stormcentral component entry (`component build
-  fastetcd` is refused: "no component fastetcd").
+  The registry has `fastetcd` (kind special; goldens `fastetcd`,
+  `fastetcd-backup`, `fastetcd-data`, `fastetcd-logs`), and `component
+  build fastetcd` starts the same stage.
 - **From the pushed commit.** The stage runs on a build VM of its own,
   fetches stormcos and fastetcd from GitHub at `main`'s tip at that
   moment (the stage takes no commit argument) and runs the script with
@@ -27,30 +28,35 @@ are the authority; as of stormcos 27add14 (2026-10-07):
   x86_64-unknown-linux-musl`, producing `fastetcd`, `fastetcd-ctl` and
   `fastetcd-migrate` (all three required).
 - **Golden `fastetcd`** (64M, a stormdbase golden): the three binaries in
-  `/usr/bin`; PID 1 is stormd (API on 9081), which runs and restarts
-  fastetcd as
+  `/usr/bin`. It runs as a **kubelet static pod** named `etcd`
+  (`deploy/static-pods/etcd.yaml`, stormcos#559): the golden's `30-kube`
+  task `fastetcd` only places the manifest, and `gen-static-pod.py` makes
+  the container command the golden's own stormd unit line:
   `fastetcd --data-dir /data/fastetcd --listen-client-urls https://0.0.0.0:2379
-  --listen-peer-urls http://0.0.0.0:2380
+  --listen-peer-urls https://0.0.0.0:2380
   --advertise-client-urls https://${NODE_IP}:2379
-  --initial-advertise-peer-urls http://${NODE_IP}:2380
+  --initial-advertise-peer-urls https://${NODE_IP}:2380
   --cert-file /etc/stormcert/fastetcd.crt --key-file /etc/stormcert/fastetcd.key
   --trusted-ca-file /etc/stormcert/ca.crt --client-cert-auth
+  --peer-cert-file /etc/stormcert/etcd-peer.crt
+  --peer-key-file /etc/stormcert/etcd-peer.key
+  --peer-trusted-ca-file /etc/stormcert/ca.crt --peer-client-cert-auth
   --listen-metrics-url 0.0.0.0:2381`.
-  The client port is mutual TLS (a pair from the node CA, read-only at
-  `/etc/stormcert`); the peer port is plaintext (one member per node);
-  `/metrics` is readable off the node on 2381. The data dir may come from
-  `FASTETCD_DATA_DIR` (stormcluster sets it for a node that joins or is
-  promoted). Liveness is a TCP probe on 2379 (first after 5 s, restart
-  after 3 misses): an HTTP probe cannot present a client certificate.
-  From 1.30 the metrics port also answers `/livez` and `/readyz` in plain
-  HTTP (#133), so stormcos can probe `http://127.0.0.1:2381/livez`
-  instead (stormcos#192).
+  Both the client port and the peer port are mutual TLS (pairs from the
+  node CA, read-only at `/etc/stormcert`; #23), and `/metrics` is readable
+  off the node on 2381. The data dir may come from `FASTETCD_DATA_DIR`
+  once stormcluster sets it for a node that joins or is promoted
+  (stormcluster#21, open; today only the stormcos half exists). The
+  kubelet probes the plain metrics port, since a probe cannot present a
+  client certificate (#133): startup and liveness `/livez`, readiness
+  `/readyz`, all `127.0.0.1:2381`. stormd no longer probes it
+  (stormcos#523).
 - **Volumes:** `/data/fastetcd` from the blank golden `fastetcd-data`
   (1G, headroom on top of fastetcd's own bounded growth, see
   [Disk space](#disk-space)); `/data/backup` from `fastetcd-backup` (2G),
   where `FASTETCD_BACKUP_DIR` points the periodic backups (#37); logs.
-- **Started** by stormpump's `30-kube`, first, before the apiserver, on
-  nodes whose role is sno or master.
+- **Started** by stormpump's `30-kube`, first, before the apiserver, by
+  role (`start fastetcd roles=sno,master`, stormcos#282).
 - **Reaches nodes** in a stormcos release composed by the master; the
   data directory converts itself in place on a new version's first start.
 
