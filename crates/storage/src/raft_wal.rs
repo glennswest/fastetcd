@@ -243,13 +243,14 @@ fn prepare_spare(dir: &Path, bytes: u64) -> io::Result<File> {
 }
 
 /// Make the spare segment `seq`. Falls back to a preallocated new file
-/// if there is no spare (it failed: a full disk, most likely).
+/// if there is no spare (it failed: a full disk, most likely). True with
+/// the file when it is the zero-filled spare.
 fn install_spare(
     dir: &Path,
     seq: u64,
     bytes: u64,
     spare: Option<std::thread::JoinHandle<io::Result<File>>>,
-) -> io::Result<File> {
+) -> io::Result<(File, bool)> {
     let ready = spare.map(|h| {
         h.join()
             .unwrap_or_else(|_| Err(io::Error::other("spare segment thread panicked")))
@@ -258,14 +259,14 @@ fn install_spare(
         Some(Ok(file)) => {
             std::fs::rename(dir.join(SPARE), segment_path(dir, seq))?;
             sync_dir(dir)?;
-            Ok(file)
+            Ok((file, true))
         }
         other => {
             if let Some(Err(e)) = other {
                 tracing::warn!(error = %e, "no zero-filled spare WAL segment; preallocating one");
             }
             let _ = std::fs::remove_file(dir.join(SPARE));
-            create_segment(dir, seq, bytes)
+            Ok((create_segment(dir, seq, bytes)?, false))
         }
     }
 }
@@ -372,6 +373,10 @@ pub struct Wal {
     reader: Arc<WalReader>,
     /// The next segment, being zero-filled in the background.
     spare: Option<std::thread::JoinHandle<io::Result<File>>>,
+    /// The last segment was only preallocated, not zero-filled: each
+    /// fdatasync of it is a filesystem journal commit (#85), so the log
+    /// moves to the spare as soon as that is ready (#164).
+    preallocated_only: bool,
 }
 
 impl Wal {
@@ -384,7 +389,11 @@ impl Wal {
         let mut replay = Replay::default();
         let _ = std::fs::remove_file(dir.join(SPARE));
         if seqs.is_empty() {
-            let file = install_spare(dir, 0, opts.segment_bytes, spawn_spare(dir, opts.segment_bytes))?;
+            // Segment 0 only preallocated: zero-filling it here would hold
+            // the first start for a write and an fsync of a whole segment,
+            // seconds on a slow disk (#164). The spare is filled meanwhile,
+            // and the first append after it is ready moves to it.
+            let file = create_segment(dir, 0, opts.segment_bytes)?;
             let wal = Wal {
                 dir: dir.to_path_buf(),
                 opts,
@@ -394,6 +403,7 @@ impl Wal {
                 sticky: BTreeMap::new(),
                 reader,
                 spare: spawn_spare(dir, opts.segment_bytes),
+                preallocated_only: true,
             };
             return Ok((wal, replay));
         }
@@ -481,6 +491,7 @@ impl Wal {
             sticky: replay.meta.clone(),
             reader,
             spare: spawn_spare(dir, opts.segment_bytes),
+            preallocated_only: false,
         };
         Ok((wal, replay))
     }
@@ -499,7 +510,9 @@ impl Wal {
     fn roll(&mut self) -> io::Result<()> {
         self.file.sync_data()?;
         let seq = self.segments.last().unwrap().seq + 1;
-        self.file = install_spare(&self.dir, seq, self.opts.segment_bytes, self.spare.take())?;
+        let (file, zero_filled) = install_spare(&self.dir, seq, self.opts.segment_bytes, self.spare.take())?;
+        self.file = file;
+        self.preallocated_only = !zero_filled;
         self.spare = spawn_spare(&self.dir, self.opts.segment_bytes);
         self.offset = 0;
         self.segments.push(Segment { seq, max_entry: None });
@@ -517,6 +530,12 @@ impl Wal {
     /// Append records (not synced: call [`Wal::sync`]). Returns where
     /// each one is.
     pub fn append(&mut self, records: &[(u8, u64, &[u8])]) -> io::Result<Vec<Loc>> {
+        if self.preallocated_only
+            && self.offset > 0
+            && self.spare.as_ref().is_some_and(|h| h.is_finished())
+        {
+            self.roll()?;
+        }
         let mut locs = Vec::with_capacity(records.len());
         let mut buf: Vec<u8> = Vec::new();
         for &(kind, index, payload) in records {
@@ -680,7 +699,7 @@ mod tests {
     #[test]
     fn torn_tail_is_cut_and_never_resurrected() {
         let dir = tempfile::tempdir().unwrap();
-        let tear_at;
+        let (tear_at, torn_segment);
         {
             let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20 }).unwrap();
             wal.append(&[(KIND_ENTRY, 0, b"zero")]).unwrap();
@@ -689,10 +708,12 @@ mod tests {
                 .unwrap();
             wal.sync().unwrap();
             tear_at = locs[0].offset + HEADER_LEN + 3;
+            // Segment 0, or the spare it moved to once that was ready (#164).
+            torn_segment = locs[0].segment;
         }
         // Damage record 1's payload: a torn write. Record 2 is intact
         // behind it, and must not come back.
-        let path = segment_path(dir.path(), 0);
+        let path = segment_path(dir.path(), torn_segment);
         let f = OpenOptions::new().write(true).open(&path).unwrap();
         f.write_all_at(b"XX", tear_at).unwrap();
         drop(f);
@@ -709,6 +730,56 @@ mod tests {
         assert!(!r.torn_tail);
         let got = entries(&r, &wal.reader());
         assert_eq!(got, vec![(0, b"zero".to_vec()), (1, b"n".to_vec())]);
+    }
+
+    /// An empty log opens without writing a segment's worth of zeros and
+    /// syncing them first (#164): segment 0 is only preallocated.
+    #[test]
+    fn an_empty_log_opens_without_zero_filling_a_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        // 512 MiB: writing and syncing that many zeros takes well over a
+        // second on any disk; preallocating it, milliseconds.
+        let t = std::time::Instant::now();
+        let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 512 << 20 }).unwrap();
+        let took = t.elapsed();
+        assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
+        assert!(took < std::time::Duration::from_millis(400), "opening an empty log took {took:?}");
+        wal.append(&[(KIND_ENTRY, 1, b"first")]).unwrap();
+        wal.sync().unwrap();
+        assert_eq!(wal.segment_count(), 1);
+    }
+
+    /// Once the zero-filled spare is ready, the log moves off the
+    /// preallocated segment 0 at the next append, and both replay.
+    #[test]
+    fn the_log_moves_to_the_zero_filled_spare_once_it_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = WalOptions { segment_bytes: 1 << 20 };
+        {
+            let (mut wal, _) = Wal::open(dir.path(), o).unwrap();
+            wal.append(&[(KIND_VOTE, 0, b"vote"), (KIND_ENTRY, 1, b"one")]).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !wal.spare.as_ref().is_some_and(|h| h.is_finished()) {
+                assert!(std::time::Instant::now() < deadline, "the spare was never ready");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let locs = wal.append(&[(KIND_ENTRY, 2, b"two")]).unwrap();
+            wal.sync().unwrap();
+            assert_eq!(locs[0].segment, 1, "the append after the spare was ready stayed in segment 0");
+            assert!(!wal.preallocated_only, "segment 1 is the zero-filled spare");
+            assert_eq!(wal.segment_count(), 2);
+            // From now on segments roll only when full.
+            wal.append(&[(KIND_ENTRY, 3, b"three")]).unwrap();
+            assert_eq!(wal.segment_count(), 2);
+            wal.sync().unwrap();
+        }
+        let (wal, r) = Wal::open(dir.path(), o).unwrap();
+        assert!(!r.torn_tail);
+        assert_eq!(
+            entries(&r, &wal.reader()),
+            vec![(1, b"one".to_vec()), (2, b"two".to_vec()), (3, b"three".to_vec())]
+        );
+        assert_eq!(r.meta.get(&KIND_VOTE).unwrap().1, b"vote", "the vote carried into segment 1");
     }
 
     #[test]
