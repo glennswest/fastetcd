@@ -2961,3 +2961,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: workspace at 536b84c 0 failures; raft_wal 5/5 at f2bd72b;
       with the old open put back (branch, deleted) the content check fails
       ("opening an empty log wrote segment 0") and the roll test fails.
+
+93. **Startup says where its time goes (#165).** No line timed startup, so
+    the boot logs could not explain 4–5 s probe gaps (stormcos 12.39,
+    12.41-flowsdn). Plan:
+    - `startup.rs`: a timer; each phase logs `startup phase` (target
+      `fastetcd::startup`) with `phase`, `took_ms`, `since_start_ms`; a
+      summary line once both ports listen, and `raft_ready` (a leader is
+      known, which `/readyz` waits for) from a task when it happens.
+    - Phases: `data_file_open` (redb open, and its repair: `repaired`,
+      #161), `index_load` (MvccStore: RAM index + cluster id),
+      `state_machine_open` (retained snapshots), `upgrade_backup`,
+      `wal_open` (replay, or the move from redb), `format_recovery`,
+      `raft_start` (Raft::new + initialize), `listening` (both ports
+      bound: the listeners are now bound before their servers are
+      spawned, `TcpIncoming`, same nodelay/keepalive as `serve`).
+    - Test: the real binary's log has every phase in order, the summary
+      and `raft_ready`.
+    Work items:
+    - [ ] startup.rs, main wiring; test.
+    - [ ] Docs (03), changelog; release; close #165.
