@@ -736,14 +736,20 @@ mod tests {
     /// syncing them first (#164): segment 0 is only preallocated.
     #[test]
     fn an_empty_log_opens_without_zero_filling_a_segment() {
-        let dir = tempfile::tempdir().unwrap();
-        // 512 MiB: writing and syncing that many zeros takes well over a
-        // second on any disk; preallocating it, milliseconds.
+        const SEGMENT: u64 = 256 << 20;
+        // What zero-filling one segment costs on this disk, beside it.
+        let other = tempfile::tempdir().unwrap();
         let t = std::time::Instant::now();
-        let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 512 << 20 }).unwrap();
+        drop(prepare_spare(other.path(), SEGMENT).unwrap());
+        let fill = t.elapsed();
+        drop(other);
+
+        let dir = tempfile::tempdir().unwrap();
+        let t = std::time::Instant::now();
+        let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: SEGMENT }).unwrap();
         let took = t.elapsed();
-        eprintln!("opening an empty log with 512 MiB segments took {took:?}");
-        assert!(took < std::time::Duration::from_millis(400), "opening an empty log took {took:?}");
+        eprintln!("an empty log with 256 MiB segments opened in {took:?}; zero-filling one took {fill:?}");
+        assert!(took * 4 < fill, "opening an empty log took {took:?}, zero-filling a segment {fill:?}");
         assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
         wal.append(&[(KIND_ENTRY, 1, b"first")]).unwrap();
         wal.sync().unwrap();
