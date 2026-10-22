@@ -134,7 +134,9 @@ struct Args {
     /// Take a safety backup of the data directory before starting a
     /// newer fastetcd version against it (and before any in-place
     /// format conversion). On by default; disable if you manage your
-    /// own backups.
+    /// own backups. Skipped, with a warning, when the copy would take
+    /// the backup directory's filesystem past
+    /// `--space-high-water-percent` (fastetcd#163).
     #[arg(
         long,
         env = "FASTETCD_UPGRADE_BACKUP",
