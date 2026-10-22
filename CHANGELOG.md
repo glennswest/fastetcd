@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **fix:** SIGTERM stops a member cleanly (#161). Only SIGINT was
+## [v1.34.1] — 2026-10-21
+
+### Fixed
+- SIGTERM stops a member cleanly (#161). Only SIGINT was
   handled, so every kubelet, systemd or podman stop killed the process:
   the write-behind layers were lost from RAM and redb's file left marked
   dirty, so every start walked the whole data file (redb's repair,

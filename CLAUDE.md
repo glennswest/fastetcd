@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.34.0`** — etcd's Lock and Election services (#64), gRPC and the
+**`1.34.1`** — SIGTERM stops cleanly (#161): raft stopped, applied state
+made durable, the data file closed, so a kubelet restart no longer
+repairs redb's file and replays the WAL at start.
+
+Previous: **`1.34.0`** — etcd's Lock and Election services (#64), gRPC and the
 `/v3/lock`, `/v3/election` gateway routes: clientv3's concurrency Mutex
 and Election run for the caller (`concurrency.rs`).
 
@@ -2845,7 +2849,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     apply_replay; metrics.rs's in-process server on a random loopback
     address.
 
-89. **SIGTERM stops cleanly (#161, P?).** Only SIGINT was handled, so a
+89. **SIGTERM stops cleanly (#161) — done, shipped in v1.34.1.** Only SIGINT was handled, so a
     kubelet stop (SIGTERM, then SIGKILL) killed the process with the
     write-behind layers in RAM and redb's file marked dirty: every start
     re-walked the data file (redb's full repair: seconds on an HDD) and
@@ -2863,5 +2867,8 @@ Tracked live in the Claude task system. Snapshot of the order:
       open (control); SIGTERM → exit 0, not repaired, every acknowledged
       revision in the data file (nothing to replay).
     Work items:
-    - [ ] main signal + shutdown order; engine repair report; test.
-    - [ ] Docs (03 deploy), changelog; release; close #161.
+    - [x] main signal + shutdown order; engine repair report; test.
+    - [x] Docs (03 deploy), changelog; release 1.34.1; close #161.
+    - Verified: sc-build of cfec8b6, workspace 448 pass 0 fail;
+      `clean_shutdown.rs` passes (3.2 s), its SIGKILL control shows the
+      repair line. Clippy on the server crate fails on older lints (#152).
