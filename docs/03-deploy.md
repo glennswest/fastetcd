@@ -785,13 +785,30 @@ seconds. etcd behaves the same way and has the same remedy:
 - Set `--election-timeout` above the longest stall, on every member
   (`ETCD_ELECTION_TIMEOUT` works too). A follower then waits longer before
   it notices a leader that is really gone: that is the trade.
-- Leave `--heartbeat-interval` alone unless the followers' fsync is fast.
-  In fastetcd it is also how long one AppendEntries may take to be sent and
-  fsynced by a follower (#94); below that, replication times out and
-  retries forever.
+- `--replication-timeout` (since 1.35.2, #167; default: the election
+  timeout) is how long the leader waits for one AppendEntries to be sent,
+  appended and fsynced by a follower before sending it again. A follower
+  whose fsync takes longer than this never catches up while writes go
+  on: each request with new entries times out, is resent, and the
+  follower fsyncs again. Before 1.35.2 this was the heartbeat interval
+  (250 ms), so a member on a slow disk could fall behind for good. A long
+  value costs little: a follower in the middle of its fsync could not
+  answer sooner anyway, and the leader keeps sending heartbeats.
 
-The election timeout must be at least twice the heartbeat interval and at
-most 50 s.
+**On spinning disks** (the X9 blades: follower fsyncs of 0.3–0.8 s, a
+longest of 85 s, `docs/benchmarks/blade-server3.md`), set on every
+member:
+
+```
+--heartbeat-interval 250        # unchanged
+--election-timeout 10000        # above the long stalls: no election for a 6 s one
+--replication-timeout 10000     # (the default: the election timeout) above any ordinary fsync
+```
+
+and read `fastetcd_wal_fsync_max_seconds` and the `slow raft WAL fdatasync`
+warnings after a day to see whether the stalls fit. The election
+timeout must be at least twice the heartbeat interval and at most 50 s;
+the replication timeout at least the heartbeat interval.
 
 ### Cluster id
 
