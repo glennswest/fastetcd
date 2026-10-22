@@ -2988,3 +2988,24 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 6aece3b: `startup_phases.rs` (new store and
       restart), `tests/ctl_tls.sh` all checks (TLS on the self-bound
       listener), workspace 0 failures, no clippy finding in startup.rs.
+
+94. **The live-bytes walk stays off tokio workers and is paced by its
+    cost (#166).** `RedbEngine::usage` called redb's `begin_write` on the
+    async thread (a tokio worker blocked while a checkpoint held redb's
+    writer), then `WriteTransaction::stats()` walked every tree with the
+    writer held (checkpoints and back-pressure flushes wait it out), every
+    300 s whatever it cost. redb 2.6.3 has no other way to count in-use
+    pages (`stats()` exists only on a write transaction). Plan:
+    - `usage`: owned read guard; `begin_write` and the walk in
+      `spawn_blocking`, as `commit` does.
+    - `SpaceGuard::in_use_bytes`: a walk is due once max(max_age, 200 x
+      the last walk's duration) has passed since it (at most ~0.5% of the
+      time under redb's writer); one walk at a time (others get the cached
+      number); monotonic time, not unix seconds; a walk of 1 s or more is
+      logged with when the next is due. `Status` and the monitor both go
+      through it. The NOSPACE alarm and reclaim never used this number
+      (they use file/dir sizes + statvfs, and reclaim measures itself).
+    - Tests: pacing rule; one walk at a time; usage still right.
+    Work items:
+    - [ ] redb_engine, space.rs; tests.
+    - [ ] Docs (04), changelog; release; close #166.
