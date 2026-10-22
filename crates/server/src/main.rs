@@ -1019,6 +1019,7 @@ async fn main() -> anyhow::Result<()> {
             &backup_dir,
             env!("CARGO_PKG_VERSION"),
             args.upgrade_backup_retain.max(1),
+            args.space_high_water_percent,
         )
         .await
         {

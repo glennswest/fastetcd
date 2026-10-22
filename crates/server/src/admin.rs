@@ -14,6 +14,7 @@ use fastetcd_raft::wal_log_store::{wal_dir, WalLogOptions, WalLogStore};
 use fastetcd_raft::TypeConfig;
 use fastetcd_raft::types::NodeId;
 use fastetcd_raft::FastetcdStateMachine;
+use fastetcd_storage::fs_space::FsSpace;
 use fastetcd_storage::mvcc::store::FORMAT_VERSION;
 use fastetcd_storage::mvcc::MvccStore;
 use fastetcd_storage::redb_engine::RedbEngine;
@@ -160,6 +161,12 @@ pub async fn recover_data_dir<LS: RaftLogStorage<TypeConfig>>(
 /// captures the exact prior-version state. No-op unless the stored
 /// version differs from `current` and there is data to protect.
 ///
+/// Skipped, with a warning, when the copy would take the backup
+/// directory's filesystem past `high_water_percent` of its size (the
+/// space monitor's reclaim mark): on a bounded data volume a full copy
+/// of a large file would fill the volume the store has to run on
+/// (fastetcd#163).
+///
 /// Returns the backup path if one was written.
 pub async fn backup_before_version(
     mvcc: &MvccStore,
@@ -167,6 +174,7 @@ pub async fn backup_before_version(
     backup_dir: &Path,
     current: &str,
     retain: usize,
+    high_water_percent: u8,
 ) -> anyhow::Result<Option<PathBuf>> {
     let stored = mvcc.read_open_version().await?;
     let has_data = mvcc.current_revision().await > 0;
@@ -179,14 +187,45 @@ pub async fn backup_before_version(
     // same volume the database has to keep running on. Roll the old
     // ones off oldest-first *before* the copy, so the directory never
     // holds more than `retain` of them even momentarily (fastetcd#14).
-    prune_backups(backup_dir, retain.saturating_sub(1));
+    let keep = retain.saturating_sub(1);
+    let src = data_file(data_dir);
+    let size = std::fs::metadata(&src)?.len();
+    if let Some(space) = fastetcd_storage::fs_space::probe(backup_dir) {
+        let freed: u64 = prune_plan(backup_dir, keep).iter().map(|(_, bytes)| bytes).sum();
+        if !backup_fits(space, freed, size, high_water_percent) {
+            tracing::warn!(
+                from_version = from,
+                to_version = current,
+                backup_dir = %backup_dir.display(),
+                data_file_bytes = size,
+                fs_total_bytes = space.total,
+                fs_available_bytes = space.available,
+                high_water_percent,
+                "skipped the pre-version safety backup: a copy of the data file would \
+                 take its filesystem past the space high-water mark, and this volume is \
+                 the one the store must keep running on (fastetcd#163). Point \
+                 --upgrade-backup-dir at another volume, or take one with \
+                 `fastetcd backup --out <path>` while the node is stopped."
+            );
+            return Ok(None);
+        }
+    }
+    prune_backups(backup_dir, keep);
     let dst = backup_dir.join(format!(
         "fastetcd-{}-to-{}-{}.redb",
         sanitize(from),
         sanitize(current),
         unix_secs()
     ));
-    let bytes = std::fs::copy(data_file(data_dir), &dst)?;
+    let bytes = match std::fs::copy(&src, &dst) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // A half-written copy (ENOSPC part-way) restores nothing and
+            // holds the space the store needs.
+            let _ = std::fs::remove_file(&dst);
+            return Err(e.into());
+        }
+    };
     tracing::warn!(
         from_version = from,
         to_version = current,
@@ -198,12 +237,31 @@ pub async fn backup_before_version(
     Ok(Some(dst))
 }
 
-/// Keep at most `keep` upgrade safety backups, deleting the oldest
-/// first. Only files this code wrote are considered — anything an
-/// operator dropped in the directory by hand is left alone.
-pub fn prune_backups(backup_dir: &Path, keep: usize) {
+/// Whether a `file_bytes` copy fits on `space` once `freed_bytes` of old
+/// backups are rolled off: the filesystem's use afterwards at most
+/// `high_water_percent` of its size, and within what is available.
+pub fn backup_fits(space: FsSpace, freed_bytes: u64, file_bytes: u64, high_water_percent: u8) -> bool {
+    let available = space.available.saturating_add(freed_bytes);
+    let used_after = space.used().saturating_sub(freed_bytes).saturating_add(file_bytes);
+    let limit = (space.total as u128 * high_water_percent.min(100) as u128 / 100) as u64;
+    file_bytes <= available && used_after <= limit
+}
+
+/// The upgrade safety backups [`prune_backups`] would delete to keep
+/// `keep`, oldest first, with their sizes.
+pub fn prune_plan(backup_dir: &Path, keep: usize) -> Vec<(PathBuf, u64)> {
+    let mut backups = list_backups(backup_dir);
+    let drop_count = backups.len().saturating_sub(keep);
+    backups.truncate(drop_count);
+    backups.into_iter().map(|(_, path, bytes)| (path, bytes)).collect()
+}
+
+/// Upgrade safety backups in `backup_dir`, oldest first. Only files this
+/// code wrote are considered — anything an operator dropped in the
+/// directory by hand is left alone.
+fn list_backups(backup_dir: &Path) -> Vec<(std::time::SystemTime, PathBuf, u64)> {
     let Ok(entries) = std::fs::read_dir(backup_dir) else {
-        return;
+        return Vec::new();
     };
     let mut backups: Vec<(std::time::SystemTime, PathBuf, u64)> = entries
         .flatten()
@@ -217,12 +275,14 @@ pub fn prune_backups(backup_dir: &Path, keep: usize) {
             Some((meta.modified().ok()?, path, meta.len()))
         })
         .collect();
-    if backups.len() <= keep {
-        return;
-    }
     backups.sort_by_key(|(mtime, _, _)| *mtime);
-    let drop_count = backups.len() - keep;
-    for (_, path, bytes) in backups.into_iter().take(drop_count) {
+    backups
+}
+
+/// Keep at most `keep` upgrade safety backups, deleting the oldest
+/// first.
+pub fn prune_backups(backup_dir: &Path, keep: usize) {
+    for (path, bytes) in prune_plan(backup_dir, keep) {
         match std::fs::remove_file(&path) {
             Ok(()) => tracing::info!(
                 backup = %path.display(),

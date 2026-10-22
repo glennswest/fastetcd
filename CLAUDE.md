@@ -2921,8 +2921,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       remedies (`--upgrade-backup-dir` on another volume; offline
       `fastetcd backup`); nothing is pruned then.
     - A copy that fails part-way is removed.
-    - Tests: skipped when it would cross the mark (old backups kept, no
-      file); written when it fits; a failed copy leaves no file.
+    - Tests: the fit rule; skipped when it would cross the mark (old
+      backups kept, no file); written when it fits. (The removal of a
+      part-written copy needs a filesystem that fills: not tested.)
     - Not here: periodic `--backup-dir` backups on their volume (#153).
     Work items:
     - [ ] admin.rs + main wiring; tests.

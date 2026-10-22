@@ -124,14 +124,14 @@ async fn backs_up_only_when_the_version_changes() {
 
     // Same version → no backup.
     assert!(
-        admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.2", 2)
+        admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.2", 2, 100)
             .await
             .unwrap()
             .is_none(),
         "no backup when the version is unchanged"
     );
     // Newer version → a backup is written.
-    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3", 2)
+    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3", 2, 100)
         .await
         .unwrap();
     assert!(made.is_some() && made.unwrap().exists(), "backup on version change");
@@ -149,7 +149,7 @@ async fn no_startup_backup_for_an_empty_dir() {
     let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(admin::data_file(dir.path())).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
     assert!(
-        admin::backup_before_version(&mvcc, dir.path(), &dir.path().join("backups"), "1.0.3", 2)
+        admin::backup_before_version(&mvcc, dir.path(), &dir.path().join("backups"), "1.0.3", 2, 100)
             .await
             .unwrap()
             .is_none(),
@@ -174,7 +174,7 @@ async fn a_failed_backup_surfaces_an_error_so_startup_can_continue() {
     let blocked = dir.path().join("blocked-backups");
     std::fs::write(&blocked, b"not a directory").unwrap();
 
-    let res = admin::backup_before_version(&mvcc, dir.path(), &blocked, "1.0.4", 2).await;
+    let res = admin::backup_before_version(&mvcc, dir.path(), &blocked, "1.0.4", 2, 100).await;
     assert!(res.is_err(), "a backup that cannot be written must surface an error");
 }
 
@@ -194,7 +194,7 @@ async fn upgrade_backups_are_rolled_off_oldest_first() {
     let mut written = Vec::new();
     for (i, version) in ["1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4"].iter().enumerate() {
         mvcc.write_open_version(&format!("1.0.{i}")).await.unwrap();
-        let made = admin::backup_before_version(&mvcc, dir.path(), &backups, version, 2)
+        let made = admin::backup_before_version(&mvcc, dir.path(), &backups, version, 2, 100)
             .await
             .unwrap()
             .expect("a version change writes a backup");
@@ -225,4 +225,49 @@ async fn upgrade_backups_are_rolled_off_oldest_first() {
         !kept.contains(&written[0]),
         "the oldest backup must be rolled off"
     );
+}
+
+/// The copy must leave the filesystem at or below the high-water mark,
+/// counting what the roll-off frees (fastetcd#163).
+#[test]
+fn a_backup_fits_only_below_the_high_water_mark() {
+    use fastetcd_storage::FsSpace;
+    const MIB: u64 = 1 << 20;
+    // A 1 GiB volume with 400 MiB used.
+    let space = FsSpace { total: 1024 * MIB, available: 624 * MIB };
+    assert!(admin::backup_fits(space, 0, 400 * MIB, 80), "800 of 1024 MiB is under 80%");
+    assert!(!admin::backup_fits(space, 0, 450 * MIB, 80), "850 of 1024 MiB is over 80%");
+    assert!(admin::backup_fits(space, 100 * MIB, 450 * MIB, 80), "an old 100 MiB backup rolled off makes room");
+    assert!(!admin::backup_fits(space, 0, 700 * MIB, 100), "never more than is available");
+    assert!(admin::backup_fits(space, 0, 600 * MIB, 100));
+}
+
+/// A backup that would cross the mark is skipped: no copy, and the old
+/// backups are not rolled off for it (fastetcd#163).
+#[tokio::test]
+async fn an_upgrade_backup_that_would_cross_the_high_water_mark_is_skipped() {
+    let dir = tempdir().unwrap();
+    seed(dir.path(), 2).await;
+    let backups = dir.path().join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    let old = [backups.join("fastetcd-1.0.0-to-1.0.1-1.redb"), backups.join("fastetcd-1.0.1-to-1.0.2-2.redb")];
+    for p in &old {
+        std::fs::write(p, b"an older backup").unwrap();
+    }
+
+    let engine: Arc<dyn KvStore> = Arc::new(RedbEngine::open(admin::data_file(dir.path())).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    mvcc.write_open_version("1.0.2").await.unwrap();
+
+    // Any real filesystem is already past 0% used.
+    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3", 2, 0).await.unwrap();
+    assert!(made.is_none(), "the backup was written past the high-water mark");
+    let mut kept: Vec<_> = std::fs::read_dir(&backups).unwrap().flatten().map(|e| e.path()).collect();
+    kept.sort();
+    assert_eq!(kept, old.to_vec(), "a skipped backup must neither copy nor roll off");
+
+    // With room, it is written and the oldest rolled off.
+    let made = admin::backup_before_version(&mvcc, dir.path(), &backups, "1.0.3", 2, 100).await.unwrap();
+    assert!(made.as_ref().is_some_and(|p| p.exists()), "the backup was not written with room");
+    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 2);
 }
