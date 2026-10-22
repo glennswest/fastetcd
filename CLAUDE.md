@@ -2934,3 +2934,21 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Docs (01, 04, --help), changelog; release 1.34.3; close #163.
     - Verified: sc-build of 540a32d, workspace 0 failures (both new tests
       pass), no clippy finding in admin.rs.
+
+92. **An empty WAL opens without writing 16 MiB first (#164).** `Wal::open`
+    on an empty `wal/` joined a zero-fill of the whole first segment plus
+    its fsync before returning (`install_spare(spawn_spare(..))`): seconds
+    on an SMR disk or ublk over an HDD, at every first boot. Plan:
+    - Segment 0 is `create_segment` (fallocate + fsync, no data written);
+      the spare is zero-filled in the background as for every later
+      segment.
+    - A preallocated segment's fdatasyncs are journal commits (#85: ~10 ms,
+      up to 3 s on ext4), so the WAL rolls early: at the first append once
+      the spare is ready, while the current segment is one that was only
+      preallocated, it rolls to the zero-filled spare. A short segment
+      replays as any other (zeros read as its end).
+    - Tests: open of an empty dir does not wait for a large spare; the
+      early roll happens once the spare is ready and everything replays.
+    Work items:
+    - [ ] raft_wal.rs; tests.
+    - [ ] Docs (03 writes), changelog; release; close #164.
