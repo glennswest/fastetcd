@@ -463,8 +463,8 @@ queued, up to 4096 writes or 512 KiB, so with a thousand clients waiting
 one fsync carries hundreds of writes, not at most 256 as before 1.17
 (#94). A follower behind is sent the log in AppendEntries of at most
 ~1 MiB of entries (each must be sent and fsynced by the follower within
-a heartbeat interval, openraft's timeout), and the peer port accepts
-messages up to 16 MiB.
+`--replication-timeout`, #167), and the peer port accepts messages up to
+16 MiB.
 
 Applying an entry does not touch the data file: its writes are held in
 RAM (the write-behind layer, up to `--write-behind-bytes`, 64 MiB) and
@@ -795,6 +795,16 @@ seconds. etcd behaves the same way and has the same remedy:
   value costs little: a follower in the middle of its fsync could not
   answer sooner anyway, and while it waits for that fsync it cannot call
   an election (heartbeats to it queue behind the request meanwhile).
+
+**A peer that stops answering** (since 1.35.3, #168). Every connection
+to another member has a connect timeout (TCP and TLS handshake) and an
+HTTP/2 ping every second, idle or not; both give up after 1 s plus
+`--election-timeout` (etcd's peer dial timeout), so 2 s by default. A
+member that lost power, or whose connection died without a reset, then
+fails the calls waiting on it (a forwarded write or read, a lease
+TimeToLive, a membership change) within that time, and the next call
+dials again; before, they waited for the operating system's TCP timeout
+(minutes).
 
 **On spinning disks** (the X9 blades: follower fsyncs of 0.3–0.8 s, a
 longest of 85 s, `docs/benchmarks/blade-server3.md`), set on every

@@ -4,6 +4,19 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **fix:** Peer connections have a connect timeout and a keepalive
+  (#168). tonic sets neither, so a dial to a member that never answers
+  (powered off, a TLS handshake that stalls) and a connection whose peer
+  vanished without a reset held forwarded writes and reads, lease
+  TimeToLive and membership changes for the OS's TCP timeout. Now
+  `DialOptions` (`GrpcNetworkFactory::with_dial`,
+  `WriteForwarder::with_dial`): connect timeout and HTTP/2 keepalive
+  timeout 1 s + `--election-timeout` (etcd's `PeerDialTimeout`), a ping
+  every second while idle too. Test `peer_dial.rs`: a silent peer, a TLS
+  handshake that never completes, a peer frozen on an open connection.
+  Docs: 03 (also a stale "heartbeat interval" timeout, #167).
+
 ## [v1.35.2] — 2026-10-21
 
 ### Fixed
