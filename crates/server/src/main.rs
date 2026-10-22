@@ -1172,6 +1172,8 @@ async fn main() -> anyhow::Result<()> {
     sm.follow_log_durability(log_progress.clone());
     let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
+    // For the clean stop at the end (#161).
+    let (shutdown_raft, shutdown_applied) = (raft.clone(), sm.applied_index());
     // `--snapshot-count` and `--max-in-snapshot-log-to-keep` in proposals,
     // as etcd counts them, not in log entries, which can be batches
     // (#80). openraft's entry-counted policy above stays as the backstop.
@@ -1581,6 +1583,9 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    // SIGTERM is how a kubelet, systemd or podman stops a member; SIGINT
+    // a terminal. Either stops cleanly (#161).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         r = peer_handle => {
             if let Ok(Err(e)) = r {
@@ -1593,17 +1598,46 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl-c received, shutting down");
+            tracing::info!("SIGINT received, shutting down");
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received, shutting down");
         }
     }
 
-    // Persist the deferred applies so the next start need not replay
-    // them (#71). Not needed for correctness: the log replays them.
-    if let Err(e) = peer_mvcc.sync().await {
-        tracing::warn!(error = %e, "flushing applied state on shutdown");
-    }
-
+    stop_cleanly(&shutdown_raft, shutdown_applied, &peer_mvcc).await;
     Ok(())
+}
+
+/// Stop so that the next start has nothing to repair or replay (#161):
+/// RaftCore stopped (no new applies), the write-behind layers made durable
+/// in the data file, then `main` returns and the runtime drops every
+/// handle; redb's last `Database` drop marks the file closed cleanly.
+/// Without it a start re-walks the whole file (redb's repair) and replays
+/// the WAL tail. Not needed for correctness: a kill loses nothing the log
+/// does not replay.
+async fn stop_cleanly(raft: &Raft<TypeConfig>, mut applied: tokio::sync::watch::Receiver<u64>, mvcc: &MvccStore) {
+    let t = std::time::Instant::now();
+    if let Err(e) = raft.shutdown().await {
+        tracing::warn!(error = %e, "stopping raft");
+    }
+    // An apply the state machine had begun can still finish after
+    // RaftCore stops: flush again if one did.
+    for _ in 0..3 {
+        applied.borrow_and_update();
+        if let Err(e) = mvcc.sync().await {
+            tracing::warn!(error = %e, "flushing applied state on shutdown; the next start replays it");
+            return;
+        }
+        if !applied.has_changed().unwrap_or(false) {
+            break;
+        }
+    }
+    tracing::info!(
+        applied = *applied.borrow(),
+        took_ms = t.elapsed().as_millis() as u64,
+        "applied state is durable; stopped"
+    );
 }
 
 /// Tokens expire this long after their last use (#46).

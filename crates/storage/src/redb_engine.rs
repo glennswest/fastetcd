@@ -52,6 +52,9 @@ struct RedbInner {
     /// the drain could never finish.
     defrag_pending: Arc<AtomicBool>,
     defrag_done: Arc<Notify>,
+    /// redb found the file not closed cleanly and walked it to rebuild
+    /// its allocator state (fastetcd#161).
+    repaired_at_open: bool,
 }
 
 /// Classify an error from opening the database file.
@@ -105,11 +108,24 @@ impl RedbEngine {
         // `Btree::get_helper`. Unwinding out of `Database::create` drops
         // the file handle and its lock, so the panic is the corruption
         // report (fastetcd#37).
+        // redb repairs a file that was not closed cleanly (its last
+        // handle never dropped: a kill, a crash) by walking every page,
+        // seconds on a spinning disk; say so (fastetcd#161).
+        let repaired = Arc::new(AtomicBool::new(false));
         let db = std::panic::catch_unwind(|| {
             let mut builder = Database::builder();
             if let Some(bytes) = cache_bytes {
                 builder.set_cache_size(bytes);
             }
+            let (flag, shown) = (repaired.clone(), path.display().to_string());
+            builder.set_repair_callback(move |_| {
+                if !flag.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        file = %shown,
+                        "data file was not closed cleanly (killed, or crashed); redb is repairing it"
+                    );
+                }
+            });
             builder.create(&path)
         })
             .map_err(|panic| {
@@ -131,8 +147,15 @@ impl RedbEngine {
                 readers_drained: Arc::new(Notify::new()),
                 defrag_pending: Arc::new(AtomicBool::new(false)),
                 defrag_done: Arc::new(Notify::new()),
+                repaired_at_open: repaired.load(Ordering::Relaxed),
             }),
         })
+    }
+
+    /// Whether redb had to repair the file at open: the last process
+    /// using it did not close it cleanly (fastetcd#161).
+    pub fn repaired_at_open(&self) -> bool {
+        self.inner.repaired_at_open
     }
 
     fn table_def(name: &str) -> TableDefinition<'_, &'static [u8], &'static [u8]> {
