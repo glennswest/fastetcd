@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **fix:** A follower whose fsync outlasts the heartbeat catches up
+## [v1.35.2] — 2026-10-21
+
+### Fixed
+- A follower whose fsync outlasts the heartbeat catches up
   (#167). openraft 0.9 gave each AppendEntries `heartbeat_interval`
   (250 ms) to be sent, appended and fsynced by the follower; on a slower
   disk (X9 blades: 0.3–0.8 s) every request with new entries timed out and
@@ -15,8 +17,10 @@
   `--replication-timeout` (ms; default `--election-timeout`; at least the
   heartbeat). Startup logs the three raft timeouts. Test:
   `multinode_fastpath::a_follower_slower_than_the_heartbeat_keeps_up`
-  (600 ms fsyncs on one follower, continuous writes). Docs: 01, 03 §
-  Timeouts and slow disks, with the flags for HDD nodes.
+  (600 ms fsyncs on one follower, continuous writes); the 3-member
+  harness uses the server's default. Docs: 01, 03 § Timeouts and slow
+  disks, with the flags for HDD nodes. Filed #171 (a pre-existing flake
+  of the #97 lone-write test when the whole file runs at once).
 
 ## [v1.35.1] — 2026-10-21
 

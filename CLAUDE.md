@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.35.1`** — The live-bytes walk (`dbSizeInUse`) runs on a blocking
+**`1.35.2`** — `--replication-timeout` (#167): the AppendEntries timeout is
+no longer the heartbeat (default: the election timeout; a second vendored
+openraft patch), so a follower whose fsync outlasts 250 ms catches up.
+
+Previous: **`1.35.1`** — The live-bytes walk (`dbSizeInUse`) runs on a blocking
 thread and no sooner than 200x its last duration, one at a time (#166).
 
 Previous: **`1.35.0`** — A start logs each phase's duration (#165): `startup phase`
@@ -3016,7 +3020,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       with begin_write put back on the async thread (branch, deleted) a
       50 ms sleep on the runtime took 1.0 s (the writer's hold).
 
-95. **A follower whose fsync outlasts the heartbeat catches up (#167).**
+95. **A follower whose fsync outlasts the heartbeat catches up (#167) — done, shipped in v1.35.2.**
     openraft 0.9's `ReplicationCore::send_log_entries` gives every
     AppendEntries `heartbeat_interval` (250 ms) to be sent, appended and
     fsynced by the follower. A follower whose fsync takes longer (X9
@@ -3039,5 +3043,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       advances with the leader's); control with the heartbeat as timeout
       on a branch.
     Work items:
-    - [ ] openraft patch + FASTETCD.md; flag; test.
-    - [ ] Docs, changelog; release; close #167.
+    - [x] openraft patch + FASTETCD.md; flag; test.
+    - [x] Docs, changelog; release 1.35.2; close #167.
+    - Verified: new test: the slow follower acknowledged 59-110 of 68-127
+      entries in 8 s of writes (control, heartbeat as timeout: 0 of 141);
+      openraft's own suite 182 pass; workspace 0 failures (7c72f08's
+      rerun; da4cf44); whole-file runs 5/5 at da4cf44 vs 4/5 before #167
+      (the #97 lone-write test's flake, filed #171).
