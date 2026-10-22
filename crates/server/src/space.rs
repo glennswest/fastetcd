@@ -48,6 +48,20 @@ use crate::state::ServerState;
 /// and `/metrics` read whatever the monitor last recorded.
 pub const IN_USE_MAX_AGE: Duration = Duration::from_secs(300);
 
+/// A walk holds redb's writer for as long as it runs (checkpoints and
+/// back-pressure flushes wait), so the next one waits at least this many
+/// times as long as the last took: at most ~0.5% of the time (#166).
+pub const IN_USE_WALK_PACE: u32 = 200;
+
+/// Whether a live-bytes walk is due: never measured (or invalidated), or
+/// `max_age` and [`IN_USE_WALK_PACE`] times the last walk have passed.
+pub fn in_use_walk_due(since_last: Option<Duration>, max_age: Duration, last_walk: Duration) -> bool {
+    match since_last {
+        None => true,
+        Some(since) => since >= max_age.max(last_walk.saturating_mul(IN_USE_WALK_PACE)),
+    }
+}
+
 /// Message etcd returns when a write is refused for lack of space.
 /// Client libraries match on this text, so keep it verbatim.
 pub const ERR_NO_SPACE: &str = "etcdserver: mvcc: database space exceeded";
@@ -159,10 +173,17 @@ pub struct SpaceGuard {
     capacity_bytes: AtomicU64,
     used_ppm: AtomicU64,
     nospace: AtomicBool,
-    /// Unix seconds at which `db_in_use_bytes` was last measured. The
-    /// measurement walks the whole database, so it is rate-limited
-    /// rather than run on every caller's request.
+    /// When `db_in_use_bytes` was last measured, in nanoseconds after
+    /// `clock` plus one (0: never, or invalidated). The measurement walks
+    /// the whole database, so it is rate-limited rather than run on every
+    /// caller's request; monotonic, so a step of the wall clock neither
+    /// forces nor stops it.
     in_use_measured_at: AtomicU64,
+    /// How long the last walk took, in nanoseconds (#166).
+    in_use_walk_nanos: AtomicU64,
+    /// A walk is running: other callers get the cached number.
+    in_use_walking: AtomicBool,
+    clock: std::time::Instant,
 }
 
 impl SpaceGuard {
@@ -181,6 +202,21 @@ impl SpaceGuard {
             used_ppm: AtomicU64::new(0),
             nospace: AtomicBool::new(false),
             in_use_measured_at: AtomicU64::new(0),
+            in_use_walk_nanos: AtomicU64::new(0),
+            in_use_walking: AtomicBool::new(false),
+            clock: std::time::Instant::now(),
+        }
+    }
+
+    fn mark_in_use_measured(&self) {
+        let at = self.clock.elapsed().as_nanos() as u64;
+        self.in_use_measured_at.store(at.saturating_add(1), Ordering::Relaxed);
+    }
+
+    fn since_in_use_measured(&self) -> Option<Duration> {
+        match self.in_use_measured_at.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some(self.clock.elapsed().saturating_sub(Duration::from_nanos(at - 1))),
         }
     }
 
@@ -283,18 +319,7 @@ impl SpaceGuard {
         engine: &Arc<dyn fastetcd_storage::KvStore>,
         max_age: Duration,
     ) -> u64 {
-        let now = unix_secs();
-        let measured_at = self.in_use_measured_at.load(Ordering::Relaxed);
-        if now.saturating_sub(measured_at) >= max_age.as_secs() {
-            match engine.usage().await {
-                Ok(usage) => {
-                    self.db_in_use_bytes
-                        .store(usage.in_use_bytes, Ordering::Relaxed);
-                    self.in_use_measured_at.store(now, Ordering::Relaxed);
-                }
-                Err(e) => tracing::warn!(target: "fastetcd::space", "usage: {e}"),
-            }
-        }
+        self.measure_in_use_if_due(max_age, || engine.usage()).await;
         // Never claim more is in use than the file holds: the cached
         // measurement can predate a defragment that shrank it.
         let db_bytes = self.db_bytes.load(Ordering::Relaxed);
@@ -351,9 +376,51 @@ impl SpaceGuard {
 
     /// Record an in-use measurement taken elsewhere (the reclaim path
     /// and the Defragment RPC already pay for the walk).
+    /// Run `usage` (the engine's walk) and record its result if a walk is
+    /// due and none is running (#166).
+    pub async fn measure_in_use_if_due<F>(&self, max_age: Duration, usage: impl FnOnce() -> F)
+    where
+        F: std::future::Future<Output = fastetcd_storage::StorageResult<fastetcd_storage::StoreUsage>>,
+    {
+        let last_walk = Duration::from_nanos(self.in_use_walk_nanos.load(Ordering::Relaxed));
+        if in_use_walk_due(self.since_in_use_measured(), max_age, last_walk)
+            && !self.in_use_walking.swap(true, Ordering::AcqRel)
+        {
+            // Cleared however this ends, a caller dropped mid-walk included.
+            struct Walking<'a>(&'a AtomicBool);
+            impl Drop for Walking<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _walking = Walking(&self.in_use_walking);
+            let t = std::time::Instant::now();
+            let measured = usage().await;
+            let took = t.elapsed();
+            match measured {
+                Ok(usage) => {
+                    self.db_in_use_bytes
+                        .store(usage.in_use_bytes, Ordering::Relaxed);
+                    self.mark_in_use_measured();
+                    self.in_use_walk_nanos.store(took.as_nanos() as u64, Ordering::Relaxed);
+                    if took >= Duration::from_secs(1) {
+                        tracing::info!(
+                            target: "fastetcd::space",
+                            took_ms = took.as_millis() as u64,
+                            next_in_secs = max_age.max(took.saturating_mul(IN_USE_WALK_PACE)).as_secs(),
+                            "measuring the data file's live bytes held the engine's writer; \
+                             the next measurement waits in proportion"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(target: "fastetcd::space", "usage: {e}"),
+            }
+        }
+    }
+
     pub fn record_in_use(&self, bytes: u64) {
         self.db_in_use_bytes.store(bytes, Ordering::Relaxed);
-        self.in_use_measured_at.store(unix_secs(), Ordering::Relaxed);
+        self.mark_in_use_measured();
     }
 
     fn update_alarm(&self, used_ppm: u64, used: u64, capacity: u64) {
@@ -388,13 +455,6 @@ impl SpaceGuard {
 
 fn pct_ppm(percent: u8) -> u64 {
     percent as u64 * 10_000
-}
-
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Spawn the space monitor. Returns `None` when the guard is disabled.
@@ -553,6 +613,61 @@ mod tests {
     #[test]
     fn no_quota_and_no_probe_means_nothing_to_measure() {
         assert_eq!(guard(0).capacity_bytes(1024, None), 0);
+    }
+
+    #[test]
+    fn a_walk_waits_in_proportion_to_the_last_one() {
+        let s = Duration::from_secs;
+        assert!(in_use_walk_due(None, s(300), s(10)), "never measured");
+        assert!(!in_use_walk_due(Some(s(299)), s(300), Duration::ZERO));
+        assert!(in_use_walk_due(Some(s(300)), s(300), Duration::from_millis(500)));
+        // A 3 s walk: not again for 600 s, past the 300 s max age.
+        assert!(!in_use_walk_due(Some(s(599)), s(300), s(3)));
+        assert!(in_use_walk_due(Some(s(600)), s(300), s(3)));
+    }
+
+    /// Concurrent callers share one walk; the next waits out the pace; an
+    /// invalidation (after a defragment) measures again; a caller dropped
+    /// mid-walk does not stop later walks (#166).
+    #[tokio::test]
+    async fn one_walk_at_a_time_and_paced_by_its_cost() {
+        use std::sync::atomic::AtomicUsize;
+        let g = Arc::new(guard(0));
+        let walks = Arc::new(AtomicUsize::new(0));
+        let walk = |walks: Arc<AtomicUsize>, bytes: u64| async move {
+            walks.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(fastetcd_storage::StoreUsage { file_bytes: bytes, in_use_bytes: bytes, fragmented_bytes: 0 })
+        };
+        let mut callers = Vec::new();
+        for _ in 0..5 {
+            let (g, walks) = (g.clone(), walks.clone());
+            callers.push(tokio::spawn(async move {
+                g.measure_in_use_if_due(Duration::ZERO, || walk(walks, 7)).await
+            }));
+        }
+        for c in callers {
+            c.await.unwrap();
+        }
+        assert_eq!(walks.load(Ordering::SeqCst), 1, "concurrent callers each walked");
+        assert_eq!(g.db_in_use_bytes.load(Ordering::Relaxed), 7);
+
+        // A 200 ms walk: not due again for 40 s, even with max age 0.
+        g.measure_in_use_if_due(Duration::ZERO, || walk(walks.clone(), 8)).await;
+        assert_eq!(walks.load(Ordering::SeqCst), 1, "walked again within the pace");
+
+        g.invalidate_in_use();
+        let dropped = {
+            let (g, walks) = (g.clone(), walks.clone());
+            tokio::spawn(async move { g.measure_in_use_if_due(Duration::ZERO, || walk(walks, 9)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        dropped.abort();
+        let _ = dropped.await;
+        assert_eq!(walks.load(Ordering::SeqCst), 2, "the invalidated measurement did not start");
+        g.measure_in_use_if_due(Duration::ZERO, || walk(walks.clone(), 10)).await;
+        assert_eq!(walks.load(Ordering::SeqCst), 3, "a walk dropped half-way stopped later ones");
+        assert_eq!(g.db_in_use_bytes.load(Ordering::Relaxed), 10);
     }
 
     #[test]

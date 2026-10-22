@@ -328,11 +328,12 @@ impl KvStore for RedbEngine {
     /// measures and decides whether a defragment is worth it.
     async fn usage(&self) -> StorageResult<StoreUsage> {
         let file_bytes = self.size_on_disk().await?;
-        let inner = self.inner.clone();
-        let db_guard = inner.db.read().await;
-        let txn = db_guard.begin_write().map_err(StorageError::io)?;
+        // `begin_write` waits for redb's writer (a checkpoint's commit, up
+        // to its fsync), and `stats()` walks every tree: both on a blocking
+        // thread, never a tokio worker (fastetcd#166), as `commit` does.
+        let db_guard = self.inner.db.clone().read_owned().await;
         let stats = task::spawn_blocking(move || -> StorageResult<(u64, u64)> {
-            let txn = txn;
+            let txn = db_guard.begin_write().map_err(StorageError::io)?;
             let stats = txn.stats().map_err(StorageError::io)?;
             let in_use = stats
                 .allocated_pages()
@@ -341,11 +342,11 @@ impl KvStore for RedbEngine {
             // Nothing was mutated; abort so the transaction doesn't
             // commit an empty write (which would cost an fsync).
             txn.abort().map_err(StorageError::io)?;
+            drop(db_guard);
             Ok((in_use, fragmented))
         })
         .await
         .map_err(|e| StorageError::Io(Box::new(e)))?;
-        drop(db_guard);
         let (in_use_bytes, fragmented_bytes) = stats?;
         Ok(StoreUsage {
             file_bytes,
@@ -640,6 +641,36 @@ mod tests {
     async fn conformance_count() {
         let (_dir, eng) = open_temp();
         conformance::count_matches_range_len(&eng).await;
+    }
+
+    /// `usage` waits for redb's writer on a blocking thread: the runtime's
+    /// only thread stays free meanwhile (#166).
+    #[tokio::test(flavor = "current_thread")]
+    async fn usage_does_not_block_the_runtime_while_the_writer_is_held() {
+        let (_dir, eng) = open_temp();
+        let db = eng.inner.db.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let g = db.blocking_read();
+            let txn = g.begin_write().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            txn.abort().unwrap();
+        });
+        held_rx.recv().unwrap();
+        let measuring = tokio::spawn({
+            let eng = eng.clone();
+            async move { eng.usage().await }
+        });
+        let t = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let took = t.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "a 50 ms sleep took {took:?}: usage blocked the runtime waiting for the writer"
+        );
+        measuring.await.unwrap().unwrap();
+        holder.join().unwrap();
     }
 
     #[tokio::test]
