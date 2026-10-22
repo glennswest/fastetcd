@@ -54,7 +54,8 @@ struct Timing {
     heartbeat: u64,
     election_min: u64,
     election_max: u64,
-    /// openraft's AppendEntries timeout (#167); 0 = the heartbeat.
+    /// openraft's AppendEntries timeout (#167); 0 = the election timeout,
+    /// the server's default.
     replication: u64,
 }
 
@@ -138,7 +139,7 @@ async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
             heartbeat_interval: timing.heartbeat,
             election_timeout_min: timing.election_min,
             election_timeout_max: timing.election_max,
-            replication_timeout: timing.replication,
+            replication_timeout: if timing.replication == 0 { timing.election_min } else { timing.replication },
             ..Default::default()
         }
         .validate()
@@ -531,15 +532,15 @@ fn matched(leader: &Node, follower: NodeId) -> u64 {
 /// fastetcd#167: a follower whose every fsync (600 ms) outlasts the
 /// heartbeat (250 ms) keeps up under continuous writes when the
 /// AppendEntries timeout is longer than its fsync (the server's default:
-/// the election timeout). With the heartbeat as the timeout (openraft
-/// 0.9's), every request carrying new entries timed out and was resent,
-/// and it never caught up.
+/// the election timeout, 5 s here). With the heartbeat as the timeout
+/// (openraft 0.9's; `replication: 250` here), every request carrying new
+/// entries timed out and was resent, and it acknowledged 0 of 141.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_follower_slower_than_the_heartbeat_keeps_up() {
     const FSYNC: Duration = Duration::from_millis(600);
     let nodes = cluster_with(
         0,
-        Timing { heartbeat: 250, election_min: 5000, election_max: 10_000, replication: 5000 },
+        Timing { heartbeat: 250, election_min: 5000, election_max: 10_000, replication: 0 },
     )
     .await;
     let leader = leader_of(&nodes);
