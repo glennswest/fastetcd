@@ -4,6 +4,19 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **perf:** The space monitor's live-bytes walk no longer blocks a tokio
+  worker, and runs no more often than it can afford (#166).
+  `RedbEngine::usage` called redb's `begin_write` on the async thread (a
+  worker blocked while a checkpoint held redb's writer); it now runs, with
+  the walk, on a blocking thread. The walk (redb's `stats()`, every page,
+  writer held) ran every 300 s whatever it cost; now no sooner than 200x
+  the last walk's duration as well, one at a time (a caller dropped
+  mid-walk does not stop later ones), timed on the monotonic clock; a walk
+  of 1 s or more is logged. Tests: `usage_does_not_block_the_runtime_while_the_writer_is_held`
+  (redb_engine), `a_walk_waits_in_proportion_to_the_last_one`,
+  `one_walk_at_a_time_and_paced_by_its_cost` (space). Docs: 04.
+
 ## [v1.35.0] — 2026-10-21
 
 ### Added

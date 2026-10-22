@@ -25,6 +25,18 @@ deleting every key frees pages inside the file without returning a byte
 to the filesystem. `dbSize` (the file) and `dbSizeInUse` (the pages
 actually held) are reported separately for exactly this reason.
 
+`dbSizeInUse` costs a walk of every page of the data file, which redb
+can only do holding its writer (checkpoints wait for it). So it is a
+cached figure: re-measured by the space monitor at most every 5
+minutes, and since 1.35.1 (#166) no sooner than 200 times as long as the
+last walk took (a 3 s walk: every 10 minutes), one walk at a time, on a
+blocking thread. `Maintenance.Status` and `/metrics` read the cached
+figure; a walk of a second or more is logged (`measuring the data file's
+live bytes held the engine's writer`). The NOSPACE alarm and the reclaim
+do not depend on it: they use the file and directory sizes and the
+filesystem's free space, and the reclaim measures afresh before it
+defragments.
+
 The gap between them is an **upper bound** on what a defragment can
 return, not a promise. The allocator can usually only give back whole
 regions at the end of the file, so a store whose live pages are spread
