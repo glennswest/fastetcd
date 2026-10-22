@@ -13,8 +13,9 @@
   first append after it is ready moves the log to it (a preallocated
   segment's fdatasyncs are journal commits, #85), so that cost lasts only
   until the spare is filled. Tests in `raft_wal.rs`: opening an empty log
-  with 512 MiB segments returns in milliseconds; the move to the spare
-  happens once it is ready, the vote carries over, everything replays.
+  takes under a quarter of a segment's zero-fill on the same disk (256
+  MiB segments); the move to the spare happens once it is ready, the vote
+  carries over, everything replays.
 
 ## [v1.34.3] — 2026-10-21
 
