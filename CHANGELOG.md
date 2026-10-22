@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **feat:** A start logs where its time goes (#165): one `startup phase`
+## [v1.35.0] — 2026-10-21
+
+### Added
+- A start logs where its time goes (#165): one `startup phase`
   line (target `fastetcd::startup`, `phase`, `took_ms`, `since_start_ms`)
   for each of `data_file_open` (with redb's repair noted), `index_load`,
   `state_machine_open`, `upgrade_backup`, `wal_open`, `format_recovery`,

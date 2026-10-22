@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.34.4`** — An empty WAL opens on a preallocated segment 0 (#164): a
+**`1.35.0`** — A start logs each phase's duration (#165): `startup phase`
+lines (target `fastetcd::startup`) from `data_file_open` to `listening`,
+a summary, and `raft_ready` when a leader is known (`startup.rs`).
+
+Previous: **`1.34.4`** — An empty WAL opens on a preallocated segment 0 (#164): a
 member's first start no longer writes and syncs 16 MiB of zeros before
 the log opens; the log moves to the zero-filled spare once it is ready.
 
@@ -2962,7 +2966,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       with the old open put back (branch, deleted) the content check fails
       ("opening an empty log wrote segment 0") and the roll test fails.
 
-93. **Startup says where its time goes (#165).** No line timed startup, so
+93. **Startup says where its time goes (#165) — done, shipped in v1.35.0.** No line timed startup, so
     the boot logs could not explain 4–5 s probe gaps (stormcos 12.39,
     12.41-flowsdn). Plan:
     - `startup.rs`: a timer; each phase logs `startup phase` (target
@@ -2979,5 +2983,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Test: the real binary's log has every phase in order, the summary
       and `raft_ready`.
     Work items:
-    - [ ] startup.rs, main wiring; test.
-    - [ ] Docs (03), changelog; release; close #165.
+    - [x] startup.rs, main wiring; test.
+    - [x] Docs (03), changelog; release 1.35.0; close #165.
+    - Verified: sc-build of 6aece3b: `startup_phases.rs` (new store and
+      restart), `tests/ctl_tls.sh` all checks (TLS on the self-bound
+      listener), workspace 0 failures, no clippy finding in startup.rs.
