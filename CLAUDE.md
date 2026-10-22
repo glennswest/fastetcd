@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.34.1`** — SIGTERM stops cleanly (#161): raft stopped, applied state
+**`1.34.2`** — Lease deadlines on the monotonic clock, as etcd's lessor
+(#162): an NTP step on an RTC-less node no longer expires every lease
+at once or keeps dead ones alive (`lessor.rs`, `lease_applied_at`).
+
+Previous: **`1.34.1`** — SIGTERM stops cleanly (#161): raft stopped, applied state
 made durable, the data file closed, so a kubelet restart no longer
 repairs redb's file and replays the WAL at start.
 
@@ -2873,7 +2877,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       `clean_shutdown.rs` passes (3.2 s), its SIGKILL control shows the
       repair line. Clippy on the server crate fails on older lints (#152).
 
-90. **Lease deadlines on monotonic time (#162).** The leader's lessor kept
+90. **Lease deadlines on monotonic time (#162) — done, shipped in v1.34.2.** The leader's lessor kept
     RAM deadlines in unix seconds and took the later of them and the
     persisted `deadline_unix_secs`, both against `SystemTime::now()`. An X9
     blade has no RTC battery and boots at 1970 until NTP: a forward step
@@ -2896,5 +2900,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Test: leases granted with a proposer clock of 1970 (forward step)
       and of year 3000 (backward step) expire exactly by their TTL.
     Work items:
-    - [ ] store stamp; lessor; tests.
-    - [ ] Docs (03 leases), changelog; release; close #162.
+    - [x] store stamp; lessor; tests.
+    - [x] Docs (00, 03 leases), changelog; release 1.34.2; close #162.
+    - Verified: sc-build of 3319d85, workspace 449 pass 0 fail;
+      `lease_clock_step.rs` passes; with the old lessor (branch, deleted)
+      it fails: a lease granted with a 1970 clock answers TimeToLive
+      -1792631396 (expired at once).

@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **fix:** Lease deadlines are on the monotonic clock, as etcd's lessor
+## [v1.34.2] — 2026-10-21
+
+### Fixed
+- Lease deadlines are on the monotonic clock, as etcd's lessor
   (#162). The leader's RAM deadlines were unix seconds and the effective
   deadline the later of them and the persisted one, all against the wall
   clock: on a node with no RTC battery (X9 blades boot at 1970 until
