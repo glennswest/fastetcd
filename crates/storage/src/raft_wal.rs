@@ -742,8 +742,9 @@ mod tests {
         let t = std::time::Instant::now();
         let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 512 << 20 }).unwrap();
         let took = t.elapsed();
-        assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
+        eprintln!("opening an empty log with 512 MiB segments took {took:?}");
         assert!(took < std::time::Duration::from_millis(400), "opening an empty log took {took:?}");
+        assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
         wal.append(&[(KIND_ENTRY, 1, b"first")]).unwrap();
         wal.sync().unwrap();
         assert_eq!(wal.segment_count(), 1);
