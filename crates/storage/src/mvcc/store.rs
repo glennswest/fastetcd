@@ -423,6 +423,10 @@ struct Inner {
     /// (fastetcd#32). Owned here so the state machine updates it on
     /// apply and the server's interceptor reads the same state.
     auth: AuthMemory,
+    /// When this member applied each lease's grant or last Raft-logged
+    /// keep-alive, on the monotonic clock (fastetcd#162): the leader's
+    /// lessor counts a TTL from it, never from the wall clock.
+    lease_applied: std::sync::Mutex<std::collections::HashMap<LeaseId, std::time::Instant>>,
     /// Operations executed, by kind (fastetcd#29).
     ops: OpCounters,
     /// Whether the `apply_*` commits fsync. True until the server calls
@@ -565,6 +569,7 @@ impl MvccStore {
                 batched: AtomicBool::new(batched),
                 cluster_id: watch::channel(cluster_id).0,
                 auth: AuthMemory::default(),
+                lease_applied: std::sync::Mutex::default(),
                 ops: OpCounters::default(),
                 apply_sync: AtomicBool::new(true),
                 cache: MvccCache::new(cache),
@@ -1251,6 +1256,7 @@ impl MvccStore {
             .engine
             .commit(batch, self.apply_write_options())
             .await?;
+        self.stamp_lease_applied(final_id);
         Ok(LeaseGrantResult {
             id: final_id,
             ttl_secs,
@@ -1286,6 +1292,7 @@ impl MvccStore {
             .engine
             .commit(batch, self.apply_write_options())
             .await?;
+        self.stamp_lease_applied(id);
         Ok(LeaseTtlResult {
             id,
             granted_ttl_secs: rec.ttl_secs,
@@ -1460,10 +1467,22 @@ impl MvccStore {
                 .await?;
         }
 
+        self.inner.lease_applied.lock().unwrap().remove(&id);
         Ok(LeaseRevokeResult {
             revision,
             deleted_keys,
         })
+    }
+
+    fn stamp_lease_applied(&self, id: LeaseId) {
+        self.inner.lease_applied.lock().unwrap().insert(id, std::time::Instant::now());
+    }
+
+    /// When this member applied lease `id`'s grant or last Raft-logged
+    /// keep-alive (monotonic clock; none if not since it started, or
+    /// revoked). The leader's lessor counts the TTL from it (fastetcd#162).
+    pub fn lease_applied_at(&self, id: LeaseId) -> Option<std::time::Instant> {
+        self.inner.lease_applied.lock().unwrap().get(&id).copied()
     }
 
     /// Compact the MVCC history at `rev`. After this call:

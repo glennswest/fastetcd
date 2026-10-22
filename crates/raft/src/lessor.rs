@@ -14,10 +14,17 @@
 //! Here: the leader keeps a deadline per lease in RAM. The first time
 //! this member acts as leader in a term, every lease's RAM deadline is
 //! set to now + its TTL (promote). A lease's effective deadline on the
-//! leader is the later of that and the persisted one (which grants, and
-//! keep-alives logged by older members, still set). Expiry (the
+//! leader is the later of that and its TTL from when this member applied
+//! the lease's grant or last keep-alive logged through Raft. Expiry (the
 //! leader's sweeper) and TimeToLive use the effective deadline; the
 //! revoke itself still goes through Raft.
+//!
+//! **Monotonic time only** (fastetcd#162), as etcd's lessor. The
+//! persisted `deadline_unix_secs` is not compared with the clock here:
+//! a node with no RTC battery boots at 1970 until NTP steps its clock,
+//! and comparing wall-clock deadlines across that step would expire
+//! every lease at once (forward) or keep dead ones alive (backward). It
+//! stays in the format for members older than 1.23, which still read it.
 //!
 //! **Mixed versions.** A member older than 1.23 that becomes leader
 //! reads only persisted deadlines, which RAM renewals never update: it
@@ -73,8 +80,8 @@ pub struct LessorStats {
 struct Ram {
     /// The term the deadlines were promoted for; 0 = never.
     term: u64,
-    /// Unix seconds.
-    deadlines: HashMap<LeaseId, i64>,
+    /// On the monotonic clock.
+    deadlines: HashMap<LeaseId, Instant>,
 }
 
 struct Shared {
@@ -95,11 +102,26 @@ pub struct Lessor {
     inner: Arc<Shared>,
 }
 
+fn ttl(secs: i64) -> Duration {
+    Duration::from_secs(secs.max(0) as u64)
+}
+
+/// Only for TimeToLive off the leader, whose answer comes from the
+/// persisted deadline (an older leader's, #92).
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Whole seconds left before `deadline` (etcd truncates too); <= 0 once
+/// it has passed.
+fn remaining_secs(deadline: Instant, now: Instant) -> i64 {
+    match deadline.checked_duration_since(now) {
+        Some(d) if !d.is_zero() => d.as_secs() as i64,
+        _ => 0,
+    }
 }
 
 impl Lessor {
@@ -189,11 +211,10 @@ impl Lessor {
             return Ok(true);
         }
         let records = s.mvcc.lease_records().await?;
-        let now = now_unix();
+        let now = Instant::now();
         let mut ram = s.ram.lock().unwrap();
         if ram.term != term {
-            ram.deadlines =
-                records.iter().map(|r| (r.id, now.saturating_add(r.ttl_secs))).collect();
+            ram.deadlines = records.iter().map(|r| (r.id, now + ttl(r.ttl_secs))).collect();
             ram.term = term;
             s.stats.promotions.fetch_add(1, Ordering::Relaxed);
             tracing::info!(
@@ -206,15 +227,16 @@ impl Lessor {
         Ok(true)
     }
 
-    /// The later of the persisted deadline's remaining seconds and this
-    /// leader's RAM deadline (only while promoted for the current term).
-    fn effective_remaining(&self, id: LeaseId, persisted_remaining: i64, now: i64) -> i64 {
-        let term = self.inner.raft.metrics().borrow().current_term;
-        let ram = self.inner.ram.lock().unwrap();
-        match ram.deadlines.get(&id) {
-            Some(d) if ram.term == term => persisted_remaining.max(d.saturating_sub(now)),
-            _ => persisted_remaining,
-        }
+    /// The leader's deadline for lease `id` (granted TTL `ttl_secs`): the
+    /// later of its RAM deadline and its TTL from when this member applied
+    /// its grant or last logged keep-alive. Call only once promoted for
+    /// the current term; a lease with no RAM deadline yet (granted since)
+    /// gets its TTL from that apply, or from now.
+    fn effective_deadline(&self, id: LeaseId, ttl_secs: i64, now: Instant) -> Instant {
+        let applied = self.inner.mvcc.lease_applied_at(id).map(|at| at + ttl(ttl_secs));
+        let mut ram = self.inner.ram.lock().unwrap();
+        let held = *ram.deadlines.entry(id).or_insert(applied.unwrap_or(now + ttl(ttl_secs)));
+        applied.map_or(held, |a| held.max(a))
     }
 
     /// Renew lease `id` (a keep-alive).
@@ -236,17 +258,17 @@ impl Lessor {
             Ok(true) => {}
             _ => return Renewal::Propose,
         }
-        let now = now_unix();
-        let Ok(found) = s.mvcc.lease_ttl(id, false, now).await else {
+        let Ok(found) = s.mvcc.lease_ttl(id, false, 0).await else {
             return Renewal::Propose;
         };
         let Some(t) = found else {
             return Renewal::NotFound;
         };
-        if self.effective_remaining(id, t.remaining_ttl_secs, now) <= 0 {
+        let now = Instant::now();
+        if self.effective_deadline(id, t.granted_ttl_secs, now) <= now {
             return Renewal::NotFound;
         }
-        s.ram.lock().unwrap().deadlines.insert(id, now.saturating_add(t.granted_ttl_secs));
+        s.ram.lock().unwrap().deadlines.insert(id, now + ttl(t.granted_ttl_secs));
         s.stats.renewed_in_ram.fetch_add(1, Ordering::Relaxed);
         Renewal::Renewed(LeaseTtlResult {
             id,
@@ -257,14 +279,15 @@ impl Lessor {
     }
 
     /// TimeToLive with the effective deadline on the leader; elsewhere
-    /// the persisted one.
+    /// (only asked when the leader is older than 1.23) the persisted one,
+    /// against this member's wall clock.
     pub async fn time_to_live(&self, id: LeaseId, keys: bool) -> MvccResult<Option<LeaseTtlResult>> {
         let leading = self.promote().await?;
-        let now = now_unix();
-        let mut found = self.inner.mvcc.lease_ttl(id, keys, now).await?;
+        let mut found = self.inner.mvcc.lease_ttl(id, keys, now_unix()).await?;
         if leading {
             if let Some(t) = &mut found {
-                t.remaining_ttl_secs = self.effective_remaining(id, t.remaining_ttl_secs, now);
+                let now = Instant::now();
+                t.remaining_ttl_secs = remaining_secs(self.effective_deadline(id, t.granted_ttl_secs, now), now);
             }
         }
         Ok(found)
@@ -278,7 +301,7 @@ impl Lessor {
             return Ok(Vec::new());
         }
         let records = self.inner.mvcc.lease_records().await?;
-        let now = now_unix();
+        let now = Instant::now();
         {
             let mut ram = self.inner.ram.lock().unwrap();
             if ram.deadlines.len() > records.len() {
@@ -288,7 +311,7 @@ impl Lessor {
         }
         Ok(records
             .iter()
-            .filter(|r| self.effective_remaining(r.id, r.deadline_unix_secs.saturating_sub(now), now) <= 0)
+            .filter(|r| self.effective_deadline(r.id, r.ttl_secs, now) <= now)
             .map(|r| r.id)
             .collect())
     }
