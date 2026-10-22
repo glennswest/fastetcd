@@ -11,9 +11,10 @@
   vanished without a reset held forwarded writes and reads, lease
   TimeToLive and membership changes for the OS's TCP timeout. Now
   `DialOptions` (`GrpcNetworkFactory::with_dial`,
-  `WriteForwarder::with_dial`): connect timeout and HTTP/2 keepalive
-  timeout 1 s + `--election-timeout` (etcd's `PeerDialTimeout`), a ping
-  every second while idle too. Test `peer_dial.rs`: a silent peer, a TLS
+  `WriteForwarder::with_dial`): the whole dial (TCP, TLS handshake,
+  HTTP/2; tonic's own `connect_timeout` bounds only the TCP connect) and
+  an unanswered HTTP/2 ping time out after 1 s + `--election-timeout`
+  (etcd's `PeerDialTimeout`), a ping every second while idle too. Test `peer_dial.rs`: a silent peer, a TLS
   handshake that never completes, a peer frozen on an open connection.
   Docs: 03 (also a stale "heartbeat interval" timeout, #167).
 

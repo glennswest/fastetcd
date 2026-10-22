@@ -797,8 +797,8 @@ seconds. etcd behaves the same way and has the same remedy:
   an election (heartbeats to it queue behind the request meanwhile).
 
 **A peer that stops answering** (since 1.35.3, #168). Every connection
-to another member has a connect timeout (TCP and TLS handshake) and an
-HTTP/2 ping every second, idle or not; both give up after 1 s plus
+to another member has a dial timeout (TCP connect, TLS handshake and
+HTTP/2 setup) and an HTTP/2 ping every second, idle or not; both give up after 1 s plus
 `--election-timeout` (etcd's peer dial timeout), so 2 s by default. A
 member that lost power, or whose connection died without a reset, then
 fails the calls waiting on it (a forwarded write or read, a lease
