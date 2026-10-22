@@ -3,13 +3,14 @@
 This directory is openraft 0.9.24 as published on crates.io
 (`openraft-0.9.24.crate` from static.crates.io, sha256
 `80d35e2f60cdf9bcfc39a020966091017c6dc2a4b43b355a22ca3e76106f4a0a`, the
-checksum Cargo.lock recorded for it), with one change. The workspace uses
+checksum Cargo.lock recorded for it), with two changes. The workspace uses
 it through `[patch.crates-io]` in the top-level `Cargo.toml`; it is not a
 workspace member (`exclude`). Licence: MIT OR Apache-2.0, unchanged.
 
 The unchanged copy is commit `f7473ba`; `git diff f7473ba -- vendor/openraft`
 is the whole patch (`src/core/raft_core.rs`, `src/core/notify.rs`,
-`src/raft/mod.rs`, this file).
+`src/raft/mod.rs` for #97; `src/config/config.rs`,
+`src/replication/mod.rs` for #167; this file).
 
 ## What it changes (fastetcd#97)
 
@@ -59,11 +60,29 @@ durably (`LogProgress::wait_durable`, `FastetcdStateMachine::
 follow_log_durability`), so the data file is never made durable ahead of
 the log.
 
+## Second change: the AppendEntries timeout (fastetcd#167)
+
+0.9's `ReplicationCore::send_log_entries` gives every AppendEntries
+`heartbeat_interval` to be sent, appended and flushed by the follower. A
+follower whose flush takes longer times out on every request carrying new
+entries; the leader resends them, the follower flushes again, and under
+steady writes it never catches up (X9 blades' fsyncs: 0.3-0.8 s, the
+heartbeat 250 ms).
+
+`Config::replication_timeout` (milliseconds; `0`, the default, keeps
+`heartbeat_interval`) and `Config::append_entries_timeout()`, which
+`send_log_entries` now uses. Nothing else changes: heartbeats are still
+sent every `heartbeat_interval`; a request that times out is resent as
+before. fastetcd sets it from `--replication-timeout` (default: the
+election timeout).
+
 ## Upstream
 
 Offered to openraft's `release-0.9` as
 https://github.com/databendlabs/openraft/pull/2163 (2026-10-13), the same
 change with fastetcd's references taken out of its comments.
+
+The #167 change is not offered upstream yet.
 
 ## Dropping it
 

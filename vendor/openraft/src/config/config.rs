@@ -128,6 +128,14 @@ pub struct Config {
     #[clap(long, default_value = "50")]
     pub heartbeat_interval: u64,
 
+    /// The timeout for one AppendEntries RPC (sent, appended and flushed by
+    /// the follower), in milliseconds. `0`, the default, uses
+    /// `heartbeat_interval`. A follower whose log flush takes longer than
+    /// this times out on every request that carries new entries, and is
+    /// resent the same entries forever (fastetcd#167).
+    #[clap(long, default_value = "0")]
+    pub replication_timeout: u64,
+
     /// The timeout for sending then installing the last snapshot segment,
     /// in millisecond. It is also used as the timeout for sending a non-last segment, if
     /// `send_snapshot_timeout` is 0.
@@ -255,6 +263,16 @@ impl Config {
     /// Generate a new random election timeout within the configured min & max.
     pub fn new_rand_election_timeout<RT: AsyncRuntime>(&self) -> u64 {
         RT::thread_rng().gen_range(self.election_timeout_min..self.election_timeout_max)
+    }
+
+    /// The timeout for one AppendEntries RPC: `replication_timeout`, or
+    /// `heartbeat_interval` when that is 0.
+    pub fn append_entries_timeout(&self) -> Duration {
+        if self.replication_timeout > 0 {
+            Duration::from_millis(self.replication_timeout)
+        } else {
+            Duration::from_millis(self.heartbeat_interval)
+        }
     }
 
     /// Get the timeout for sending and installing the last snapshot segment.

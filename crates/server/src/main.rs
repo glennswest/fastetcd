@@ -257,10 +257,7 @@ struct Args {
     // otherwise consumed (yet).
     //
     /// Time between a leader's heartbeats, in milliseconds (etcd's
-    /// `--heartbeat-interval`). In fastetcd it is also how long one
-    /// AppendEntries may take, sent and fsynced by the follower (openraft
-    /// 0.9's replication timeout, #94), so do not set it below what the
-    /// followers' disk needs for one fsync.
+    /// `--heartbeat-interval`).
     #[arg(long, env = "FASTETCD_HEARTBEAT_INTERVAL", default_value_t = 250)]
     heartbeat_interval: u64,
 
@@ -273,6 +270,15 @@ struct Args {
     /// `--heartbeat-interval`, at most 50 s.
     #[arg(long, env = "FASTETCD_ELECTION_TIMEOUT", default_value_t = 1000)]
     election_timeout: u64,
+
+    /// How long the leader waits for one AppendEntries to be sent,
+    /// appended and fsynced by a follower before sending it again, in
+    /// milliseconds (fastetcd#167; etcd has no such limit). A follower
+    /// whose fsync takes longer never catches up while writes continue,
+    /// so set it above the followers' slowest ordinary fsync. Default:
+    /// `--election-timeout`. At least `--heartbeat-interval`.
+    #[arg(long, env = "FASTETCD_REPLICATION_TIMEOUT")]
+    replication_timeout: Option<u64>,
 
     /// Seconds an auth token lives after its last use on this member
     /// (etcd's `--auth-token-ttl`, fastetcd#46). A use renews it; an
@@ -1072,11 +1078,20 @@ async fn main() -> anyhow::Result<()> {
     // etcd's two flags, as openraft's three (#103).
     let (heartbeat_interval, election_timeout_min, election_timeout_max) =
         raft_timeouts(args.heartbeat_interval, args.election_timeout)?;
+    let replication_timeout =
+        replication_timeout(args.replication_timeout, args.heartbeat_interval, args.election_timeout)?;
+    tracing::info!(
+        heartbeat_interval_ms = heartbeat_interval,
+        election_timeout_ms = election_timeout_min,
+        replication_timeout_ms = replication_timeout,
+        "raft timeouts"
+    );
     let config = Arc::new(
         Config {
             heartbeat_interval,
             election_timeout_min,
             election_timeout_max,
+            replication_timeout,
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(args.snapshot_count),
             max_in_snapshot_log_to_keep: args.max_in_snapshot_log_to_keep,
             ..Default::default()
@@ -1690,6 +1705,19 @@ fn raft_timeouts(heartbeat_ms: u64, election_ms: u64) -> anyhow::Result<(u64, u6
     Ok((heartbeat_ms, election_ms, election_ms * 2))
 }
 
+/// `--replication-timeout` (fastetcd#167): the election timeout unless
+/// given; never below the heartbeat interval (a follower would then time
+/// out on heartbeats too).
+fn replication_timeout(given: Option<u64>, heartbeat_ms: u64, election_ms: u64) -> anyhow::Result<u64> {
+    let t = given.unwrap_or(election_ms);
+    if t < heartbeat_ms {
+        anyhow::bail!(
+            "--replication-timeout ({t} ms) must be at least --heartbeat-interval ({heartbeat_ms} ms)"
+        );
+    }
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,5 +1811,15 @@ mod tests {
         assert_eq!((a.heartbeat_interval, a.election_timeout), (100, 5000));
         let a = parse(&[]).unwrap();
         assert_eq!((a.heartbeat_interval, a.election_timeout), (250, 1000));
+    }
+
+    #[test]
+    fn the_replication_timeout_defaults_to_the_election_timeout() {
+        assert_eq!(parse(&[]).unwrap().replication_timeout, None);
+        assert_eq!(parse(&["--replication-timeout=5000"]).unwrap().replication_timeout, Some(5000));
+        assert_eq!(replication_timeout(None, 250, 1000).unwrap(), 1000);
+        assert_eq!(replication_timeout(None, 250, 10_000).unwrap(), 10_000);
+        assert_eq!(replication_timeout(Some(3000), 250, 1000).unwrap(), 3000);
+        assert!(replication_timeout(Some(100), 250, 1000).is_err());
     }
 }

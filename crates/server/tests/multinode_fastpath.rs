@@ -54,10 +54,12 @@ struct Timing {
     heartbeat: u64,
     election_min: u64,
     election_max: u64,
+    /// openraft's AppendEntries timeout (#167); 0 = the heartbeat.
+    replication: u64,
 }
 
 /// Generous: the build box runs several jobs at once (#44).
-const HARNESS_TIMING: Timing = Timing { heartbeat: 100, election_min: 1500, election_max: 3000 };
+const HARNESS_TIMING: Timing = Timing { heartbeat: 100, election_min: 1500, election_max: 3000, replication: 0 };
 
 /// A member's peer service; `older` makes it a member older than #75
 /// (no `ConfirmLeader`), everything else real.
@@ -136,6 +138,7 @@ async fn start_node_with(id: NodeId, older: bool, timing: Timing) -> Node {
             heartbeat_interval: timing.heartbeat,
             election_timeout_min: timing.election_min,
             election_timeout_max: timing.election_max,
+            replication_timeout: timing.replication,
             ..Default::default()
         }
         .validate()
@@ -486,7 +489,7 @@ fn max_term(nodes: &[Node]) -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lone_write_on_three_members_costs_about_one_fsync() {
     const D: Duration = Duration::from_millis(200);
-    let nodes = cluster_with(0, Timing { heartbeat: 500, election_min: 3000, election_max: 6000 }).await;
+    let nodes = cluster_with(0, Timing { heartbeat: 500, election_min: 3000, election_max: 6000, replication: 0 }).await;
     let leader = leader_of(&nodes);
     let mut kv = KvClient::connect(leader.client.clone()).await.unwrap();
     for n in &nodes {
@@ -515,6 +518,55 @@ async fn a_lone_write_on_three_members_costs_about_one_fsync() {
     for n in &nodes {
         wait_for("the writes on every member", || n.state.sm.mvcc().op_counts().put >= 9).await;
     }
+}
+
+/// The leader's matched index for `follower`, 0 if none.
+fn matched(leader: &Node, follower: NodeId) -> u64 {
+    let m = leader.raft.metrics().borrow().clone();
+    m.replication
+        .and_then(|r| r.get(&follower).cloned().flatten())
+        .map_or(0, |l| l.index)
+}
+
+/// fastetcd#167: a follower whose every fsync (600 ms) outlasts the
+/// heartbeat (250 ms) keeps up under continuous writes when the
+/// AppendEntries timeout is longer than its fsync (the server's default:
+/// the election timeout). With the heartbeat as the timeout (openraft
+/// 0.9's), every request carrying new entries timed out and was resent,
+/// and it never caught up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_slower_than_the_heartbeat_keeps_up() {
+    const FSYNC: Duration = Duration::from_millis(600);
+    let nodes = cluster_with(
+        0,
+        Timing { heartbeat: 250, election_min: 5000, election_max: 10_000, replication: 5000 },
+    )
+    .await;
+    let leader = leader_of(&nodes);
+    let slow = a_follower_of(&nodes).id;
+    nodes.iter().find(|n| n.id == slow).unwrap().log.set_sync_delay(FSYNC);
+    let mut kv = KvClient::connect(leader.client.clone()).await.unwrap();
+    let start = matched(leader, slow);
+    let started = Instant::now();
+    let mut i = 0;
+    while started.elapsed() < Duration::from_secs(8) {
+        kv.put(pb::PutRequest { key: format!("slow{i}").into_bytes(), value: b"v".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+        i += 1;
+        sleep(Duration::from_millis(20)).await;
+    }
+    let last = leader.raft.metrics().borrow().last_log_index.unwrap_or(0);
+    let end = matched(leader, slow);
+    eprintln!("{i} writes; slow follower matched {start} -> {end}, leader's last {last}");
+    nodes.iter().find(|n| n.id == slow).unwrap().log.set_sync_delay(Duration::ZERO);
+    // It trails by about one fsync's worth of entries, not by everything.
+    assert!(
+        end.saturating_sub(start) * 2 >= last.saturating_sub(start),
+        "the slow follower acknowledged {} of {} entries during the writes",
+        end.saturating_sub(start),
+        last.saturating_sub(start)
+    );
 }
 
 /// fastetcd#103: WAL fsyncs take `stall` (on every member, or with
@@ -560,7 +612,7 @@ async fn writes_through_stalls(timing: Timing, stall: Duration, everyone: bool) 
 /// asserted.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stall_on_the_leader_longer_than_the_election_timeout_elects_again() {
-    let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000 };
+    let timing = Timing { heartbeat: 250, election_min: 1000, election_max: 2000, replication: 0 };
     let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), false).await;
     eprintln!("1 s election timeout, 6 s fsyncs on the leader: term {before} -> {after}, leader {l0} -> {l1}");
     assert!(after > before, "no election while the leader stalled 6 s at a 1 s election timeout (term {before})");
@@ -571,7 +623,7 @@ async fn a_stall_on_the_leader_longer_than_the_election_timeout_elects_again() {
 /// leader's disk alone or every member's stalls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_election_timeout_above_the_stall_keeps_the_leader() {
-    let timing = Timing { heartbeat: 250, election_min: 10_000, election_max: 20_000 };
+    let timing = Timing { heartbeat: 250, election_min: 10_000, election_max: 20_000, replication: 0 };
     for everyone in [false, true] {
         let (before, after, l0, l1) = writes_through_stalls(timing, Duration::from_secs(6), everyone).await;
         eprintln!("10 s election timeout, 6 s fsyncs (every member: {everyone}): term {before} -> {after}, leader {l0} -> {l1}");

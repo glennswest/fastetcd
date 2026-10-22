@@ -712,8 +712,9 @@ impl WalLogStore {
 
 /// Most encoded entry bytes [`WalLogStore`] hands openraft for one
 /// AppendEntries (fastetcd#94). openraft sends as many entries as the
-/// reader returns (up to 300) in one message, and gives each message
-/// `heartbeat_interval` (250 ms) to be sent, appended and fsynced by the
+/// reader returns (up to 300) in one message, and gives each message the
+/// replication timeout (`--replication-timeout`, #167; before 1.35.2
+/// `heartbeat_interval`, 250 ms) to be sent, appended and fsynced by the
 /// follower; a message that cannot make it is sent again at the same
 /// size, forever, and before 1.17 one over 4 MiB was refused outright.
 /// 1 MiB (two full batches) fits both. One entry larger than this still
