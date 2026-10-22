@@ -35,7 +35,8 @@ on the apply path, without requiring any client to change.
    No back-channel writes to the state machine. A lease keep-alive is
    not a mutation of the store: as in etcd, the leader renews it in RAM
    and a new leader gives every lease a full TTL (#92, 03-deploy
-   § Leases).
+   § Leases). Lease deadlines are on the leader's monotonic clock, never
+   the wall clock (#162).
 
 ## Component choices
 

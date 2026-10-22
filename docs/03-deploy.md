@@ -691,11 +691,23 @@ in RAM: a keep-alive is not logged, so it costs no fsync (on a follower it
 is forwarded to the leader, and TimeToLive is answered by the leader).
 The leader confirms it still leads before renewing. Expiry is still a
 `LeaseRevoke` through Raft, proposed by the leader for a lease whose
-deadline, the later of the persisted one and its RAM renewal, has
-passed. A renewal lives only in the leader's RAM, so **a new leader, or a
+deadline has passed: the later of its RAM renewal and its TTL from when
+the leader applied its grant or last keep-alive logged through Raft. A
+renewal lives only in the leader's RAM, so **a new leader, or a
 restarted single member, gives every lease a full TTL from the moment it
 leads** (etcd's `Promote`; etcd's optional lease checkpointing is not
-implemented). A member older than 1.23 that became leader would read only
+implemented).
+
+**Lease deadlines are on the monotonic clock (1.34.2, #162)**, as etcd's
+lessor: a step of the wall clock changes no lease. Before, they were
+unix seconds compared with the wall clock, and a node with no RTC
+battery (the X9 blades boot at 1970 until NTP) expired every lease at
+once when NTP stepped its clock forward, or kept dead leases alive for
+decades after a step back. Grant and keep-alive entries still carry the
+proposer's wall clock and the lease table its deadline (members older
+than 1.23 read them); a 1.34.2 leader no longer compares them with the
+clock. Leases are counted on the leader only, so the clocks of different
+members need not agree. A member older than 1.23 that became leader would read only
 the persisted deadlines and expire every lease kept alive that way, so
 RAM renewal is used only while every member answers `ConfirmLeader` with
 1.23 or later; until then keep-alives go through Raft as before

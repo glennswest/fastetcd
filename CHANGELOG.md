@@ -4,6 +4,20 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **fix:** Lease deadlines are on the monotonic clock, as etcd's lessor
+  (#162). The leader's RAM deadlines were unix seconds and the effective
+  deadline the later of them and the persisted one, all against the wall
+  clock: on a node with no RTC battery (X9 blades boot at 1970 until
+  NTP) a forward step expired every lease at once, a backward step kept
+  dead leases alive. Now the leader counts each lease's TTL from its
+  promotion, its last RAM renewal, or when it applied the lease's grant or
+  last Raft-logged keep-alive (`MvccStore::lease_applied_at`), all
+  `Instant`s; the persisted deadline stays in the format for older
+  members. TimeToLive truncates whole seconds, as etcd's. Test:
+  `lease_clock_step.rs` (grants with a 1970 and a year-3000 clock live
+  exactly their TTL; a Raft-logged keep-alive with a 1970 clock renews).
+
 ## [v1.34.1] — 2026-10-21
 
 ### Fixed
