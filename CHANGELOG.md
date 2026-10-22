@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **perf:** The space monitor's live-bytes walk no longer blocks a tokio
+## [v1.35.1] — 2026-10-21
+
+### Changed
+- The space monitor's live-bytes walk no longer blocks a tokio
   worker, and runs no more often than it can afford (#166).
   `RedbEngine::usage` called redb's `begin_write` on the async thread (a
   worker blocked while a checkpoint held redb's writer); it now runs, with

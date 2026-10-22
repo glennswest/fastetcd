@@ -10,7 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.35.0`** — A start logs each phase's duration (#165): `startup phase`
+**`1.35.1`** — The live-bytes walk (`dbSizeInUse`) runs on a blocking
+thread and no sooner than 200x its last duration, one at a time (#166).
+
+Previous: **`1.35.0`** — A start logs each phase's duration (#165): `startup phase`
 lines (target `fastetcd::startup`) from `data_file_open` to `listening`,
 a summary, and `raft_ready` when a leader is known (`startup.rs`).
 
@@ -2990,7 +2993,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       listener), workspace 0 failures, no clippy finding in startup.rs.
 
 94. **The live-bytes walk stays off tokio workers and is paced by its
-    cost (#166).** `RedbEngine::usage` called redb's `begin_write` on the
+    cost (#166) — done, shipped in v1.35.1.** `RedbEngine::usage` called redb's `begin_write` on the
     async thread (a tokio worker blocked while a checkpoint held redb's
     writer), then `WriteTransaction::stats()` walked every tree with the
     writer held (checkpoints and back-pressure flushes wait it out), every
@@ -3007,5 +3010,8 @@ Tracked live in the Claude task system. Snapshot of the order:
       (they use file/dir sizes + statvfs, and reclaim measures itself).
     - Tests: pacing rule; one walk at a time; usage still right.
     Work items:
-    - [ ] redb_engine, space.rs; tests.
-    - [ ] Docs (04), changelog; release; close #166.
+    - [x] redb_engine, space.rs; tests.
+    - [x] Docs (04), changelog; release 1.35.1; close #166.
+    - Verified: sc-build of 3757766, workspace 0 failures, new tests pass;
+      with begin_write put back on the async thread (branch, deleted) a
+      50 ms sleep on the runtime took 1.0 s (the writer's hold).
