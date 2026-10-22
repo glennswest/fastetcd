@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.34.3`** — The upgrade safety backup is skipped, with a warning,
+**`1.34.4`** — An empty WAL opens on a preallocated segment 0 (#164): a
+member's first start no longer writes and syncs 16 MiB of zeros before
+the log opens; the log moves to the zero-filled spare once it is ready.
+
+Previous: **`1.34.3`** — The upgrade safety backup is skipped, with a warning,
 when the copy would take its filesystem past `--space-high-water-percent`
 (#163): a large data file no longer fills the 1 GiB data volume at start.
 
@@ -2935,7 +2939,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 540a32d, workspace 0 failures (both new tests
       pass), no clippy finding in admin.rs.
 
-92. **An empty WAL opens without writing 16 MiB first (#164).** `Wal::open`
+92. **An empty WAL opens without writing 16 MiB first (#164) — done, shipped in v1.34.4.** `Wal::open`
     on an empty `wal/` joined a zero-fill of the whole first segment plus
     its fsync before returning (`install_spare(spawn_spare(..))`): seconds
     on an SMR disk or ublk over an HDD, at every first boot. Plan:
@@ -2947,8 +2951,13 @@ Tracked live in the Claude task system. Snapshot of the order:
       the spare is ready, while the current segment is one that was only
       preallocated, it rolls to the zero-filled spare. A short segment
       replays as any other (zeros read as its end).
-    - Tests: open of an empty dir does not wait for a large spare; the
-      early roll happens once the spare is ready and everything replays.
+    - Tests: after opening an empty dir, segment 0 holds no written data
+      (`lseek(SEEK_DATA)`, calibrated); the early roll happens once the
+      spare is ready and everything replays. (A timing test was tried and
+      dropped: on a shared build VM open and fill times were too noisy.)
     Work items:
-    - [ ] raft_wal.rs; tests.
-    - [ ] Docs (03 writes), changelog; release; close #164.
+    - [x] raft_wal.rs; tests.
+    - [x] Docs (03), changelog; release 1.34.4; close #164.
+    - Verified: workspace at 536b84c 0 failures; raft_wal 5/5 at f2bd72b;
+      with the old open put back (branch, deleted) the content check fails
+      ("opening an empty log wrote segment 0") and the roll test fails.
