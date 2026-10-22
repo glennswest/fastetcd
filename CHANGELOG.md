@@ -4,6 +4,17 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **feat:** A start logs where its time goes (#165): one `startup phase`
+  line (target `fastetcd::startup`, `phase`, `took_ms`, `since_start_ms`)
+  for each of `data_file_open` (with redb's repair noted), `index_load`,
+  `state_machine_open`, `upgrade_backup`, `wal_open`, `format_recovery`,
+  `raft_start` and `listening`; a `startup: listening` summary; and
+  `raft_ready` when a leader is first known. The client and peer ports are
+  now bound before their servers start (same socket options), so
+  `listening` is when they really are. Test: `startup_phases.rs` (real
+  binary, new store and restart). 03-deploy § Where a start's time goes.
+
 ## [v1.34.4] — 2026-10-21
 
 ### Changed

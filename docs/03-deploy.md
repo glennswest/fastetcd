@@ -507,6 +507,28 @@ grace period unless the disk is stalled. A leader does not hand over
 leadership first (etcd does; fastetcd has no MoveLeader yet, #57): the
 others elect a new leader after `--election-timeout`.
 
+**Where a start's time goes** (since 1.35.0, #165). Each phase of a start
+logs one INFO line under target `fastetcd::startup`, `startup phase`, with
+`phase`, `took_ms` (the phase) and `since_start_ms` (since the process
+began), in this order:
+
+| Phase | What it covers |
+|---|---|
+| `data_file_open` | Opening the data file; redb's repair of a file not closed cleanly (`note` says so), or the restore of a corrupt one from a backup. |
+| `index_load` | Loading every key's index into RAM (`note`: how many keys), the cluster id. |
+| `state_machine_open` | The retained raft snapshots. |
+| `upgrade_backup` | The pre-version safety backup, when the version changed. |
+| `wal_open` | Opening and replaying the WAL (or, once, moving the log out of the data file). |
+| `format_recovery` | Upgrades of old data directories. |
+| `raft_start` | Starting raft (and, for a new cluster, initializing it). |
+| `listening` | Binding the client and peer ports. |
+
+Then `startup: listening` with every phase on one line (`phases=data_file_open=12ms
+index_load=3ms ...`), and, when this member first knows a leader (what
+`/readyz` waits for), `phase=raft_ready` with `since_start_ms`, the
+`leader`, `term` and `is_leader`. A start that answers probes late says
+which: a repair, a large index, a long WAL replay, or an election.
+
 The raft log is purged after each snapshot (`--snapshot-count`), but a
 WAL segment is deleted only once a checkpoint has made the data file
 durable past every entry in it.
