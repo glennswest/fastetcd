@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **fix:** The upgrade safety backup no longer fills the data volume
+## [v1.34.3] — 2026-10-21
+
+### Fixed
+- The upgrade safety backup no longer fills the data volume
   (#163). On a version change, startup copied the whole data file into
   `<data-dir>/backups` whatever the free space: on a 1 GiB volume a file
   over ~330 MB ran out of space or left the store a full volume. Now the

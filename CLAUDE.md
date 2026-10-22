@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.34.2`** — Lease deadlines on the monotonic clock, as etcd's lessor
+**`1.34.3`** — The upgrade safety backup is skipped, with a warning,
+when the copy would take its filesystem past `--space-high-water-percent`
+(#163): a large data file no longer fills the 1 GiB data volume at start.
+
+Previous: **`1.34.2`** — Lease deadlines on the monotonic clock, as etcd's lessor
 (#162): an NTP step on an RTC-less node no longer expires every lease
 at once or keeps dead ones alive (`lessor.rs`, `lease_applied_at`).
 
@@ -2907,7 +2911,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       it fails: a lease granted with a 1970 clock answers TimeToLive
       -1792631396 (expired at once).
 
-91. **The upgrade safety backup fits or is skipped (#163).** On a version
+91. **The upgrade safety backup fits or is skipped (#163) — done, shipped in v1.34.3.** On a version
     change, startup copies the whole data file to `<data-dir>/backups`
     (default on, retain 2), on the 1 GiB data volume: a file over ~330 MB
     fills it (ENOSPC, or a full volume the store must then run on). Chosen
@@ -2926,5 +2930,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       part-written copy needs a filesystem that fills: not tested.)
     - Not here: periodic `--backup-dir` backups on their volume (#153).
     Work items:
-    - [ ] admin.rs + main wiring; tests.
-    - [ ] Docs (01, 03, 04), changelog; release; close #163.
+    - [x] admin.rs + main wiring; tests.
+    - [x] Docs (01, 04, --help), changelog; release 1.34.3; close #163.
+    - Verified: sc-build of 540a32d, workspace 0 failures (both new tests
+      pass), no clippy finding in admin.rs.
