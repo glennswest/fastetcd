@@ -732,25 +732,43 @@ mod tests {
         assert_eq!(got, vec![(0, b"zero".to_vec()), (1, b"n".to_vec())]);
     }
 
+    /// Whether `path` holds written data at all, as `lseek(SEEK_DATA)`
+    /// sees it: ext4 and xfs report a preallocated, never written range
+    /// as a hole, written zeros as data.
+    #[cfg(target_os = "linux")]
+    fn has_written_data(path: &Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let f = File::open(path).unwrap();
+        // SAFETY: a valid open descriptor.
+        let at = unsafe { libc::lseek(f.as_raw_fd(), 0, libc::SEEK_DATA) };
+        at >= 0
+    }
+
     /// An empty log opens without writing a segment's worth of zeros and
     /// syncing them first (#164): segment 0 is only preallocated.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_empty_log_opens_without_zero_filling_a_segment() {
-        const SEGMENT: u64 = 256 << 20;
-        // What zero-filling one segment costs on this disk, beside it.
-        let other = tempfile::tempdir().unwrap();
-        let t = std::time::Instant::now();
-        drop(prepare_spare(other.path(), SEGMENT).unwrap());
-        let fill = t.elapsed();
-        drop(other);
-
+        const SEGMENT: u64 = 16 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let t = std::time::Instant::now();
+        // Can this filesystem tell a preallocated file from a written one?
+        let calibrate = tempfile::tempdir().unwrap();
+        let preallocated = create_segment(calibrate.path(), 7, SEGMENT).unwrap();
+        drop(preallocated);
+        drop(prepare_spare(calibrate.path(), SEGMENT).unwrap());
+        let tells = !has_written_data(&segment_path(calibrate.path(), 7))
+            && has_written_data(&calibrate.path().join(SPARE));
+
         let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: SEGMENT }).unwrap();
-        let took = t.elapsed();
-        eprintln!("an empty log with 256 MiB segments opened in {took:?}; zero-filling one took {fill:?}");
-        assert!(took * 4 < fill, "opening an empty log took {took:?}, zero-filling a segment {fill:?}");
         assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
+        if tells {
+            assert!(
+                !has_written_data(&segment_path(dir.path(), 0)),
+                "opening an empty log wrote segment 0 (a synchronous zero-fill)"
+            );
+        } else {
+            eprintln!("this filesystem reports preallocated ranges as data: segment 0's contents not checked");
+        }
         wal.append(&[(KIND_ENTRY, 1, b"first")]).unwrap();
         wal.sync().unwrap();
         assert_eq!(wal.segment_count(), 1);
