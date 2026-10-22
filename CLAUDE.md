@@ -3015,3 +3015,29 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 3757766, workspace 0 failures, new tests pass;
       with begin_write put back on the async thread (branch, deleted) a
       50 ms sleep on the runtime took 1.0 s (the writer's hold).
+
+95. **A follower whose fsync outlasts the heartbeat catches up (#167).**
+    openraft 0.9's `ReplicationCore::send_log_entries` gives every
+    AppendEntries `heartbeat_interval` (250 ms) to be sent, appended and
+    fsynced by the follower. A follower whose fsync takes longer (X9
+    blades: 0.3–0.8 s, max 84.7 s, `docs/benchmarks/blade-server3.md`)
+    times out on every request carrying new entries; the leader resends,
+    the follower fsyncs again, and under steady writes it never catches
+    up. Plan:
+    - Vendored openraft, a second patch: `Config::replication_timeout`
+      (ms, 0 = `heartbeat_interval`, upstream's behaviour) and
+      `Config::append_entries_timeout()`, used by `send_log_entries`.
+      Recorded in `vendor/openraft/FASTETCD.md`.
+    - fastetcd: `--replication-timeout` (ms, `ETCD_`-less, fastetcd's own;
+      default `--election-timeout`, at least `--heartbeat-interval`). Safe
+      to be long: a follower in its fsync cannot time out an election
+      (its RaftCore waits for the flush), and the leader's timeout only
+      resends.
+    - Docs: 01 flag; 03 § Timeouts and slow disks: flags for HDD nodes.
+    - Test (multinode_fastpath): 3 members, one follower's fsyncs 600 ms,
+      continuous writes: with the default it keeps up (its matched index
+      advances with the leader's); control with the heartbeat as timeout
+      on a branch.
+    Work items:
+    - [ ] openraft patch + FASTETCD.md; flag; test.
+    - [ ] Docs, changelog; release; close #167.
