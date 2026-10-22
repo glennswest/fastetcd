@@ -112,7 +112,17 @@ pub async fn dial_peer_with(url: &str, tls: &PeerTls, dial: DialOptions) -> Resu
             )))
         }
     };
-    endpoint.connect().await.map_err(std::io::Error::other)
+    // tonic's `connect_timeout` bounds only the TCP connect, not the TLS
+    // handshake after it (`Endpoint::connect`), so the whole dial is
+    // bounded here. A channel's own reconnects bound only the TCP part;
+    // the forwarder drops a channel that failed and dials again here.
+    match tokio::time::timeout(dial.connect_timeout, endpoint.connect()).await {
+        Ok(conn) => conn.map_err(std::io::Error::other),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("dialing peer {url}: no connection in {:?}", dial.connect_timeout),
+        )),
+    }
 }
 
 /// Most bytes the peer port decodes in one message (fastetcd#94).
