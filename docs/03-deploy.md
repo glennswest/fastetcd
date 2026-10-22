@@ -434,7 +434,7 @@ A data directory holds:
 | Path | What |
 |---|---|
 | `fastetcd.redb` | The data file: one redb ACID B-tree with the MVCC data, leases, auth and node metadata. |
-| `wal/` | The raft log and vote: a sequential write-ahead log in segments written full of zeros up front (`--wal-segment-bytes`, 16 MiB), plus `spare.wal.tmp`, the next one, made ready in the background. |
+| `wal/` | The raft log and vote: a sequential write-ahead log in segments written full of zeros up front (`--wal-segment-bytes`, 16 MiB), plus `spare.wal.tmp`, the next one, made ready in the background. A new member's first segment is only preallocated, so its first start does not wait for 16 MiB of zeros to be written and synced (since 1.34.4, #164); the log moves to the zero-filled spare as soon as that is ready, because each fdatasync of a merely preallocated segment is a filesystem journal commit. |
 | `snapshots/` | Retained raft snapshots. |
 
 There is no engine choice to make: redb is the only engine (the `wal` and

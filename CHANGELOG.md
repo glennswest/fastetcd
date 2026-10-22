@@ -4,6 +4,18 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **perf:** An empty WAL opens without writing a segment first (#164).
+  A member's first start zero-filled and synced the whole first segment
+  (16 MiB) before the log opened: seconds on an SMR disk or ublk over an
+  HDD. Segment 0 is now only preallocated (`fallocate`); the spare is
+  zero-filled in the background as for every later segment, and the
+  first append after it is ready moves the log to it (a preallocated
+  segment's fdatasyncs are journal commits, #85), so that cost lasts only
+  until the spare is filled. Tests in `raft_wal.rs`: opening an empty log
+  with 512 MiB segments returns in milliseconds; the move to the spare
+  happens once it is ready, the vote carries over, everything replays.
+
 ## [v1.34.3] — 2026-10-21
 
 ### Fixed
