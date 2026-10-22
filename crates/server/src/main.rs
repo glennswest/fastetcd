@@ -811,6 +811,8 @@ const GRPC_OVERHEAD_BYTES: u64 = 512 * 1024;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Each phase of a start logs how long it took (#165).
+    let mut startup = fastetcd_server::startup::Startup::new();
     apply_etcd_env_compat();
     let args = Args::parse();
     // `RUST_LOG` wins, as before; else `--log-level` (#54); else info.
@@ -937,6 +939,10 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .await?;
+    startup.phase_with(
+        "data_file_open",
+        if engine.repaired_at_open() { "redb repaired a file that was not closed cleanly" } else { "" },
+    );
     // Applies (non-durable commits) are held in RAM and written into the
     // data file in batches by the checkpoint, so an apply never waits on
     // the data file's fsync (fastetcd#85).
@@ -990,6 +996,7 @@ async fn main() -> anyhow::Result<()> {
         index_bytes = cache_stats.index_bytes,
         "RAM cache: every key's index is resident; latest values cached up to the budget"
     );
+    startup.phase_with("index_load", &format!("{} keys", cache_stats.index_keys));
     sm_auth_token_ttl(&mvcc, args.auth_token_ttl);
     let sm = FastetcdStateMachine::open_with_retention(
         mvcc,
@@ -997,6 +1004,7 @@ async fn main() -> anyhow::Result<()> {
         args.max_snapshots,
     )
     .await?;
+    startup.phase("state_machine_open");
     // Safety backup before a newer version touches the data (#backup):
     // take it before anything writes, while we hold the lock: before
     // the raft log moves into the WAL (which clears the data file's
@@ -1036,6 +1044,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    startup.phase("upgrade_backup");
+
     // The raft log: a sequential WAL in `<data-dir>/wal/`, built from
     // the data file's own log tables on the first start of this version
     // (fastetcd#85).
@@ -1050,6 +1060,7 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .await?;
+    startup.phase("wal_open");
     let committed_index = log.committed_index();
     let wal_stats = log.stats();
     let checkpoint_log = log.clone();
@@ -1151,6 +1162,7 @@ async fn main() -> anyhow::Result<()> {
             .write_open_version(env!("CARGO_PKG_VERSION"))
             .await?;
     }
+    startup.phase("format_recovery");
 
     // Clone the MVCC handle before `sm` is moved into ServerState; the
     // peer service uses it to serve forwarded linearizable reads (#10).
@@ -1196,6 +1208,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("cluster_state=existing — skipping raft.initialize; waiting to be joined");
     }
+    startup.phase("raft_start");
+    fastetcd_server::startup::log_raft_ready(raft.clone(), startup.started());
 
     let forwarder = fastetcd_raft::WriteForwarder::with_tls(peers.clone(), peer_dial_tls);
 
@@ -1441,6 +1455,13 @@ async fn main() -> anyhow::Result<()> {
     let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
     let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
 
+    // Bound here, not inside `serve`, so a start can say when it listens
+    // (#165); the same socket options `serve` sets (nodelay, no keepalive).
+    let peer_incoming = tonic::transport::server::TcpIncoming::new(peer_listen, true, None)
+        .map_err(|e| anyhow::anyhow!("listening on the peer port {peer_listen}: {e}"))?;
+    let client_incoming = tonic::transport::server::TcpIncoming::new(client_listen, true, None)
+        .map_err(|e| anyhow::anyhow!("listening on the client port {client_listen}: {e}"))?;
+
     // Spawn the peer server on its own port, with the peer identity.
     let tls_for_peer = peer_tls;
     let peer_handle = {
@@ -1453,7 +1474,7 @@ async fn main() -> anyhow::Result<()> {
             builder
                 .add_service(RaftPeerServer::new(peer_service)
                 .max_decoding_message_size(fastetcd_raft::network::PEER_MAX_DECODE_BYTES))
-                .serve(peer_listen)
+                .serve_with_incoming(peer_incoming)
                 .await
         })
     };
@@ -1581,10 +1602,11 @@ async fn main() -> anyhow::Result<()> {
             }
             builder
                 .add_routes(tonic::service::Routes::from(app))
-                .serve(client_listen)
+                .serve_with_incoming(client_incoming)
                 .await
         })
     };
+    startup.listening();
 
     // SIGTERM is how a kubelet, systemd or podman stops a member; SIGINT
     // a terminal. Either stops cleanly (#161).
