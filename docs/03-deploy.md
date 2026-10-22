@@ -491,6 +491,22 @@ a write that was never acknowledged) is cut off at startup; damage
 anywhere else in it stops the member, which then needs replacing
 (member remove / add) like a member with a corrupt data file.
 
+**Stopping a member.** SIGTERM (how a kubelet, systemd or podman
+stops a process) and SIGINT both stop it cleanly (since 1.34.1, #161;
+before, only SIGINT did and SIGTERM killed it): raft stops, the
+write-behind layers are written into the data file and made durable,
+and the data file is closed, which marks it clean. The next start then
+has nothing to replay from the WAL and opens the data file at once. A
+member killed instead (SIGKILL, a kubelet's grace period run out, a
+crash, a power cut) loses nothing acknowledged, but its next start logs
+`data file was not closed cleanly (killed, or crashed); redb is
+repairing it` and walks the whole file before it serves (seconds on a
+spinning disk for a large file), then replays the WAL tail. The clean
+stop takes about one checkpoint: well inside a kubelet's default 30 s
+grace period unless the disk is stalled. A leader does not hand over
+leadership first (etcd does; fastetcd has no MoveLeader yet, #57): the
+others elect a new leader after `--election-timeout`.
+
 The raft log is purged after each snapshot (`--snapshot-count`), but a
 WAL segment is deleted only once a checkpoint has made the data file
 durable past every entry in it.

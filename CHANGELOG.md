@@ -4,6 +4,20 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **fix:** SIGTERM stops a member cleanly (#161). Only SIGINT was
+  handled, so every kubelet, systemd or podman stop killed the process:
+  the write-behind layers were lost from RAM and redb's file left marked
+  dirty, so every start walked the whole data file (redb's repair,
+  seconds on a spinning disk) and replayed the WAL tail. Now SIGTERM and
+  SIGINT stop raft, make the applied state durable in the data file and
+  close it cleanly. A start after a kill logs `data file was not closed
+  cleanly (killed, or crashed); redb is repairing it`
+  (`RedbEngine::repaired_at_open`). Test: `clean_shutdown.rs` (real
+  binary: after SIGKILL the next start repairs; after SIGTERM exit 0, no
+  repair, every acknowledged revision in the data file). 03-deploy §
+  Stopping a member.
+
 ### 2026-10-17
 - **docs:** Deploy description matches stormcos: fastetcd runs as a kubelet
   static pod with mutual-TLS peers and `/livez`/`/readyz` probes on :2381
