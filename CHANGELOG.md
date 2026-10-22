@@ -4,6 +4,18 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **fix:** The upgrade safety backup no longer fills the data volume
+  (#163). On a version change, startup copied the whole data file into
+  `<data-dir>/backups` whatever the free space: on a 1 GiB volume a file
+  over ~330 MB ran out of space or left the store a full volume. Now the
+  copy is skipped, with a WARN naming the sizes and the remedies, when it
+  would take the backup directory's filesystem past
+  `--space-high-water-percent` (80) after the roll-off; nothing is rolled
+  off then. A copy that fails part-way is removed. Still on by default.
+  Tests: `admin.rs` (the fit rule; a skipped backup copies and rolls off
+  nothing). Docs: 01, 04.
+
 ## [v1.34.2] — 2026-10-21
 
 ### Fixed

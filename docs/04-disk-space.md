@@ -254,6 +254,20 @@ The multipliers, in order of size: MVCC history between compactions
 `--upgrade-backup-retain` safety backups (a full copy each). Sizing for
 the 63 MiB is how a volume fills.
 
+**The upgrade safety backup never fills the volume** (since 1.34.3,
+#163). It is taken at startup, synchronously, when a different version
+opens the data file, into `<data-dir>/backups` by default: the volume
+the store runs on. Before copying, fastetcd checks that the copy, less
+the old backups it would roll off, leaves that filesystem at or below
+`--space-high-water-percent` (80%); if not, it skips the backup with a
+WARN (`skipped the pre-version safety backup`) and rolls nothing off.
+On a 1 GiB volume that is a data file of roughly a third of the volume
+or more. To keep a backup for large files, point `--upgrade-backup-dir`
+at another volume, or take one with `fastetcd backup --out <path>`
+while the node is stopped. The copy costs a read and a write of the
+whole file once per version change (tens of seconds for a large file on
+a spinning disk); `--upgrade-backup=false` skips it.
+
 The raft-log term assumes 2 KiB per write (`--snapshot-count` x
 2 KiB, 10 MiB at the default), plus three WAL segments (48 MiB): since
 1.12 the log is in segments in `wal/` written full size up front (#85):

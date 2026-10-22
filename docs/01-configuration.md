@@ -124,7 +124,7 @@ Details: [04-disk-space](04-disk-space.md).
 | `--backup-every-revisions` | `10000` | `FASTETCD_BACKUP_EVERY_REVISIONS` | Also after this many revisions; `0` disables the trigger. |
 | `--backup-retain` | `4` | `FASTETCD_BACKUP_RETAIN` | Backups kept. |
 | `--on-corruption` | `restore` | `FASTETCD_ON_CORRUPTION` | `restore` (lone member only) or `refuse`. |
-| `--upgrade-backup` | `true` | `FASTETCD_UPGRADE_BACKUP` | Copy the data file before a different version opens it. `--upgrade-backup=false` turns it off. |
+| `--upgrade-backup` | `true` | `FASTETCD_UPGRADE_BACKUP` | Copy the data file before a different version opens it. `--upgrade-backup=false` turns it off. Skipped, with a warning, when the copy would take the backup directory's filesystem past `--space-high-water-percent` (since 1.34.3, #163). |
 | `--upgrade-backup-dir` | `<data-dir>/backups` | `FASTETCD_UPGRADE_BACKUP_DIR` | Where those copies go. |
 | `--upgrade-backup-retain` | `2` | `FASTETCD_UPGRADE_BACKUP_RETAIN` | How many are kept. |
 
