@@ -3050,3 +3050,22 @@ Tracked live in the Claude task system. Snapshot of the order:
       openraft's own suite 182 pass; workspace 0 failures (7c72f08's
       rerun; da4cf44); whole-file runs 5/5 at da4cf44 vs 4/5 before #167
       (the #97 lone-write test's flake, filed #171).
+
+96. **Peer connections time out and notice a dead peer (#168).**
+    `dial_peer` set no connect timeout and no keepalive (tonic sets
+    neither): a dial to a peer that never answers and a connection whose
+    peer vanished without a reset held forwarded writes, reads, lease TTLs
+    and membership changes for the OS's TCP timeout. Plan:
+    - `DialOptions` (connect timeout, HTTP/2 keepalive interval and
+      timeout, keepalive while idle) on `GrpcNetworkFactory` and
+      `WriteForwarder` (`with_dial`); `dial_peer_with`.
+    - main: etcd's `PeerDialTimeout`, 1 s + `--election-timeout`, for the
+      connect and an unanswered ping; a ping every second. A closed
+      connection fails its calls; the forwarder already drops a failed
+      channel and dials again.
+    - Test `peer_dial.rs`: a silent TCP peer, a TLS handshake that never
+      completes, a peer that freezes on an open connection: each call
+      fails in seconds; control on a branch without the options.
+    Work items:
+    - [x] network.rs, main; test.
+    - [ ] Docs (03 multi-node), changelog; release; close #168.

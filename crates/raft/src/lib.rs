@@ -34,7 +34,7 @@ pub mod version_gate;
 pub mod wal_log_store;
 
 pub use network::{
-    auth_status, dial_peer, empty_peers, AuthSyncError, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,
+    auth_status, dial_peer, dial_peer_with, empty_peers, DialOptions, AuthSyncError, GrpcNetwork, GrpcNetworkFactory, PeerEndpoints, PeerTls,
     RaftPeerService, WriteForwarder,
 };
 

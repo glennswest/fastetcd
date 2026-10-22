@@ -1200,7 +1200,13 @@ async fn main() -> anyhow::Result<()> {
     // Nothing is applied before this member's log holds it durably: the
     // leader replicates before its own fsync returns (#97).
     sm.follow_log_durability(log_progress.clone());
-    let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone());
+    // A connect timeout and keepalive on every peer connection, so a peer
+    // that vanished does not hold forwarded calls for the OS's TCP
+    // timeout (#168).
+    let peer_dial = fastetcd_raft::DialOptions::for_election_timeout(std::time::Duration::from_millis(
+        args.election_timeout,
+    ));
+    let factory = GrpcNetworkFactory::with_tls(peers.clone(), peer_dial_tls.clone()).with_dial(peer_dial);
     let raft = Raft::<TypeConfig>::new(node_id, config, factory, log, sm.clone()).await?;
     // For the clean stop at the end (#161).
     let (shutdown_raft, shutdown_applied) = (raft.clone(), sm.applied_index());
@@ -1226,7 +1232,7 @@ async fn main() -> anyhow::Result<()> {
     startup.phase("raft_start");
     fastetcd_server::startup::log_raft_ready(raft.clone(), startup.started());
 
-    let forwarder = fastetcd_raft::WriteForwarder::with_tls(peers.clone(), peer_dial_tls);
+    let forwarder = fastetcd_raft::WriteForwarder::with_tls(peers.clone(), peer_dial_tls).with_dial(peer_dial);
 
     // Disk-space accounting (#14). A bounded data volume must never
     // reach ENOSPC: at that point the snapshot write fails, openraft

@@ -42,14 +42,61 @@ pub fn empty_peers() -> PeerEndpoints {
 /// presents as its client certificate. `None` is plaintext.
 pub type PeerTls = Option<ClientTlsConfig>;
 
+/// How long a peer connection may take to come up, and how a dead one is
+/// noticed (fastetcd#168). tonic sets neither by default: a dial to a
+/// peer that never answers (a powered-off host, a TLS handshake that
+/// stalls) and a connection whose peer vanished without a reset both
+/// held a forwarded write or read for the OS's TCP timeout (minutes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DialOptions {
+    /// TCP connect plus TLS handshake.
+    pub connect_timeout: std::time::Duration,
+    /// An HTTP/2 ping this often, also on an idle connection.
+    pub keepalive_interval: std::time::Duration,
+    /// A ping not answered in this long closes the connection: calls on
+    /// it fail, and the next call dials again.
+    pub keepalive_timeout: std::time::Duration,
+}
+
+impl DialOptions {
+    /// etcd's peer dial timeout, 1 s plus the election timeout
+    /// (`PeerDialTimeout`), for the connect and for an unanswered ping;
+    /// a ping every second.
+    pub fn for_election_timeout(election_timeout: std::time::Duration) -> Self {
+        let t = std::time::Duration::from_secs(1) + election_timeout;
+        Self {
+            connect_timeout: t,
+            keepalive_interval: std::time::Duration::from_secs(1),
+            keepalive_timeout: t,
+        }
+    }
+}
+
+impl Default for DialOptions {
+    /// For the default `--election-timeout` (1 s).
+    fn default() -> Self {
+        Self::for_election_timeout(std::time::Duration::from_secs(1))
+    }
+}
+
+/// Dial a peer with the [`DialOptions`] default.
+pub async fn dial_peer(url: &str, tls: &PeerTls) -> Result<Channel, std::io::Error> {
+    dial_peer_with(url, tls, DialOptions::default()).await
+}
+
 /// Dial a peer. The URL's scheme must agree with whether peer TLS is
 /// on: an `https://` peer without TLS configured, or an `http://` peer
 /// with it, is refused with an error naming the URL, rather than
 /// quietly falling back to plaintext or failing an opaque handshake
 /// (fastetcd#23).
-pub async fn dial_peer(url: &str, tls: &PeerTls) -> Result<Channel, std::io::Error> {
+pub async fn dial_peer_with(url: &str, tls: &PeerTls, dial: DialOptions) -> Result<Channel, std::io::Error> {
     let https = url.starts_with("https://");
-    let endpoint = Endpoint::from_shared(url.to_string()).map_err(std::io::Error::other)?;
+    let endpoint = Endpoint::from_shared(url.to_string())
+        .map_err(std::io::Error::other)?
+        .connect_timeout(dial.connect_timeout)
+        .http2_keep_alive_interval(dial.keepalive_interval)
+        .keep_alive_timeout(dial.keepalive_timeout)
+        .keep_alive_while_idle(true);
     let endpoint = match (tls, https) {
         (Some(tls), true) => endpoint.tls_config(tls.clone()).map_err(std::io::Error::other)?,
         (None, false) => endpoint,
@@ -80,6 +127,7 @@ pub const PEER_MAX_DECODE_BYTES: usize = 16 * 1024 * 1024;
 pub struct GrpcNetworkFactory {
     peers: PeerEndpoints,
     tls: PeerTls,
+    dial: DialOptions,
 }
 
 impl GrpcNetworkFactory {
@@ -89,7 +137,13 @@ impl GrpcNetworkFactory {
     }
 
     pub fn with_tls(peers: PeerEndpoints, tls: PeerTls) -> Self {
-        Self { peers, tls }
+        Self { peers, tls, dial: DialOptions::default() }
+    }
+
+    /// Connect timeout and keepalive for its peer connections (#168).
+    pub fn with_dial(mut self, dial: DialOptions) -> Self {
+        self.dial = dial;
+        self
     }
 }
 
@@ -105,6 +159,7 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for GrpcNetworkFactory {
             target,
             peers: self.peers.clone(),
             tls: self.tls.clone(),
+            dial: self.dial,
             client: tokio::sync::Mutex::new(None),
         }
     }
@@ -117,6 +172,7 @@ pub struct GrpcNetwork {
     target: NodeId,
     peers: PeerEndpoints,
     tls: PeerTls,
+    dial: DialOptions,
     client: tokio::sync::Mutex<Option<pb::raft_peer_client::RaftPeerClient<Channel>>>,
 }
 
@@ -139,7 +195,7 @@ impl GrpcNetwork {
             )))
         })?;
         drop(peers);
-        let chan = dial_peer(&url, &self.tls)
+        let chan = dial_peer_with(&url, &self.tls, self.dial)
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
@@ -271,6 +327,7 @@ pub enum ConfirmError {
 pub struct WriteForwarder {
     peers: PeerEndpoints,
     tls: PeerTls,
+    dial: DialOptions,
     clients: Arc<RwLock<HashMap<NodeId, pb::raft_peer_client::RaftPeerClient<Channel>>>>,
 }
 
@@ -284,8 +341,15 @@ impl WriteForwarder {
         Self {
             peers,
             tls,
+            dial: DialOptions::default(),
             clients: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Connect timeout and keepalive for its peer connections (#168).
+    pub fn with_dial(mut self, dial: DialOptions) -> Self {
+        self.dial = dial;
+        self
     }
 
     async fn client(
@@ -302,7 +366,7 @@ impl WriteForwarder {
             .get(&target)
             .cloned()
             .ok_or_else(|| format!("no peer URL for node {target}"))?;
-        let chan = dial_peer(&url, &self.tls).await.map_err(|e| e.to_string())?;
+        let chan = dial_peer_with(&url, &self.tls, self.dial).await.map_err(|e| e.to_string())?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
         self.clients.write().await.insert(target, cli.clone());
         Ok(cli)
