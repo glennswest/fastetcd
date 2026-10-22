@@ -2906,3 +2906,24 @@ Tracked live in the Claude task system. Snapshot of the order:
       `lease_clock_step.rs` passes; with the old lessor (branch, deleted)
       it fails: a lease granted with a 1970 clock answers TimeToLive
       -1792631396 (expired at once).
+
+91. **The upgrade safety backup fits or is skipped (#163).** On a version
+    change, startup copies the whole data file to `<data-dir>/backups`
+    (default on, retain 2), on the 1 GiB data volume: a file over ~330 MB
+    fills it (ENOSPC, or a full volume the store must then run on). Chosen
+    (no decision needed): cap by free space, keep the default on (safety
+    first, #15's ordering; `--upgrade-backup=false` already turns it off).
+    Plan:
+    - Before pruning or copying: statvfs the backup directory's
+      filesystem; used − (what the roll-off would free) + the file's size
+      must stay at or below `--space-high-water-percent` (80) of it, or
+      the backup is skipped with a WARN naming the numbers and the
+      remedies (`--upgrade-backup-dir` on another volume; offline
+      `fastetcd backup`); nothing is pruned then.
+    - A copy that fails part-way is removed.
+    - Tests: skipped when it would cross the mark (old backups kept, no
+      file); written when it fits; a failed copy leaves no file.
+    - Not here: periodic `--backup-dir` backups on their volume (#153).
+    Work items:
+    - [ ] admin.rs + main wiring; tests.
+    - [ ] Docs (01, 03, 04), changelog; release; close #163.
