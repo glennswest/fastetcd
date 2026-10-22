@@ -2844,3 +2844,24 @@ Tracked live in the Claude task system. Snapshot of the order:
     on "in use" + the child's log in failures; health_http, wal_upgrade,
     apply_replay; metrics.rs's in-process server on a random loopback
     address.
+
+89. **SIGTERM stops cleanly (#161, P?).** Only SIGINT was handled, so a
+    kubelet stop (SIGTERM, then SIGKILL) killed the process with the
+    write-behind layers in RAM and redb's file marked dirty: every start
+    re-walked the data file (redb's full repair: seconds on an HDD) and
+    replayed the WAL tail. Read in redb 2.6.3: `Drop for Database` writes
+    the allocator state and clears `recovery_required`, so a clean stop is:
+    applies stopped, layers flushed, last `Database` handle dropped.
+    Plan:
+    - main: SIGTERM and SIGINT both start the shutdown: `raft.shutdown()`
+      (RaftCore stops; no new applies), `sync()` (layers + durable commit),
+      again if an apply landed meanwhile, then return (runtime drop drops
+      every handle; redb's drop writes the clean header).
+    - redb engine: a repair callback logs `data file was not closed
+      cleanly` at open and `RedbEngine::repaired_at_open()` says so.
+    - Test (`clean_shutdown.rs`, the real binary): SIGKILL → repaired at
+      open (control); SIGTERM → exit 0, not repaired, every acknowledged
+      revision in the data file (nothing to replay).
+    Work items:
+    - [ ] main signal + shutdown order; engine repair report; test.
+    - [ ] Docs (03 deploy), changelog; release; close #161.
