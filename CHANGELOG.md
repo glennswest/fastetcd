@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-21
-- **fix:** Peer connections have a connect timeout and a keepalive
+## [v1.35.3] — 2026-10-21
+
+### Fixed
+- Peer connections have a connect timeout and a keepalive
   (#168). tonic sets neither, so a dial to a member that never answers
   (powered off, a TLS handshake that stalls) and a connection whose peer
   vanished without a reset held forwarded writes and reads, lease

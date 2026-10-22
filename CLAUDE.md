@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.35.2`** — `--replication-timeout` (#167): the AppendEntries timeout is
+**`1.35.3`** — Peer connections time out and notice a dead peer (#168):
+the whole dial and an unanswered HTTP/2 ping give up after 1 s +
+`--election-timeout` (`DialOptions`, `dial_peer_with`).
+
+Previous: **`1.35.2`** — `--replication-timeout` (#167): the AppendEntries timeout is
 no longer the heartbeat (default: the election timeout; a second vendored
 openraft patch), so a follower whose fsync outlasts 250 ms catches up.
 
@@ -3051,7 +3055,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       rerun; da4cf44); whole-file runs 5/5 at da4cf44 vs 4/5 before #167
       (the #97 lone-write test's flake, filed #171).
 
-96. **Peer connections time out and notice a dead peer (#168).**
+96. **Peer connections time out and notice a dead peer (#168) — done, shipped in v1.35.3.**
     `dial_peer` set no connect timeout and no keepalive (tonic sets
     neither): a dial to a peer that never answers and a connection whose
     peer vanished without a reset held forwarded writes, reads, lease TTLs
@@ -3068,4 +3072,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       fails in seconds; control on a branch without the options.
     Work items:
     - [x] network.rs, main; test.
-    - [ ] Docs (03 multi-node), changelog; release; close #168.
+    - [x] Docs (03 multi-node), changelog; release 1.35.3; close #168.
+    - Found: tonic's `connect_timeout` bounds only the TCP connect (the
+      TLS test still hung with it): the whole dial is bounded in
+      `dial_peer_with` (3e127b4).
+    - Verified: sc-build of 3e127b4, workspace 471 pass 0 fail, peer_dial
+      4/4, peer_tls 3/3; control without the options (branch, deleted):
+      all three peer tests still waiting after 30 s.
