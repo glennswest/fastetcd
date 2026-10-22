@@ -2872,3 +2872,29 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of cfec8b6, workspace 448 pass 0 fail;
       `clean_shutdown.rs` passes (3.2 s), its SIGKILL control shows the
       repair line. Clippy on the server crate fails on older lints (#152).
+
+90. **Lease deadlines on monotonic time (#162).** The leader's lessor kept
+    RAM deadlines in unix seconds and took the later of them and the
+    persisted `deadline_unix_secs`, both against `SystemTime::now()`. An X9
+    blade has no RTC battery and boots at 1970 until NTP: a forward step
+    expires every lease at once (RAM deadlines all behind), a backward
+    step (persisted deadlines written in 2026, clock at 1970) keeps dead
+    leases alive for decades. etcd's lessor uses monotonic time only, and
+    a new leader gives every lease a full TTL (promote). Plan:
+    - Lessor RAM deadlines are `Instant`s: promote = now + TTL, renewal =
+      now + TTL; a lease the leader has no deadline for yet gets now + TTL
+      at first sight.
+    - MvccStore stamps, in RAM, the `Instant` it applied each lease's
+      grant or Raft-logged keep-alive (`lease_applied_at`); the leader's
+      effective deadline = max(RAM deadline, applied + TTL). This covers
+      what the persisted deadline covered (grants after promote, keep-
+      alives proposed through Raft while the 1.23 gate is closed).
+    - The persisted deadline is no longer compared with the clock on the
+      leader (kept in the format: older members and the TimeToLive
+      fallback with an older leader still read it).
+    - Expiry compares `Instant`s.
+    - Test: leases granted with a proposer clock of 1970 (forward step)
+      and of year 3000 (backward step) expire exactly by their TTL.
+    Work items:
+    - [ ] store stamp; lessor; tests.
+    - [ ] Docs (03 leases), changelog; release; close #162.
