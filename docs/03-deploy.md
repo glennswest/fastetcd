@@ -793,7 +793,8 @@ seconds. etcd behaves the same way and has the same remedy:
   follower fsyncs again. Before 1.35.2 this was the heartbeat interval
   (250 ms), so a member on a slow disk could fall behind for good. A long
   value costs little: a follower in the middle of its fsync could not
-  answer sooner anyway, and the leader keeps sending heartbeats.
+  answer sooner anyway, and while it waits for that fsync it cannot call
+  an election (heartbeats to it queue behind the request meanwhile).
 
 **On spinning disks** (the X9 blades: follower fsyncs of 0.3–0.8 s, a
 longest of 85 s, `docs/benchmarks/blade-server3.md`), set on every
