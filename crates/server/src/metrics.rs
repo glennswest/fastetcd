@@ -967,6 +967,125 @@ pub fn spawn_server(addr: SocketAddr, metrics: Arc<Metrics>, state: Arc<ServerSt
     });
 }
 
+/// The metrics listener bound at process start, before the data file is
+/// opened (fastetcd#176). Until [`EarlyServer::install`], it answers from
+/// the start's [`StartupStatus`](crate::startup::StartupStatus): `/livez`
+/// ok while the start makes progress, `/readyz` and `/health` failing,
+/// `/metrics` the start's phase. After it, the full routes
+/// ([`router`]) answer every request.
+pub struct EarlyServer {
+    full: Arc<std::sync::OnceLock<axum::Router>>,
+    status: Arc<crate::startup::StartupStatus>,
+}
+
+/// Bind `addr` now and answer for the start (`status`) until
+/// [`EarlyServer::install`]. A bind failure is logged, as before; the
+/// member starts anyway.
+pub fn spawn_early_server(addr: SocketAddr, status: Arc<crate::startup::StartupStatus>) -> EarlyServer {
+    let full: Arc<std::sync::OnceLock<axum::Router>> = Arc::default();
+    let app = {
+        let (full, status) = (full.clone(), status.clone());
+        axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let (full, status) = (full.clone(), status.clone());
+            async move {
+                match full.get() {
+                    Some(router) => {
+                        let mut router = router.clone();
+                        match tonic::codegen::Service::call(&mut router, req).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        }
+                    }
+                    None => starting_response(&status.report(), req.uri().path()),
+                }
+            }
+        })
+    };
+    {
+        let status = status.clone();
+        tokio::spawn(async move {
+            // Progress is sampled, so a probe sees what moved since.
+            while !status.is_done() {
+                status.sample();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+    }
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(target: "fastetcd::metrics", "bind {addr}: {e}");
+                return;
+            }
+        };
+        tracing::info!(
+            target: "fastetcd::metrics",
+            %addr,
+            "serving /metrics, /health, /livez, /readyz (while starting: /livez ok while the start makes progress)"
+        );
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(target: "fastetcd::metrics", "serve {addr}: {e}");
+        }
+    });
+    EarlyServer { full, status }
+}
+
+impl EarlyServer {
+    /// The member serves: the full routes answer from now on.
+    pub async fn install(&self, metrics: Arc<Metrics>, state: Arc<ServerState>) {
+        let _ = self.full.set(router(metrics, state).await);
+        self.status.done();
+    }
+}
+
+/// The answer while the member starts (#176), etcd-shaped: `/livez` `ok`
+/// (200) while the start progresses, `[-]starting failed` (503) once
+/// nothing has moved for `STALL`; `/readyz` and `/health` 503; `/metrics`
+/// the start's phase.
+pub fn starting_response(r: &crate::startup::StartupReport, path: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let what = r.describe();
+    let plain = |code: StatusCode, body: String| {
+        (code, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+    };
+    if path == "/livez" || path.starts_with("/livez/") {
+        return if r.progressing() {
+            plain(StatusCode::OK, format!("ok\n{what}\n"))
+        } else {
+            plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("[-]starting failed: no progress for {} s\n{what}\nlivez check failed\n", r.since_progress.as_secs()),
+            )
+        };
+    }
+    if path == "/readyz" || path.starts_with("/readyz/") {
+        return plain(StatusCode::SERVICE_UNAVAILABLE, format!("[-]starting: {what}\nreadyz check failed\n"));
+    }
+    if path == "/health" {
+        let body = serde_json::json!({ "health": "false", "reason": format!("STARTING {what}") });
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+    }
+    if path == "/metrics" || path == "/" {
+        let body = format!(
+            "# HELP fastetcd_starting The member is starting: the phase it is in (fastetcd#176).\n\
+             # TYPE fastetcd_starting gauge\n\
+             fastetcd_starting{{phase=\"{}\"}} 1\n\
+             # HELP fastetcd_starting_seconds Since the process started.\n\
+             # TYPE fastetcd_starting_seconds gauge\n\
+             fastetcd_starting_seconds {}\n\
+             # HELP fastetcd_starting_since_progress_seconds Since the start last made progress.\n\
+             # TYPE fastetcd_starting_since_progress_seconds gauge\n\
+             fastetcd_starting_since_progress_seconds {}\n",
+            r.phase,
+            r.since_start.as_secs_f64(),
+            r.since_progress.as_secs_f64(),
+        );
+        return plain(StatusCode::OK, body);
+    }
+    plain(StatusCode::NOT_FOUND, "not found\n".to_string())
+}
+
 /// The metrics listener's routes: Prometheus text on `/metrics` and
 /// `/`, and `/health`, `/livez`, `/readyz` (and the per-check routes)
 /// with the client port's answers. etcd serves health on

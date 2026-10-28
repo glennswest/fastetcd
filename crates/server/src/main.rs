@@ -898,6 +898,17 @@ async fn main() -> anyhow::Result<()> {
         "fastetcd starting"
     );
 
+    // The metrics listener answers from now on (#176): while the data file
+    // opens (a redb repair can take minutes on a spinning disk), `/livez`
+    // says the start is making progress instead of refusing the connection,
+    // so a startup probe does not kill a repair that is working.
+    let early_metrics = if args.listen_metrics_url.trim().is_empty() {
+        None
+    } else {
+        let metrics_addr: std::net::SocketAddr = args.listen_metrics_url.parse()?;
+        Some(fastetcd_server::metrics::spawn_early_server(metrics_addr, startup.status()))
+    };
+
     // Log the no-op compat flags we received so operators can see
     // them in startup output even though we don't act on them.
     if args.enable_pprof {
@@ -934,17 +945,23 @@ async fn main() -> anyhow::Result<()> {
              cannot be recovered. Give fastetcd a backup directory on a separate volume."
         );
     }
-    let (engine, _recovered) = fastetcd_server::recovery::open_or_recover(
-        &data_file,
-        &fastetcd_server::recovery::OpenOptions {
+    // On a blocking thread: a repair walks the whole file, and the runtime's
+    // workers must stay free to answer the probes meanwhile (#176).
+    let (engine, _recovered) = {
+        let data_file = data_file.clone();
+        let options = fastetcd_server::recovery::OpenOptions {
             backup_dir: args.backup_dir.clone(),
             on_corruption: args.on_corruption,
             node_id,
             configured_members,
             engine_cache_bytes: Some(args.engine_cache_bytes as usize),
-        },
-    )
-    .await?;
+        };
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(fastetcd_server::recovery::open_or_recover(&data_file, &options))
+        })
+        .await??
+    };
     startup.phase_with(
         "data_file_open",
         if engine.repaired_at_open() { "redb repaired a file that was not closed cleanly" } else { "" },
@@ -1399,10 +1416,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Metrics endpoint (Prometheus /metrics).
-    if !args.listen_metrics_url.trim().is_empty() {
-        let m = fastetcd_server::metrics::Metrics::new();
-        let metrics_addr: std::net::SocketAddr = args.listen_metrics_url.parse()?;
-        fastetcd_server::metrics::spawn_server(metrics_addr, m, server_state.clone());
+    // Bound at the start (#176); the full routes answer from here.
+    if let Some(early) = &early_metrics {
+        early.install(fastetcd_server::metrics::Metrics::new(), server_state.clone()).await;
     }
 
     // Build peer URLs / client URLs for Member representation.

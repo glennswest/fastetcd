@@ -10,7 +10,7 @@
 
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -74,6 +74,11 @@ fn open_error(e: redb::DatabaseError) -> StorageError {
     }
 }
 
+/// redb's repair progress at open, for [`RedbEngine::repair_progress`]
+/// (one data file per process, so process-wide).
+static REPAIR_PROGRESS: AtomicU64 = AtomicU64::new(0);
+static REPAIR_STEPS: AtomicU64 = AtomicU64::new(0);
+
 impl RedbEngine {
     /// Open or create a redb-backed engine at `path`. Parent directory
     /// must already exist.
@@ -118,7 +123,9 @@ impl RedbEngine {
                 builder.set_cache_size(bytes);
             }
             let (flag, shown) = (repaired.clone(), path.display().to_string());
-            builder.set_repair_callback(move |_| {
+            builder.set_repair_callback(move |session| {
+                REPAIR_PROGRESS.store(session.progress().to_bits(), Ordering::Relaxed);
+                REPAIR_STEPS.fetch_add(1, Ordering::Relaxed);
                 if !flag.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         file = %shown,
@@ -150,6 +157,16 @@ impl RedbEngine {
                 repaired_at_open: repaired.load(Ordering::Relaxed),
             }),
         })
+    }
+
+    /// How far a repair at open has come (fastetcd#176): redb's own
+    /// estimate, `0.0` to `<1.0` (it reports at 0, 0.3, 0.6 and 0.9: one
+    /// report per full scan of the file), and how many reports so far.
+    /// `None` while no repair has started in this process. A start's
+    /// health answer shows it while the file opens.
+    pub fn repair_progress() -> Option<(f64, u64)> {
+        let steps = REPAIR_STEPS.load(Ordering::Relaxed);
+        (steps > 0).then(|| (f64::from_bits(REPAIR_PROGRESS.load(Ordering::Relaxed)), steps))
     }
 
     /// Whether redb had to repair the file at open: the last process

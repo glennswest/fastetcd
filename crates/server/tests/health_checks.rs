@@ -190,3 +190,75 @@ async fn the_metrics_listener_reports_no_leader() {
     assert_eq!(get(&base, "/livez").await, (200, "ok\n".into()));
     assert_eq!(get(&base, "/readyz").await.0, 503);
 }
+
+/// fastetcd#176: the metrics listener is bound before the data file is
+/// opened. While the member starts, `/livez` answers ok (the start makes
+/// progress) and names the phase, `/readyz` and `/health` fail, and
+/// `/metrics` gives the phase; once the full routes are installed, every
+/// answer is the serving member's.
+#[tokio::test]
+async fn the_metrics_listener_answers_while_the_member_starts() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let mut startup = fastetcd_server::startup::Startup::new();
+    let early = fastetcd_server::metrics::spawn_early_server(port, startup.status());
+    let base = format!("http://{port}");
+    let mut tries = 0;
+    let (code, body) = loop {
+        match reqwest::get(format!("{base}/livez")).await {
+            Ok(r) => break (r.status().as_u16(), r.text().await.unwrap()),
+            Err(_) if tries < 50 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("the early listener never answered: {e}"),
+        }
+    };
+    assert_eq!(code, 200, "{body}");
+    assert!(body.starts_with("ok\nstarting for "), "{body}");
+    assert!(body.contains("phase data_file_open for "), "{body}");
+
+    let (code, body) = get(&base, "/readyz").await;
+    assert_eq!(code, 503);
+    assert!(body.starts_with("[-]starting: starting for "), "{body}");
+    let (code, body) = get(&base, "/health").await;
+    assert_eq!(code, 503);
+    assert!(body.contains(r#""health":"false""#) && body.contains("STARTING starting for"), "{body}");
+    let (code, body) = get(&base, "/metrics").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("fastetcd_starting{phase=\"data_file_open\"} 1"), "{body}");
+
+    startup.phase("data_file_open");
+    let (code, body) = get(&base, "/livez/serializable_read").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("phase index_load for "), "{body}");
+    assert_eq!(get(&base, "/nonsense").await.0, 404);
+
+    // Serving: the member's own answers.
+    let h = start_test_server_full().await;
+    early.install(fastetcd_server::metrics::Metrics::new(), h.state.clone()).await;
+    assert_eq!(get(&base, "/livez").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/readyz").await, (200, "ok\n".into()));
+    assert_eq!(get(&base, "/health").await, (200, r#"{"health":"true","reason":""}"#.into()));
+    let (code, body) = get(&base, "/metrics").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("etcd_server_health_success_total") && !body.contains("fastetcd_starting"), "{body}");
+    assert_eq!(get(&base, "/nonsense").await, (404, "not found\n".into()));
+}
+
+/// A start with nothing moving for `STALL` fails `/livez` (a stall below
+/// fastetcd, #138), so a kubelet can still restart a start that is stuck.
+#[test]
+fn a_stalled_start_fails_livez() {
+    let r = fastetcd_server::startup::StartupReport {
+        phase: "data_file_open",
+        since_start: Duration::from_secs(300),
+        in_phase: Duration::from_secs(300),
+        since_progress: fastetcd_server::startup::STALL,
+        repair: Some(0.3),
+        done: false,
+    };
+    let resp = fastetcd_server::metrics::starting_response(&r, "/livez");
+    assert_eq!(resp.status().as_u16(), 503);
+    let ok = fastetcd_server::startup::StartupReport { since_progress: Duration::from_secs(3), ..r };
+    assert_eq!(fastetcd_server::metrics::starting_response(&ok, "/livez").status().as_u16(), 200);
+}
