@@ -487,6 +487,33 @@ impl WriteForwarder {
         bincode::deserialize(&resp.data).map_err(|e| ConfirmError::Unreachable(e.to_string()))
     }
 
+    /// Ask `target` to accept a leader transfer (#57), within `timeout`.
+    /// `Ok(true)`: its vote was the request's leader vote, so it waived
+    /// that vote's lease (and, if it is the target, started an election).
+    pub async fn transfer_leader(
+        &self,
+        target: NodeId,
+        req: &crate::types::TransferLeaderRequest,
+        timeout: std::time::Duration,
+    ) -> Result<bool, ConfirmError> {
+        let data = bincode::serialize(req).map_err(|e| ConfirmError::Unreachable(e.to_string()))?;
+        let call = async {
+            let mut cli = self.client(target).await.map_err(ConfirmError::Unreachable)?;
+            match cli.transfer_leader(Request::new(pb::RaftPayload { data })).await {
+                Ok(r) => Ok(r.into_inner()),
+                Err(s) if s.code() == tonic::Code::Unimplemented => Err(ConfirmError::Older),
+                Err(s) => {
+                    self.clients.write().await.remove(&target);
+                    Err(ConfirmError::Unreachable(s.message().to_string()))
+                }
+            }
+        };
+        let resp = tokio::time::timeout(timeout, call)
+            .await
+            .map_err(|_| ConfirmError::Unreachable(format!("no answer in {timeout:?}")))??;
+        bincode::deserialize(&resp.data).map_err(|e| ConfirmError::Unreachable(e.to_string()))
+    }
+
     /// Forward a linearizable Range to `target`'s `ForwardRead` RPC and
     /// return the leader's `RangeResult` (#10) with the revision the
     /// leader read at (#50; `None` from a leader older than that, see
@@ -755,6 +782,21 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
         let data = bincode::serialize(&resp)
+            .map_err(|e| Status::internal(format!("encode response: {e}")))?;
+        Ok(Response::new(pb::RaftPayload { data }))
+    }
+
+    async fn transfer_leader(
+        &self,
+        request: Request<pb::RaftPayload>,
+    ) -> Result<Response<pb::RaftPayload>, Status> {
+        let req: crate::types::TransferLeaderRequest =
+            bincode::deserialize(&request.into_inner().data)
+                .map_err(|e| Status::invalid_argument(format!("decode TransferLeader: {e}")))?;
+        let accepted = crate::leader_transfer::accept(&self.raft, req)
+            .await
+            .map_err(|e| Status::internal(format!("raft: {e}")))?;
+        let data = bincode::serialize(&accepted)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))
     }

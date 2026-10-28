@@ -107,6 +107,16 @@ pub struct ConfirmLeaderResponse {
     pub version: String,
 }
 
+/// `TransferLeader` (#57): the leader of `leader_vote` hands leadership to
+/// `to`, whose log holds `last_log_id`. The answer is a `bool`: whether
+/// the member's vote was `leader_vote` (it waived that vote's lease).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferLeaderRequest {
+    pub leader_vote: openraft::Vote<NodeId>,
+    pub to: NodeId,
+    pub last_log_id: Option<openraft::LogId<NodeId>>,
+}
+
 /// The application-level log entry. Every committed Raft entry decodes
 /// to one of these variants and is dispatched to [`MvccStore`].
 ///

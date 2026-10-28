@@ -106,6 +106,12 @@ impl RaftPeer for Peer {
         }
         self.inner.lease_time_to_live(r).await
     }
+    async fn transfer_leader(&self, r: Request<rpb::RaftPayload>) -> R {
+        if self.older {
+            return Err(Status::unimplemented("TransferLeader"));
+        }
+        self.inner.transfer_leader(r).await
+    }
 }
 
 async fn start_node(id: NodeId, older: bool) -> Node {
@@ -961,4 +967,135 @@ async fn no_cluster_id_is_proposed_while_a_member_is_older() {
         assert_eq!(n.state.sm.mvcc().cluster_id(), None, "member {}", n.id);
         assert_eq!(n.state.cluster_id.load(Ordering::Relaxed), 100 + n.id);
     }
+}
+
+fn move_leader_request(target: NodeId) -> Request<pb::MoveLeaderRequest> {
+    Request::new(pb::MoveLeaderRequest { target_id: target })
+}
+
+async fn move_leader(node: &Node, target: NodeId) -> Result<(), Status> {
+    use fastetcd_proto::etcdserverpb::maintenance_server::Maintenance as _;
+    fastetcd_server::maintenance::MaintenanceService::new(node.state.clone())
+        .move_leader(move_leader_request(target))
+        .await
+        .map(|_| ())
+}
+
+/// Writers that keep putting through every member, tolerating errors
+/// (leadership moves under them), recording what was acknowledged.
+fn spawn_tolerant_writers(
+    clients: Vec<String>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> (Arc<Mutex<BTreeMap<String, u64>>>, Vec<tokio::task::JoinHandle<()>>) {
+    let acked: Arc<Mutex<BTreeMap<String, u64>>> = Arc::default();
+    let mut tasks = Vec::new();
+    for (w, url) in clients.into_iter().cycle().take(6).enumerate() {
+        let (acked, stop) = (acked.clone(), stop.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut kv = KvClient::connect(url).await.unwrap();
+            let key = format!("t{w:02}");
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                let put = pb::PutRequest {
+                    key: key.clone().into_bytes(),
+                    value: n.to_string().into_bytes(),
+                    ..Default::default()
+                };
+                if kv.put(put).await.is_ok() {
+                    acked.lock().unwrap().insert(key.clone(), n);
+                }
+                sleep(Duration::from_millis(2)).await;
+            }
+        }));
+    }
+    (acked, tasks)
+}
+
+/// fastetcd#57: MoveLeader on three members hands leadership to the
+/// target, under writes through every member, within etcd's timeout and
+/// with no other election: the target leads at the next term, and every
+/// acknowledged write is on it. Then back, to show a second transfer
+/// (the lease waiver covers only the old vote). etcd's errors for a
+/// follower, a non-member and the leader itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_leader_hands_leadership_to_the_target() {
+    let nodes = cluster(0).await;
+    let first = leader_of(&nodes).id;
+    let target = a_follower_of(&nodes).id;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (acked, writers) = spawn_tolerant_writers(nodes.iter().map(|n| n.client.clone()).collect(), stop.clone());
+    sleep(Duration::from_millis(500)).await;
+
+    // etcd's answers first.
+    let follower = nodes.iter().find(|n| n.id != first).unwrap();
+    let e = move_leader(follower, first).await.unwrap_err();
+    assert_eq!((e.code(), e.message()), (tonic::Code::FailedPrecondition, "etcdserver: not leader"));
+    let leader = nodes.iter().find(|n| n.id == first).unwrap();
+    let e = move_leader(leader, 99).await.unwrap_err();
+    assert_eq!((e.code(), e.message()), (tonic::Code::FailedPrecondition, "etcdserver: bad leader transferee"));
+    move_leader(leader, first).await.expect("to itself: nothing to do");
+    assert_eq!(leader_of(&nodes).id, first);
+
+    for (from, to) in [(first, target), (target, first)] {
+        let term = max_term(&nodes);
+        let node = nodes.iter().find(|n| n.id == from).unwrap();
+        let t = Instant::now();
+        move_leader(node, to).await.unwrap_or_else(|e| panic!("MoveLeader {from} -> {to}: {e}"));
+        let took = t.elapsed();
+        eprintln!("MoveLeader {from} -> {to}: {took:?}");
+        wait_for("every member to follow the target", || {
+            nodes.iter().all(|n| n.raft.metrics().borrow().current_leader == Some(to))
+        })
+        .await;
+        assert_eq!(max_term(&nodes), term + 1, "one election, the target's");
+        assert!(took < Duration::from_secs(5), "the transfer took {took:?}");
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for w in writers {
+        w.await.unwrap();
+    }
+    let acked = acked.lock().unwrap().clone();
+    assert!(acked.values().sum::<u64>() > 20, "the writers wrote: {acked:?}");
+    let mut kv = KvClient::connect(leader_of(&nodes).client.clone()).await.unwrap();
+    let got = kv
+        .range(pb::RangeRequest { key: b"t".to_vec(), range_end: b"u".to_vec(), ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    let seen: BTreeMap<String, u64> = got
+        .kvs
+        .iter()
+        .map(|kv| {
+            (String::from_utf8(kv.key.clone()).unwrap(), String::from_utf8(kv.value.clone()).unwrap().parse().unwrap())
+        })
+        .collect();
+    for (key, n) in &acked {
+        let s = seen.get(key).copied().unwrap_or(0);
+        assert!(s >= *n, "lost write: {key} = {s}, but {n} was acknowledged");
+    }
+}
+
+/// fastetcd#57 with a member older than the `TransferLeader` RPC (member
+/// 3): it keeps its lease, but the leader and the target are a quorum,
+/// so a transfer between new members still works; the older member
+/// itself cannot be the target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_leader_with_an_older_member() {
+    let nodes = cluster(1).await;
+    let leader = leader_of(&nodes).id;
+    let target = nodes.iter().map(|n| n.id).find(|id| *id != leader && *id != 3).unwrap();
+    let node = nodes.iter().find(|n| n.id == leader).unwrap();
+    move_leader(node, target).await.expect("MoveLeader between new members");
+    wait_for("every member to follow the target", || {
+        nodes.iter().all(|n| n.raft.metrics().borrow().current_leader == Some(target))
+    })
+    .await;
+
+    let node = nodes.iter().find(|n| n.id == target).unwrap();
+    let e = move_leader(node, 3).await.unwrap_err();
+    assert_eq!((e.code(), e.message()), (tonic::Code::FailedPrecondition, "etcdserver: bad leader transferee"));
+    assert_eq!(leader_of(&nodes).id, target, "the leader stays");
 }

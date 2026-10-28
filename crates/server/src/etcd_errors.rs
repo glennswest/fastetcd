@@ -28,6 +28,10 @@ pub const ROLE_ALREADY_EXIST: &str = "etcdserver: role name already exists";
 pub const ROLE_EMPTY: &str = "etcdserver: role name is empty";
 pub const ROOT_USER_NOT_EXIST: &str = "etcdserver: root user does not exist";
 pub const PERMISSION_NOT_GIVEN: &str = "etcdserver: permission not given";
+// MoveLeader (#57).
+pub const NOT_LEADER: &str = "etcdserver: not leader";
+pub const BAD_LEADER_TRANSFEREE: &str = "etcdserver: bad leader transferee";
+pub const TIMEOUT_LEADER_TRANSFER: &str = "etcdserver: request timed out, leader transfer took too long";
 
 /// A token was sent and names no user here.
 pub fn invalid_auth_token() -> Status {

@@ -55,6 +55,12 @@ service RaftPeer {
     // a lease's deadline. A member older than this answers Unimplemented
     // (and still logs every keep-alive, so the follower's table is right).
     rpc LeaseTimeToLive(RaftPayload) returns (RaftPayload);
+
+    // MoveLeader (#57): the leader, once the target's log matches its
+    // own, asks every voter to stop refusing votes by its leader lease
+    // (for that leader's vote only), and the target to elect. A member
+    // older than this answers Unimplemented and keeps its lease.
+    rpc TransferLeader(RaftPayload) returns (RaftPayload);
 }
 
 message RaftPayload {

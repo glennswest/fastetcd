@@ -92,6 +92,9 @@ impl RaftPeer for OlderPeer {
     async fn lease_time_to_live(&self, _: Request<rpb::RaftPayload>) -> R {
         Err(Status::unimplemented("LeaseTimeToLive"))
     }
+    async fn transfer_leader(&self, _: Request<rpb::RaftPayload>) -> R {
+        Err(Status::unimplemented("TransferLeader"))
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -150,6 +153,9 @@ impl RaftPeer for LaggingPeer {
     }
     async fn lease_time_to_live(&self, r: Request<rpb::RaftPayload>) -> R {
         self.inner.lease_time_to_live(r).await
+    }
+    async fn transfer_leader(&self, r: Request<rpb::RaftPayload>) -> R {
+        self.inner.transfer_leader(r).await
     }
 }
 

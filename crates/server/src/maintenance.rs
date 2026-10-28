@@ -18,7 +18,8 @@
 //! - `Snapshot` — streams a backup file of every table (the format of
 //!   `--backup-dir` backups, `crate::backup`) in 64 KiB chunks, which
 //!   `fastetcd restore` restores (fastetcd#61).
-//! - `MoveLeader` — `Status::unimplemented` until peer transport lands.
+//! - `MoveLeader` — hands leadership to a voter once its log matches the
+//!   leader's (`fastetcd_raft::leader_transfer`, #57), with etcd's errors.
 //! - `Downgrade` — `Status::unimplemented`: no cluster version (#57).
 
 use std::pin::Pin;
@@ -321,24 +322,21 @@ impl Maintenance for MaintenanceService {
         // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
         crate::authz::require_admin(&self.state, &request).await?;
         let req = request.into_inner();
-        // Validate target is a current voter — etcd does the same check.
-        let metrics = self.state.raft.metrics().borrow().clone();
-        let voters: Vec<_> = metrics.membership_config.voter_ids().collect();
-        if !voters.contains(&req.target_id) {
-            return Err(Status::failed_precondition(format!(
-                "MoveLeader target {} is not a voting member",
-                req.target_id
-            )));
-        }
-        // openraft 0.9 doesn't expose an explicit `transfer_leader`
-        // primitive (added in 0.10). The closest correct behavior is
-        // to surface that limitation rather than do something racy.
-        // Upgrade-to-0.10 lifts this restriction.
-        Err(Status::unimplemented(
-            "MoveLeader is not yet supported on openraft 0.9; \
-             pending upgrade to openraft 0.10 which exposes \
-             trigger().transfer_leader()",
-        ))
+        // etcd's timeout: its request timeout, 5 s + 2x the election timeout.
+        let timeout = std::time::Duration::from_secs(5)
+            + std::time::Duration::from_millis(2 * self.state.raft.config().election_timeout_min);
+        fastetcd_raft::leader_transfer::move_leader(
+            &self.state.raft,
+            &self.state.forwarder,
+            self.state.proposer.as_ref(),
+            req.target_id,
+            timeout,
+        )
+        .await
+        .map_err(move_leader_status)?;
+        let revision = self.state.sm.mvcc().current_revision().await;
+        let header = response_header(&self.state, revision).await;
+        Ok(Response::new(pb::MoveLeaderResponse { header: Some(header) }))
     }
 
     async fn downgrade(
@@ -438,5 +436,25 @@ impl std::io::Write for SnapshotChunks {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// etcd's answers for a MoveLeader that did not move leadership
+/// (`rpctypes`: `ErrGRPCNotLeader`, `ErrGRPCBadLeaderTransferee`,
+/// `ErrGRPCTimeoutLeaderTransfer`).
+fn move_leader_status(e: fastetcd_raft::leader_transfer::TransferError) -> Status {
+    use fastetcd_raft::leader_transfer::TransferError as E;
+    match e {
+        E::NotLeader => Status::failed_precondition(crate::etcd_errors::NOT_LEADER),
+        E::BadTransferee(why) => {
+            tracing::info!(why = %why, "MoveLeader refused");
+            Status::failed_precondition(crate::etcd_errors::BAD_LEADER_TRANSFEREE)
+        }
+        E::TimedOut(why) => {
+            tracing::warn!(why = %why, "MoveLeader timed out");
+            Status::unavailable(crate::etcd_errors::TIMEOUT_LEADER_TRANSFER)
+        }
+        E::NoQuorum(why) => Status::unavailable(why),
+        E::Fatal(why) => Status::unavailable(format!("raft: {why}")),
     }
 }

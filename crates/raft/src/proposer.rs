@@ -195,6 +195,9 @@ pub struct ProposerStats {
 pub struct Proposer {
     tx: mpsc::UnboundedSender<Pending>,
     stats: Arc<ProposerStats>,
+    /// Held (write) while a leader transfer waits for its target to catch
+    /// up (#57): nothing new is proposed meanwhile.
+    hold: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl Proposer {
@@ -212,8 +215,15 @@ impl Proposer {
             last_probe: std::sync::Mutex::new(None),
         });
         let stats = Arc::new(ProposerStats::default());
-        tokio::spawn(run(raft, rx, gate, stats.clone()));
-        Self { tx, stats }
+        let hold = Arc::new(tokio::sync::RwLock::new(()));
+        tokio::spawn(run(raft, rx, gate, stats.clone(), hold.clone()));
+        Self { tx, stats, hold }
+    }
+
+    /// Propose nothing new until the guard is dropped (#57). Proposals
+    /// already handed to openraft go on; new ones queue.
+    pub async fn hold(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.hold.clone().write_owned().await
     }
 
     /// What has been proposed so far.
@@ -238,6 +248,7 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Pending>,
     gate: Arc<BatchGate>,
     stats: Arc<ProposerStats>,
+    hold: Arc<tokio::sync::RwLock<()>>,
 ) {
     let permits = Arc::new(Semaphore::new(IN_FLIGHT));
     let mut carry: Option<Pending> = None;
@@ -249,6 +260,8 @@ async fn run(
                 None => return,
             },
         };
+        // A leader transfer holds proposals (#57).
+        drop(hold.read().await);
         if !gate.is_open() {
             // As before batching: every proposal its own client_write.
             stats.single.fetch_add(1, Ordering::Relaxed);
