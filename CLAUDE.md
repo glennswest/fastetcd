@@ -3128,3 +3128,42 @@ Tracked live in the Claude task system. Snapshot of the order:
       quick; control: plain redb commit is walked), `clean_shutdown.rs`
       (SIGKILL: unclean, no walk). Docs 03, 05 (the trade-off); release
       1.36.2.
+
+98. **Keep the data file small in the background (#177, P1).** Owner
+    (2026-10-28): compaction, snapshot + purge and an online defrag that
+    rewrites to a fresh file and switches over, running all the time,
+    throttled for HDDs. What exists and what is new:
+    - Compaction: rustkube's kube-apiserver compacts every 5 min
+      (`--etcd-compaction-interval` 5m0s, upstream's claim, rustkube#139),
+      and `--auto-compaction-retention` exists for a store without one.
+      Nothing new; documented.
+    - Snapshot + purge: by proposals since #80 (`--snapshot-count`). New:
+      `--snapshot-interval-secs` (default 1800): a member with any
+      proposal since its last snapshot snapshots once that old, so a quiet
+      member's log and WAL are purged too.
+    - **Background rewrite** (`RedbEngine::rewrite`, `KvStore::rewrite`):
+      under a maintenance lock (not with an in-place defragment), start a
+      capture of every engine commit atomically with a read transaction;
+      copy every table in chunks into `<file>.rewrite` (non-durable
+      commits, small cache), sleeping 4x each chunk's time (20% of the
+      disk); apply the captured commits in passes until little is left;
+      then under the engine's write lock (commits and new snapshots wait):
+      the rest, a durable quick-repair commit, close it, rename over the
+      data file, fsync the directory, reopen, swap the handle. Snapshots
+      already open keep reading the old inode. A snapshot install during
+      the copy (commit_stream) abandons the rewrite. A stale
+      `<file>.rewrite` is removed at open.
+    - Trigger (`defrag_task` in space.rs): every `--defrag-check-interval-secs`
+      (600), with the paced live-bytes walk (#166): free share of the file
+      >= `--defrag-free-percent` (50; 0 = off) and file >=
+      `--defrag-min-file-bytes` (64 MiB), and the copy (live bytes) fits
+      under `--space-high-water-percent`; else skipped, logged.
+    - Metrics `fastetcd_defrag_rewrite_total{result}`,
+      `fastetcd_defrag_rewrite_last_{seconds,before_bytes,after_bytes}`;
+      one INFO line per pass (file size, live bytes, free %, took).
+    Work items:
+    - [ ] snapshot interval; engine rewrite + capture + tests (content
+      equal, writes during the copy land, readers during the switch, crash
+      leftovers, install abandons); write-behind delegate.
+    - [ ] server task, flags, metrics; tests; docs (01, 04), changelog;
+      release; measure on server1 (file size, open time) once it runs it.
