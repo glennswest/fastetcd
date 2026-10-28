@@ -2694,8 +2694,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       3.6–17 ms, 1 answer over 50 ms in all. Also fixed: the #138 watchdog test raced the
       leader's first fsync since #97; clippy in storage (#149; rest #152).
 
-78. **MoveLeader and Downgrade answer Unimplemented (#57, P?) — waiting on
-    the owner (asked 2026-10-14).** MoveLeader: openraft 0.9 refuses votes
+78. **MoveLeader and Downgrade answer Unimplemented (#57, P0).** MoveLeader: openraft 0.9 refuses votes
     while a voter's leader lease is live (`handle_vote_req`), so the
     target cannot simply elect. Options asked: (1) a second vendored
     openraft patch backporting 0.10's `transfer_leader` (lease expiry +
@@ -2729,6 +2728,17 @@ Tracked live in the Claude task system. Snapshot of the order:
     classifier still refused it. Waiting on a person's step (`wait-owner
     --action`): `Edit(vendor/openraft/**)` / `Write(vendor/openraft/**)` in
     `.claude/settings.local.json`. Patch shape on #57.
+    2026-10-28: the owner added the allow rules; done as designed, one
+    change: no all-members version gate. The leader asks every other voter
+    `TransferLeader` and needs a quorum with the target to accept (a member
+    older than 1.36 answers Unimplemented and keeps its lease), so a
+    transfer works with a member down or older, as etcd's does. Work items:
+    - [x] openraft `accept_leader_transfer` + engine tests (0d997a1).
+    - [x] `leader_transfer.rs`, `Proposer::hold`, `TransferLeader` RPC,
+      Maintenance handler, etcd's errors; 3-member tests (62f3c8d).
+    - [ ] sc-build: openraft suite, the new tests, whole workspace.
+    - [ ] Docs (00, 03, README, deck, FASTETCD.md), changelog; release
+      1.36.0; close #57.
 
 79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
     the owner (asked 2026-10-14).** Only `benches/mvcc.rs` uses them; the

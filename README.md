@@ -26,8 +26,8 @@ single- and multi-member, with linearizable reads by default:
   offline `backup` / `restore` / `fsck` / `defrag`, volume sizing.
 - Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
 
-Not implemented (each has an issue): MoveLeader and
-Downgrade (#57), raising an alarm by
+Not implemented (each has an issue):
+Downgrade (#57, no cluster version), raising an alarm by
 hand (deliberate), the etcd v2 API (out of scope). Differences from
 etcd are listed under [Compatibility boundary](#compatibility-boundary).
 
@@ -174,8 +174,9 @@ Differences from etcd:
   counts hours (#21).
 - The v3 JSON gateway serves no WebSocket upgrades (#66, deferred): its
   watch and keep-alive streams need a client that streams a request body.
-- `MoveLeader` and `Downgrade` answer `Unimplemented` (#57). Downgrade
-  stays so: fastetcd has no cluster version; downgrade a member at a time
+- `MoveLeader` works since 1.36 (#57; 03-deploy § Multi-node).
+  `Downgrade` answers `Unimplemented` and stays so: fastetcd has no
+  cluster version; downgrade a member at a time
   within 03-deploy's per-version rules. Raising an
   alarm by hand is refused.
 - A txn inside a txn is refused until every member runs 1.22 or later

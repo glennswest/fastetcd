@@ -4,6 +4,27 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-28
+- **feat:** `MoveLeader` (`etcdctl move-leader`) hands leadership to
+  another voter (#57); it answered `Unimplemented`. openraft 0.9 refuses
+  every vote while the leader's lease is live, so a third patch to the
+  vendored openraft adds `Trigger::accept_leader_transfer`: a member whose
+  vote is still the leader's stops refusing votes by that vote's lease
+  (that vote only, for twice the lease), and the target, if its log holds
+  the leader's last log id, elects (`vendor/openraft/FASTETCD.md`).
+  fastetcd's side (`crates/raft/src/leader_transfer.rs`): the leader holds
+  new proposals (`Proposer::hold`), waits until the target's log matches
+  its own, asks every other voter over the new `TransferLeader` peer RPC
+  (a quorum with the target must accept; a member older than this
+  answers `Unimplemented` and does not count), then the target, and
+  answers once the target leads. etcd's errors: `etcdserver: not leader`,
+  `bad leader transferee`, `request timed out, leader transfer took too
+  long` (5 s + 2x `--election-timeout`). Tests: openraft engine tests,
+  `multinode_fastpath::move_leader_*` (3 members under writes, there and
+  back, nothing acknowledged lost; with a member older than the RPC).
+  Docs: 03 § Multi-node, 00, README, deck. Downgrade stays
+  `Unimplemented` (no cluster version).
+
 ## [v1.35.3] — 2026-10-21
 
 ### Fixed

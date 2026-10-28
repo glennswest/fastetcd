@@ -3,14 +3,17 @@
 This directory is openraft 0.9.24 as published on crates.io
 (`openraft-0.9.24.crate` from static.crates.io, sha256
 `80d35e2f60cdf9bcfc39a020966091017c6dc2a4b43b355a22ca3e76106f4a0a`, the
-checksum Cargo.lock recorded for it), with two changes. The workspace uses
+checksum Cargo.lock recorded for it), with three changes. The workspace uses
 it through `[patch.crates-io]` in the top-level `Cargo.toml`; it is not a
 workspace member (`exclude`). Licence: MIT OR Apache-2.0, unchanged.
 
 The unchanged copy is commit `f7473ba`; `git diff f7473ba -- vendor/openraft`
 is the whole patch (`src/core/raft_core.rs`, `src/core/notify.rs`,
 `src/raft/mod.rs` for #97; `src/config/config.rs`,
-`src/replication/mod.rs` for #167; this file).
+`src/replication/mod.rs` for #167; `src/engine/engine_impl.rs`,
+`src/engine/tests/accept_leader_transfer_test.rs`,
+`src/core/raft_msg/external_command.rs`, `src/core/raft_core.rs`,
+`src/raft/trigger.rs` for #57; this file).
 
 ## What it changes (fastetcd#97)
 
@@ -76,13 +79,39 @@ sent every `heartbeat_interval`; a request that times out is resent as
 before. fastetcd sets it from `--replication-timeout` (default: the
 election timeout).
 
+## Third change: accepting a leader transfer (fastetcd#57)
+
+0.9 has no leader transfer (0.10's `Raft::transfer_leader`), and
+`Engine::handle_vote_req` refuses every vote request while the voter's
+leader lease is live, so another member cannot be elected while the
+leader is healthy, and etcd's `MoveLeader` could not be served.
+
+`Trigger::accept_leader_transfer(leader_vote, to, last_log_id)`
+(`ExternalCommand::AcceptLeaderTransfer` -> `Engine::
+accept_leader_transfer`), the receiving half of 0.10's transfer:
+
+- if this node's vote is `leader_vote`, `Engine::lease_waived` records
+  that vote and a deadline (now + 2x the leader lease); `handle_vote_req`
+  skips the lease check only while the node's vote is still that vote
+  and the deadline has not passed. Every other check is unchanged: a vote
+  is granted only to a candidate whose log is at least as new and whose
+  vote is greater;
+- if this node is `to`, a voter, and its log holds `last_log_id`, it
+  elects at once (`Engine::elect`).
+
+A node whose vote differs ignores it. Election timers are unchanged. The
+sending half is fastetcd's (`crates/raft/src/leader_transfer.rs`): hold
+proposals, wait for the target to match, ask the other voters, then the
+target. Tests: `src/engine/tests/accept_leader_transfer_test.rs`.
+
 ## Upstream
 
 Offered to openraft's `release-0.9` as
 https://github.com/databendlabs/openraft/pull/2163 (2026-10-13), the same
 change with fastetcd's references taken out of its comments.
 
-The #167 change is not offered upstream yet.
+The #167 and #57 changes are not offered upstream yet (0.10 has its own
+transfer_leader).
 
 ## Dropping it
 

@@ -168,7 +168,7 @@ crates/
 | Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel, fragmented responses for a create with `fragment` (#58) | |
 | Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases (authorized over the lease's keys, #47) | |
 | Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
-| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot | MoveLeader, Downgrade (#57); Alarm ACTIVATE (deliberate) |
+| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot, MoveLeader (#57) | Downgrade (no cluster version, #57); Alarm ACTIVATE (deliberate) |
 | Auth          | all RPCs; replicated through Raft; token or client-cert CN | token expiry (#46) |
 
 The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).

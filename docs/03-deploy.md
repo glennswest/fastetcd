@@ -504,8 +504,9 @@ repairing it` and walks the whole file before it serves (seconds on a
 spinning disk for a large file), then replays the WAL tail. The clean
 stop takes about one checkpoint: well inside a kubelet's default 30 s
 grace period unless the disk is stalled. A leader does not hand over
-leadership first (etcd does; fastetcd has no MoveLeader yet, #57): the
-others elect a new leader after `--election-timeout`.
+leadership by itself on SIGTERM (etcd does): the others elect a new
+leader after `--election-timeout`. Move it first with `etcdctl
+move-leader` (since 1.36, § Multi-node) to avoid that wait.
 
 **Where a start's time goes** (since 1.35.0, #165). Each phase of a start
 logs one INFO line under target `fastetcd::startup`, `startup phase`, with
@@ -666,6 +667,33 @@ acknowledged lost, no write outage over a few seconds, auth, RBAC and
 the lease intact, a pre-version backup on every member, batching only
 once no member is older than 1.10. Do the same: one member at a time,
 each back and applying before the next.
+
+**Moving the leader** (`etcdctl move-leader <member id>`, since 1.36,
+#57). Sent to the leader (etcd's `etcdserver: not leader` otherwise; root
+while auth is on), it hands leadership to another voter, as etcd's
+`MoveLeader` does:
+
+1. the leader holds new proposals and waits until the target's log
+   holds everything it has appended;
+2. it asks every other voter, over the `TransferLeader` peer RPC, to
+   stop refusing votes by its leader lease (for that leader's vote only,
+   for twice the lease), and does the same itself; a quorum with the
+   target must accept, or nothing more happens;
+3. it asks the target, which starts an election at the next term;
+4. it answers once the target leads.
+
+The election is an ordinary raft election: a member grants it only if
+its log is no newer than the target's. Writes wait through it (well
+under a second on a healthy cluster); none is lost. Errors as etcd's:
+`etcdserver: bad leader transferee` (not a voter, or a member older than
+1.36), `etcdserver: request timed out, leader transfer took too long`
+(the target did not catch up or win within 5 s + 2x `--election-timeout`).
+A member older than 1.36 keeps its lease; while the leader and the
+target are still a quorum without it, the transfer works. openraft 0.9
+has no leader transfer: the lease waiver is a patch to the vendored copy
+(`vendor/openraft/FASTETCD.md`). Before stopping a leader on purpose,
+move leadership off it first: the others then do not wait out
+`--election-timeout`.
 
 **Downgrades.** etcd's `Downgrade` RPC (`etcdctl downgrade`) answers
 `Unimplemented`, and will: etcd lowers a cluster version every member
