@@ -530,6 +530,38 @@ index_load=3ms ...`), and, when this member first knows a leader (what
 `leader`, `term` and `is_leader`. A start that answers probes late says
 which: a repair, a large index, a long WAL replay, or an election.
 
+**Probes while a member starts** (since 1.36.1, #176). The metrics
+listener (`--listen-metrics-url`) is bound first, before the data file is
+opened, and answers for the start until the member serves:
+
+| Route | While starting |
+|---|---|
+| `GET /livez` (and `/livez/<check>`) | 200 `ok` and a line `starting for N s: phase P for N s (redb repairing the data file: 60%), last progress N s ago`, while the start makes progress; 503 `[-]starting failed: no progress for N s` once nothing has moved for 120 s |
+| `GET /readyz`, `/readyz/<check>` | 503 `[-]starting: …` |
+| `GET /health` | 503 `{"health":"false","reason":"STARTING …"}` |
+| `GET /metrics`, `/` | `fastetcd_starting{phase="…"} 1`, `fastetcd_starting_seconds`, `fastetcd_starting_since_progress_seconds` |
+
+Progress is any of: a phase ends, redb reports its repair (once per full
+scan of the file: 0, 30, 60, 90%), the process reads or writes
+(`/proc/self/io` `rchar`/`wchar`) or uses CPU. A repair of a file not
+closed cleanly reads the whole file, so on a slow disk it keeps `/livez`
+ok for as long as it takes; a read that never returns (a device stall
+below fastetcd, #138) fails it after 120 s. So point the startup probe at
+the metrics port's `/livez` and give it a budget for a stall, not for the
+repair: before 1.36.1 the port refused connections until the start was
+over, and a kubelet whose startup probe ran out killed a repair that was
+working, after which the next start repaired the file again from the
+beginning (redb keeps nothing of an unfinished repair). The client and
+peer ports still open only once the member can serve them. The data
+file is opened on a blocking thread, so the runtime's workers answer
+probes meanwhile.
+
+What a repair costs: it walks the whole file, three scans, in redb's
+page order. server1 (X9 blade, drive-managed SMR, 12.55, #176): 176 s
+for the repair alone in a 210 s start, every other phase slow too on the
+saturated disk; the start before it was killed by its startup probe at
+600 s before it finished.
+
 The raft log is purged after each snapshot (`--snapshot-count`), but a
 WAL segment is deleted only once a checkpoint has made the data file
 durable past every entry in it.
@@ -1073,6 +1105,9 @@ cache or one engine read); a linearizable one on a sole voter waits only
 for the state machine to reach its term's first entry, and on a
 multi-member leader for one `ConfirmLeader` round. A slow answer under
 load is then the CPU (or, on a cache miss, the disk), not a commit.
+
+While the member starts, the metrics listener already answers these
+routes for the start (§ Probes while a member starts, #176).
 
 Point a **liveness** probe at `/livez` (it never fails on quorum loss,
 so a partition does not get members restarted) and **readiness** at
