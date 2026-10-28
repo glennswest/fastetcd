@@ -14,6 +14,9 @@
 //!   - `fastetcd_store_snapshot_size_in_bytes` (gauge)
 //!   - `fastetcd_disk_total_bytes` / `fastetcd_disk_available_bytes`
 //!   - `fastetcd_nospace_alarm_active` (gauge 0/1)
+//!   - `fastetcd_defrag_rewrites_total{result=ok|failed}`,
+//!     `fastetcd_defrag_rewrite_last_{seconds,pause_seconds,before_bytes,
+//!     after_bytes}`: the background rewrite of the data file (#177)
 //!   - `fastetcd_recovered_from_backup_total` (counter): restores from a
 //!     backup over the life of the store (fastetcd#37)
 //!   - `fastetcd_recovered_revision` (gauge): revision the last restore
@@ -146,6 +149,12 @@ pub struct Metrics {
     pub lease_promotions_total: Counter,
     pub cache: CacheMetrics,
     pub wal: WalMetrics,
+    /// The background rewrite of the data file (#177).
+    pub rewrites: Family<Vec<(String, String)>, Counter>,
+    pub rewrite_last_seconds: Gauge<f64, AtomicU64>,
+    pub rewrite_last_pause_seconds: Gauge<f64, AtomicU64>,
+    pub rewrite_last_before_bytes: Gauge,
+    pub rewrite_last_after_bytes: Gauge,
     /// etcd's `process_*` (fastetcd#84).
     pub process: crate::process_metrics::ProcessMetrics,
     /// Last leader id we saw, so leader_changes_total tracks
@@ -228,6 +237,11 @@ impl Metrics {
             lease_promotions_total: lease_promotions_total.clone(),
             cache: CacheMetrics::new(),
             wal: WalMetrics::new(),
+            rewrites: Family::default(),
+            rewrite_last_seconds: Gauge::default(),
+            rewrite_last_pause_seconds: Gauge::default(),
+            rewrite_last_before_bytes: Gauge::default(),
+            rewrite_last_after_bytes: Gauge::default(),
             process: Default::default(),
             last_leader: AtomicU64::new(0),
         });
@@ -297,6 +311,31 @@ impl Metrics {
                 nospace_alarm,
             );
             // prometheus-client appends `_total` to a counter's name.
+            reg.register(
+                "fastetcd_defrag_rewrites",
+                "Background rewrites of the data file into a fresh one (#177), by result",
+                m.rewrites.clone(),
+            );
+            reg.register(
+                "fastetcd_defrag_rewrite_last_seconds",
+                "How long the last background rewrite took",
+                m.rewrite_last_seconds.clone(),
+            );
+            reg.register(
+                "fastetcd_defrag_rewrite_last_pause_seconds",
+                "How long reads and writes waited for the last rewrite's switch",
+                m.rewrite_last_pause_seconds.clone(),
+            );
+            reg.register(
+                "fastetcd_defrag_rewrite_last_before_bytes",
+                "Data file size before the last background rewrite",
+                m.rewrite_last_before_bytes.clone(),
+            );
+            reg.register(
+                "fastetcd_defrag_rewrite_last_after_bytes",
+                "Data file size after the last background rewrite",
+                m.rewrite_last_after_bytes.clone(),
+            );
             reg.register(
                 "fastetcd_recovered_from_backup",
                 "Times this store has been restored from a backup after its data \
@@ -582,6 +621,16 @@ impl Metrics {
         // — a file size, a directory scan and a statvfs — so it runs on
         // the scrape like everything else here. `db_size_in_use` is the
         // one expensive number and comes from its own cache.
+        {
+            let r = &state.space.rewrites;
+            let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+            catch_up(&self.rewrites.get_or_create(&vec![("result".into(), "ok".into())]), load(&r.ok));
+            catch_up(&self.rewrites.get_or_create(&vec![("result".into(), "failed".into())]), load(&r.failed));
+            self.rewrite_last_seconds.set(load(&r.last_millis) as f64 / 1e3);
+            self.rewrite_last_pause_seconds.set(load(&r.last_pause_millis) as f64 / 1e3);
+            self.rewrite_last_before_bytes.set(load(&r.last_before_bytes) as i64);
+            self.rewrite_last_after_bytes.set(load(&r.last_after_bytes) as i64);
+        }
         if state.space.is_enabled() {
             let stats = state.space.clone().refresh(state).await;
             self.snapshot_size_bytes.set(stats.snapshot_bytes as i64);

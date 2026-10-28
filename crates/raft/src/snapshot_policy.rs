@@ -98,19 +98,39 @@ impl ProposalLog {
     }
 }
 
+/// Whether a snapshot is due: `count` proposals since the last one, or
+/// any proposal and the last one (or the start) at least `interval` ago
+/// (fastetcd#177: a quiet member's log and WAL are purged too). `0` /
+/// `None` turn either off.
+pub fn snapshot_due(since: u64, count: u64, age: Duration, interval: Option<Duration>) -> bool {
+    (count > 0 && since >= count) || (since > 0 && interval.is_some_and(|i| age >= i))
+}
+
 /// Run the policy for this member until the process ends.
-pub fn spawn(raft: Raft<TypeConfig>, log: Arc<ProposalLog>, snapshot_count: u64, keep: u64) {
+pub fn spawn(
+    raft: Raft<TypeConfig>,
+    log: Arc<ProposalLog>,
+    snapshot_count: u64,
+    keep: u64,
+    interval: Option<Duration>,
+) {
     tokio::spawn(async move {
         let mut asked_after: Option<u64> = None;
         let mut purged_for: Option<u64> = None;
+        let mut last_snap: (Option<u64>, std::time::Instant) = (None, std::time::Instant::now());
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let m = raft.metrics().borrow().clone();
             let snap = m.snapshot.map(|l| l.index);
+            if snap != last_snap.0 {
+                last_snap = (snap, std::time::Instant::now());
+            }
             let since = log.total().saturating_sub(snap.map_or(0, |s| log.cumulative_at(s)));
             // Once per snapshot: openraft builds it in the background, and
             // the next request only once it shows in the metrics.
-            if snapshot_count > 0 && since >= snapshot_count && asked_after != Some(snap.unwrap_or(0)) {
+            if snapshot_due(since, snapshot_count, last_snap.1.elapsed(), interval)
+                && asked_after != Some(snap.unwrap_or(0))
+            {
                 if raft.trigger().snapshot().await.is_err() {
                     return;
                 }
@@ -156,5 +176,17 @@ mod tests {
         // Purged right up to a snapshot: nothing new since it.
         l.forget_upto(5);
         assert_eq!(l.total() - l.cumulative_at(5), 0);
+    }
+
+    #[test]
+    fn snapshot_due_by_count_or_age() {
+        let hour = Some(Duration::from_secs(3600));
+        let (young, old) = (Duration::from_secs(10), Duration::from_secs(4000));
+        assert!(snapshot_due(5000, 5000, young, hour), "by count");
+        assert!(!snapshot_due(10, 5000, young, hour));
+        assert!(snapshot_due(10, 5000, old, hour), "by age, with a proposal since");
+        assert!(!snapshot_due(0, 5000, old, hour), "nothing since: no snapshot");
+        assert!(!snapshot_due(10, 5000, old, None), "age off");
+        assert!(!snapshot_due(10, 0, young, hour) && snapshot_due(10, 0, old, hour), "count off");
     }
 }

@@ -335,6 +335,12 @@ impl KvStore for WriteBehind {
         self.flush_locked().await?;
         self.inner.base.defragment().await
     }
+
+    /// No flush lock: the base engine captures what flushes commit while
+    /// it copies, and a flush must not wait for the copy (#177).
+    async fn rewrite(&self, pace: u32) -> StorageResult<Option<crate::kvstore::RewriteReport>> {
+        self.inner.base.rewrite(pace).await
+    }
 }
 
 /// A consistent view: the engine as of the snapshot plus the layers not

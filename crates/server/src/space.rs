@@ -93,6 +93,57 @@ pub struct SpaceConfig {
     pub defrag_min_reclaim_bytes: u64,
     /// Minimum gap between reclaim attempts.
     pub reclaim_backoff: Duration,
+    /// The background rewrite (#177).
+    pub rewrite: RewriteConfig,
+}
+
+/// When the background rewrite runs (#177): `--defrag-*`.
+#[derive(Debug, Clone)]
+pub struct RewriteConfig {
+    /// Rewrite once this share of the file is free pages; `0` = off.
+    pub free_percent: u8,
+    /// Leave a file smaller than this alone.
+    pub min_file_bytes: u64,
+    /// How often to check.
+    pub interval: Duration,
+    /// The copy's throttle ([`fastetcd_storage::KvStore::rewrite`]).
+    pub pace: u32,
+}
+
+impl Default for RewriteConfig {
+    fn default() -> Self {
+        Self { free_percent: 50, min_file_bytes: 64 << 20, interval: Duration::from_secs(600), pace: 4 }
+    }
+}
+
+/// Whether to rewrite the data file now, and if not, why (#177).
+/// `file`/`in_use` are the data file's size and live bytes; the copy needs
+/// about `in_use` more on the volume, which must stay under the
+/// high-water mark (`used`/`capacity`: the volume, 0 capacity = unknown).
+pub fn rewrite_decision(
+    cfg: &RewriteConfig,
+    high_water_percent: u8,
+    file: u64,
+    in_use: u64,
+    used: u64,
+    capacity: u64,
+) -> Result<(), &'static str> {
+    if cfg.free_percent == 0 {
+        return Err("off");
+    }
+    if file < cfg.min_file_bytes {
+        return Err("file below --defrag-min-file-bytes");
+    }
+    let free = file.saturating_sub(in_use);
+    if in_use == 0 || (free as u128) * 100 < (file as u128) * cfg.free_percent as u128 {
+        return Err("free share below --defrag-free-percent");
+    }
+    if capacity > 0
+        && (used.saturating_add(in_use) as u128) * 100 > (capacity as u128) * high_water_percent as u128
+    {
+        return Err("no room for the copy under the high-water mark");
+    }
+    Ok(())
 }
 
 impl Default for SpaceConfig {
@@ -107,6 +158,7 @@ impl Default for SpaceConfig {
             auto_defrag: true,
             defrag_min_reclaim_bytes: 4 * 1024 * 1024,
             reclaim_backoff: Duration::from_secs(60),
+            rewrite: RewriteConfig::default(),
         }
     }
 }
@@ -184,6 +236,19 @@ pub struct SpaceGuard {
     /// A walk is running: other callers get the cached number.
     in_use_walking: AtomicBool,
     clock: std::time::Instant,
+    /// The background rewrite's record (#177), for /metrics.
+    pub rewrites: RewriteStats,
+}
+
+/// What the background rewrites did (#177).
+#[derive(Debug, Default)]
+pub struct RewriteStats {
+    pub ok: AtomicU64,
+    pub failed: AtomicU64,
+    pub last_millis: AtomicU64,
+    pub last_pause_millis: AtomicU64,
+    pub last_before_bytes: AtomicU64,
+    pub last_after_bytes: AtomicU64,
 }
 
 impl SpaceGuard {
@@ -205,6 +270,7 @@ impl SpaceGuard {
             in_use_walk_nanos: AtomicU64::new(0),
             in_use_walking: AtomicBool::new(false),
             clock: std::time::Instant::now(),
+            rewrites: RewriteStats::default(),
         }
     }
 
@@ -501,6 +567,86 @@ pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
             guard.refresh(&state).await;
         }
     }))
+}
+
+/// Spawn the background rewrite (#177): every `--defrag-check-interval-secs`,
+/// rewrite the data file into a fresh one and switch to it once enough of
+/// it is free pages ([`rewrite_decision`]). Not while the store is above
+/// the high-water mark: [`reclaim`]'s in-place defragment needs no room
+/// for a copy.
+pub fn spawn_rewrite(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
+    let cfg = state.space.config().clone();
+    if !state.space.is_enabled() || cfg.rewrite.free_percent == 0 {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(cfg.rewrite.interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // not at start: the start has enough to do
+        loop {
+            tick.tick().await;
+            if let Err(e) = rewrite_if_due(&state, &cfg).await {
+                tracing::warn!(target: "fastetcd::space", "background rewrite failed: {e}");
+            }
+        }
+    }))
+}
+
+/// One check of the background rewrite, and the rewrite if it is due.
+pub async fn rewrite_if_due(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<()> {
+    let guard = &state.space;
+    let engine = state.sm.mvcc().engine().clone();
+    let stats = guard.refresh(state).await;
+    let in_use = guard.in_use_bytes(&engine, IN_USE_MAX_AGE).await;
+    let file = engine.size_on_disk().await?;
+    let free_pct = if file == 0 { 0 } else { file.saturating_sub(in_use) * 100 / file };
+    if let Err(why) = rewrite_decision(
+        &cfg.rewrite,
+        cfg.high_water_percent,
+        file,
+        in_use,
+        stats.used_bytes(),
+        stats.capacity_bytes,
+    ) {
+        tracing::debug!(target: "fastetcd::space", file_bytes = file, in_use_bytes = in_use, free_pct, why, "background rewrite not due");
+        return Ok(());
+    }
+    tracing::info!(
+        target: "fastetcd::space",
+        file_bytes = file,
+        in_use_bytes = in_use,
+        free_pct,
+        "rewriting the data file into a fresh one in the background"
+    );
+    let r = &guard.rewrites;
+    match engine.rewrite(cfg.rewrite.pace).await {
+        Ok(Some(report)) => {
+            guard.invalidate_in_use();
+            r.ok.fetch_add(1, Ordering::Relaxed);
+            r.last_millis.store(report.took.as_millis() as u64, Ordering::Relaxed);
+            r.last_pause_millis.store(report.switch_pause.as_millis() as u64, Ordering::Relaxed);
+            r.last_before_bytes.store(report.before_bytes, Ordering::Relaxed);
+            r.last_after_bytes.store(report.after_bytes, Ordering::Relaxed);
+            tracing::info!(
+                target: "fastetcd::space",
+                before_bytes = report.before_bytes,
+                after_bytes = report.after_bytes,
+                in_use_bytes = in_use,
+                free_pct,
+                records = report.records,
+                caught_up_ops = report.caught_up_ops,
+                took_ms = report.took.as_millis() as u64,
+                switch_pause_ms = report.switch_pause.as_millis() as u64,
+                "data file rewritten and switched"
+            );
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => {
+            r.failed.fetch_add(1, Ordering::Relaxed);
+            Err(e.into())
+        }
+    }
 }
 
 /// One reclaim pass: compact MVCC history, snapshot so the raft log can

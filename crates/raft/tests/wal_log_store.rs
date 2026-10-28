@@ -592,7 +592,7 @@ async fn snapshots_and_purges_are_counted_in_proposals() {
     assert!(entries < 200, "300 writes took {entries} log entries: not batched enough to tell");
 
     // The policy: a snapshot (by proposals), then a purge to ~100 kept.
-    fastetcd_raft::snapshot_policy::spawn(raft.clone(), sm.proposal_log(), 200, 100);
+    fastetcd_raft::snapshot_policy::spawn(raft.clone(), sm.proposal_log(), 200, 100, None);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let m = metrics(&raft);

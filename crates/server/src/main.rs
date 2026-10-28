@@ -306,6 +306,13 @@ struct Args {
     )]
     max_in_snapshot_log_to_keep: u64,
 
+    /// Also take a raft snapshot (and purge the log) once the last one is
+    /// this many seconds old and any write has been applied since, so a
+    /// quiet member's raft log and WAL are purged too (#177). `0` turns it
+    /// off (`--snapshot-count` only). fastetcd's own; etcd has none.
+    #[arg(long, env = "FASTETCD_SNAPSHOT_INTERVAL_SECS", default_value_t = 1800)]
+    snapshot_interval_secs: u64,
+
     /// Auto-compaction retention, in revisions. Keeps the most recent N
     /// key revisions and compacts older history, bounding the MVCC store
     /// (and therefore snapshot cost). `0` disables it (the default) —
@@ -384,6 +391,29 @@ struct Args {
         action = clap::ArgAction::Set
     )]
     auto_defrag: bool,
+
+    /// Rewrite the data file into a fresh, compact one in the background
+    /// and switch to it once at least this percentage of the file is free
+    /// pages (#177). Reads and writes go on during the copy; only the
+    /// switch pauses them, briefly. `0` turns it off. fastetcd's own.
+    #[arg(long, env = "FASTETCD_DEFRAG_FREE_PERCENT", default_value_t = 50,
+          value_parser = clap::value_parser!(u8).range(0..=99))]
+    defrag_free_percent: u8,
+
+    /// The background rewrite leaves a data file smaller than this alone.
+    #[arg(long, env = "FASTETCD_DEFRAG_MIN_FILE_BYTES", default_value_t = 64 << 20)]
+    defrag_min_file_bytes: u64,
+
+    /// How often the background rewrite checks whether it is due, in
+    /// seconds. The check uses the paced live-bytes walk (#166).
+    #[arg(long, env = "FASTETCD_DEFRAG_CHECK_INTERVAL_SECS", default_value_t = 600)]
+    defrag_check_interval_secs: u64,
+
+    /// Throttle of the background rewrite's copy: it sleeps this many
+    /// times as long as each chunk took, so it uses about 1/(1+N) of the
+    /// disk (4: 20%, as checkpoints are paced, #95).
+    #[arg(long, env = "FASTETCD_DEFRAG_PACE", default_value_t = 4)]
+    defrag_pace: u32,
 
     /// Nodes this cluster is expected to run. Used to size the store:
     /// at startup fastetcd computes the volume that shape needs and
@@ -1241,6 +1271,8 @@ async fn main() -> anyhow::Result<()> {
         sm.proposal_log(),
         args.snapshot_count,
         args.max_in_snapshot_log_to_keep,
+        (args.snapshot_interval_secs > 0)
+            .then(|| std::time::Duration::from_secs(args.snapshot_interval_secs)),
     );
 
     // Bootstrap: only the `new` state initializes; `existing` waits
@@ -1271,6 +1303,12 @@ async fn main() -> anyhow::Result<()> {
         interval: std::time::Duration::from_secs(args.space_check_interval_secs.max(1)),
         reclaim_retention: args.space_reclaim_retention.max(1),
         auto_defrag: args.auto_defrag,
+        rewrite: fastetcd_server::space::RewriteConfig {
+            free_percent: args.defrag_free_percent,
+            min_file_bytes: args.defrag_min_file_bytes,
+            interval: std::time::Duration::from_secs(args.defrag_check_interval_secs.max(1)),
+            pace: args.defrag_pace,
+        },
         ..Default::default()
     };
     let space = Arc::new(if args.space_check_interval_secs == 0 {
@@ -1407,6 +1445,15 @@ async fn main() -> anyhow::Result<()> {
             max_snapshots = args.max_snapshots,
             auto_defrag = args.auto_defrag,
             "space monitor started"
+        );
+    }
+    if fastetcd_server::space::spawn_rewrite(server_state.clone()).is_some() {
+        tracing::info!(
+            free_percent = args.defrag_free_percent,
+            min_file_bytes = args.defrag_min_file_bytes,
+            check_interval_secs = args.defrag_check_interval_secs,
+            pace = args.defrag_pace,
+            "background rewrite of the data file enabled"
         );
     }
     if let Some(_h) = fastetcd_server::compaction::spawn(

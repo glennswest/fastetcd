@@ -57,6 +57,75 @@ struct RedbInner {
     repaired_at_open: bool,
     /// The file was not closed cleanly, repaired by a walk or not.
     unclean_at_open: bool,
+    /// redb's page cache size, for the file a rewrite switches to.
+    cache_bytes: Option<usize>,
+    /// While a rewrite copies (fastetcd#177): every commit made since its
+    /// read transaction, to apply to the new file. Locked across each
+    /// commit's `commit()`, so the copy's start is atomic with commits.
+    capture: std::sync::Mutex<Option<Capture>>,
+    /// One rewrite or in-place defragment at a time.
+    maintenance: tokio::sync::Mutex<()>,
+}
+
+/// The commits a rewrite has yet to apply to its new file.
+#[derive(Default)]
+struct Capture {
+    ops: Vec<BatchOp>,
+    bytes: usize,
+    /// Why the rewrite must give up (too much written meanwhile, a raft
+    /// snapshot installed: the copy is no longer worth finishing).
+    abandoned: Option<&'static str>,
+}
+
+/// A rewrite gives up if more than this is written during its copy: the
+/// captured ops are held in RAM.
+const CAPTURE_MAX_BYTES: usize = 256 << 20;
+/// Records go into the new file in chunks of about this many bytes, each
+/// followed by the pacing sleep.
+const REWRITE_CHUNK_BYTES: usize = 4 << 20;
+/// A durable commit of the new file every this many chunks, so the pages
+/// earlier commits freed can be reused.
+const REWRITE_DURABLE_EVERY: usize = 16;
+/// Catch-up passes stop once one has less than this to apply; the rest
+/// is applied in the switch, under the engine's write lock.
+const CATCHUP_DONE_BYTES: usize = 1 << 20;
+const CATCHUP_MAX_PASSES: usize = 16;
+/// redb's cache for the file being written (its own pages; reads come
+/// from the old file).
+const REWRITE_CACHE_BYTES: usize = 32 << 20;
+
+impl Capture {
+    fn push(&mut self, ops: &[BatchOp]) {
+        if self.abandoned.is_some() {
+            return;
+        }
+        self.bytes += ops.iter().map(op_bytes).sum::<usize>();
+        if self.bytes > CAPTURE_MAX_BYTES {
+            self.abandon("more than 256 MiB written during the copy");
+            return;
+        }
+        self.ops.extend_from_slice(ops);
+    }
+
+    fn abandon(&mut self, why: &'static str) {
+        self.abandoned.get_or_insert(why);
+        self.ops = Vec::new();
+    }
+}
+
+fn op_bytes(op: &BatchOp) -> usize {
+    match op {
+        BatchOp::Put { table, key, value } => table.len() + key.len() + value.len(),
+        BatchOp::Delete { table, key } => table.len() + key.len(),
+        BatchOp::DeleteRange { table, start, end } => table.len() + start.len() + end.len(),
+    }
+}
+
+/// Where a rewrite writes the new file, next to the data file.
+pub fn rewrite_path(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_os_string();
+    p.push(".rewrite");
+    PathBuf::from(p)
 }
 
 /// Whether redb's header marks the file as not closed cleanly. redb sets
@@ -133,6 +202,13 @@ impl RedbEngine {
         // redb repairs a file that was not closed cleanly (its last
         // handle never dropped: a kill, a crash) by walking every page,
         // seconds on a spinning disk; say so (fastetcd#161).
+        // A rewrite the process did not finish (fastetcd#177): the data
+        // file is still the one it started from.
+        let leftover = rewrite_path(&path);
+        if leftover.exists() {
+            tracing::warn!(file = %leftover.display(), "removing an unfinished rewrite of the data file");
+            let _ = std::fs::remove_file(&leftover);
+        }
         let repaired = Arc::new(AtomicBool::new(false));
         let unclean = closed_uncleanly(&path);
         let db = std::panic::catch_unwind(|| {
@@ -190,6 +266,9 @@ impl RedbEngine {
                 defrag_done: Arc::new(Notify::new()),
                 repaired_at_open: repaired,
                 unclean_at_open: unclean || repaired,
+                cache_bytes,
+                capture: std::sync::Mutex::new(None),
+                maintenance: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -215,6 +294,109 @@ impl RedbEngine {
     /// a kill usually does not ([`durability`]).
     pub fn unclean_at_open(&self) -> bool {
         self.inner.unclean_at_open
+    }
+
+    /// Rewrite the data file into a fresh one and switch to it
+    /// (fastetcd#177): an online defragment that does not stop the store.
+    ///
+    /// 1. A read transaction, taken atomically with the start of a capture
+    ///    of every commit made from then on.
+    /// 2. Every table copied from it into `<file>.rewrite` in chunks, the
+    ///    copy sleeping `pace` times each chunk's duration, then that file
+    ///    compacted (no live reader of it).
+    /// 3. The captured commits applied to it in passes, until a pass has
+    ///    little left.
+    /// 4. The switch, under the engine's write lock (commits and new
+    ///    snapshots wait): the rest applied, a durable quick-repair commit,
+    ///    the file closed, reopened, renamed over the data file, the
+    ///    directory synced, the handle swapped. Snapshots already open
+    ///    keep reading the old file's inode until they are dropped.
+    ///
+    /// On any error, or if the capture was abandoned, the data file is
+    /// untouched and the new one removed.
+    pub async fn rewrite(&self, pace: u32) -> StorageResult<crate::kvstore::RewriteReport> {
+        let _maintenance = self.inner.maintenance.lock().await;
+        let started = std::time::Instant::now();
+        let before_bytes = self.size_on_disk().await?;
+        let tmp = rewrite_path(&self.inner.path);
+        let _ = std::fs::remove_file(&tmp);
+        let cleanup = RewriteCleanup { inner: self.inner.clone(), tmp: Some(tmp.clone()) };
+
+        // 1 + 2: the copy, on a blocking thread (it sleeps to pace itself).
+        let db_guard = self.inner.db.clone().read_owned().await;
+        let inner = self.inner.clone();
+        let tmp2 = tmp.clone();
+        let (new_db, records, mut caught_up_ops) =
+            task::spawn_blocking(move || -> StorageResult<(Database, u64, u64)> {
+                let read = {
+                    let mut capture = inner.capture.lock().unwrap();
+                    let read = db_guard.begin_read().map_err(StorageError::io)?;
+                    *capture = Some(Capture::default());
+                    read
+                };
+                drop(db_guard);
+                let mut new_db = Database::builder()
+                    .set_cache_size(REWRITE_CACHE_BYTES)
+                    .create(&tmp2)
+                    .map_err(StorageError::io)?;
+                let records = copy_tables(&read, &new_db, &inner, pace)?;
+                drop(read);
+                // 3: catch up.
+                let mut applied = 0u64;
+                for _ in 0..CATCHUP_MAX_PASSES {
+                    let (ops, bytes) = take_capture(&inner)?;
+                    applied += ops.len() as u64;
+                    apply_all(&new_db, &ops, false)?;
+                    if bytes < CATCHUP_DONE_BYTES {
+                        break;
+                    }
+                }
+                apply_all(&new_db, &[], true)?;
+                new_db.compact().map_err(StorageError::io)?;
+                Ok((new_db, records, applied))
+            })
+            .await
+            .map_err(|e| StorageError::Io(Box::new(e)))??;
+
+        // 4: the switch.
+        let switch_started = std::time::Instant::now();
+        let mut db_guard = self.inner.db.clone().write_owned().await;
+        let inner = self.inner.clone();
+        let path = self.inner.path.clone();
+        let cache_bytes = self.inner.cache_bytes;
+        let last_ops = task::spawn_blocking(move || -> StorageResult<u64> {
+            let (ops, _) = take_capture(&inner)?;
+            *inner.capture.lock().unwrap() = None;
+            apply_all(&new_db, &ops, true)?;
+            // A clean close, then the file opened as the data file will be.
+            drop(new_db);
+            let mut builder = Database::builder();
+            if let Some(bytes) = cache_bytes {
+                builder.set_cache_size(bytes);
+            }
+            let fresh = builder.create(&tmp).map_err(StorageError::io)?;
+            std::fs::rename(&tmp, &path).map_err(StorageError::io)?;
+            if let Some(dir) = path.parent() {
+                std::fs::File::open(dir).and_then(|d| d.sync_all()).map_err(StorageError::io)?;
+            }
+            // The old handle closes here; its file is gone from the
+            // directory and freed once the last snapshot of it is dropped.
+            *db_guard = fresh;
+            Ok(ops.len() as u64)
+        })
+        .await
+        .map_err(|e| StorageError::Io(Box::new(e)))??;
+        cleanup.done();
+        caught_up_ops += last_ops;
+        let switch_pause = switch_started.elapsed();
+        Ok(crate::kvstore::RewriteReport {
+            before_bytes,
+            after_bytes: self.size_on_disk().await?,
+            records,
+            caught_up_ops,
+            took: started.elapsed(),
+            switch_pause,
+        })
     }
 
     fn table_def(name: &str) -> TableDefinition<'_, &'static [u8], &'static [u8]> {
@@ -278,13 +460,19 @@ impl KvStore for RedbEngine {
         // a full fsync — so it runs in the blocking task with the rest,
         // never on a tokio worker (fastetcd#71).
         let db_guard = self.inner.db.clone().read_owned().await;
+        let inner = self.inner.clone();
         let result = task::spawn_blocking(move || -> StorageResult<()> {
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
             durability(&mut txn, opts.sync);
             for op in batch.ops() {
                 apply_op(&txn, op)?;
             }
+            let mut capture = inner.capture.lock().unwrap();
             txn.commit().map_err(StorageError::io)?;
+            if let Some(c) = capture.as_mut() {
+                c.push(batch.ops());
+            }
+            drop(capture);
             drop(db_guard);
             Ok(())
         })
@@ -303,13 +491,21 @@ impl KvStore for RedbEngine {
         // caller never holds them all, and an `Err` drops the transaction
         // uncommitted, so nothing it carried is applied.
         let db_guard = self.inner.db.clone().read_owned().await;
+        let inner = self.inner.clone();
         task::spawn_blocking(move || -> StorageResult<()> {
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
             durability(&mut txn, opts.sync);
             for op in ops {
                 apply_op(&txn, &op?)?;
             }
+            let mut capture = inner.capture.lock().unwrap();
             txn.commit().map_err(StorageError::io)?;
+            // A whole-store replace (a raft snapshot install): not worth
+            // holding for a rewrite in progress (fastetcd#177).
+            if let Some(c) = capture.as_mut() {
+                c.abandon("a raft snapshot was installed during the copy");
+            }
+            drop(capture);
             drop(db_guard);
             Ok(())
         })
@@ -432,6 +628,9 @@ impl KvStore for RedbEngine {
         // early) would keep its snapshot alive for as long as we waited,
         // and the drain could never finish. Taking the exclusive lock
         // last lets those applies complete and release their readers.
+        // Not while a rewrite copies: its read transaction would keep the
+        // drain below from finishing.
+        let _maintenance = self.inner.maintenance.lock().await;
         let _pending = DefragPending::set(&self.inner);
 
         const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -472,6 +671,10 @@ impl KvStore for RedbEngine {
         txn.commit().map_err(StorageError::io)?;
         Ok(())
     }
+
+    async fn rewrite(&self, pace: u32) -> StorageResult<Option<crate::kvstore::RewriteReport>> {
+        RedbEngine::rewrite(self, pace).await.map(Some)
+    }
 }
 
 /// Set a write transaction's durability. A non-durable commit is visible
@@ -493,6 +696,104 @@ fn durability(txn: &mut redb::WriteTransaction, durable: bool) {
         txn.set_quick_repair(true);
     } else {
         txn.set_durability(Durability::None);
+    }
+}
+
+/// Copy every table of `read` into `new_db` (fastetcd#177), a chunk per
+/// commit, sleeping `pace` times each chunk's duration. Gives up as soon
+/// as the capture is abandoned.
+fn copy_tables(
+    read: &redb::ReadTransaction,
+    new_db: &Database,
+    inner: &RedbInner,
+    pace: u32,
+) -> StorageResult<u64> {
+    use redb::TableHandle;
+    let names: Vec<String> =
+        read.list_tables().map_err(StorageError::io)?.map(|t| t.name().to_string()).collect();
+    let mut records = 0u64;
+    let mut chunks = 0usize;
+    for name in names {
+        let def = RedbEngine::table_def(&name);
+        let src = read.open_table(def).map_err(StorageError::io)?;
+        let mut iter = src.range::<&[u8]>(..).map_err(StorageError::io)?;
+        loop {
+            let chunk_started = std::time::Instant::now();
+            let mut txn = new_db.begin_write().map_err(StorageError::io)?;
+            chunks += 1;
+            if chunks % REWRITE_DURABLE_EVERY != 0 {
+                txn.set_durability(Durability::None);
+            }
+            let mut done = true;
+            {
+                // Opened even when empty, so the table exists in the new file.
+                let mut dst = txn.open_table(def).map_err(StorageError::io)?;
+                let mut bytes = 0usize;
+                for entry in iter.by_ref() {
+                    let (k, v) = entry.map_err(StorageError::io)?;
+                    dst.insert(k.value(), v.value()).map_err(StorageError::io)?;
+                    records += 1;
+                    bytes += k.value().len() + v.value().len();
+                    if bytes >= REWRITE_CHUNK_BYTES {
+                        done = false;
+                        break;
+                    }
+                }
+            }
+            txn.commit().map_err(StorageError::io)?;
+            if let Some(why) = inner.capture.lock().unwrap().as_ref().and_then(|c| c.abandoned) {
+                return Err(StorageError::Misuse(format!("rewrite abandoned: {why}")));
+            }
+            std::thread::sleep(chunk_started.elapsed().saturating_mul(pace));
+            if done {
+                break;
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// The commits captured so far, and their bytes; an error if the capture
+/// was abandoned.
+fn take_capture(inner: &RedbInner) -> StorageResult<(Vec<BatchOp>, usize)> {
+    let mut capture = inner.capture.lock().unwrap();
+    let c = capture.as_mut().ok_or_else(|| StorageError::Misuse("rewrite: no capture".into()))?;
+    if let Some(why) = c.abandoned {
+        return Err(StorageError::Misuse(format!("rewrite abandoned: {why}")));
+    }
+    let bytes = std::mem::take(&mut c.bytes);
+    Ok((std::mem::take(&mut c.ops), bytes))
+}
+
+/// Apply `ops` to `db` in one commit; a durable one is a quick-repair
+/// commit, as every durable commit of the data file is.
+fn apply_all(db: &Database, ops: &[BatchOp], durable: bool) -> StorageResult<()> {
+    let mut txn = db.begin_write().map_err(StorageError::io)?;
+    durability(&mut txn, durable);
+    for op in ops {
+        apply_op(&txn, op)?;
+    }
+    txn.commit().map_err(StorageError::io)
+}
+
+/// Ends a rewrite's capture and removes its file unless it switched.
+struct RewriteCleanup {
+    inner: Arc<RedbInner>,
+    tmp: Option<PathBuf>,
+}
+
+impl RewriteCleanup {
+    fn done(mut self) {
+        self.tmp = None;
+    }
+}
+
+impl Drop for RewriteCleanup {
+    fn drop(&mut self) {
+        *self.inner.capture.lock().unwrap() = None;
+        if let Some(tmp) = self.tmp.take() {
+            let _ = std::fs::remove_file(tmp);
+        }
     }
 }
 

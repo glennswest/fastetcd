@@ -279,6 +279,22 @@ impl StoreUsage {
     }
 }
 
+/// What a background rewrite did ([`KvStore::rewrite`], fastetcd#177).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RewriteReport {
+    /// The data file's size before and after.
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    /// Records copied from the read transaction the copy started from.
+    pub records: u64,
+    /// Commits made during the copy, applied to the new file afterwards.
+    pub caught_up_ops: u64,
+    /// The whole rewrite, and the part of it commits and new snapshots
+    /// waited for (the switch).
+    pub took: std::time::Duration,
+    pub switch_pause: std::time::Duration,
+}
+
 /// The top-level storage engine trait. Implementations are expected to
 /// be cheaply `Clone` (e.g., `Arc`-wrapping their state) so the server
 /// can hand copies to multiple subsystems.
@@ -351,6 +367,16 @@ pub trait KvStore: Send + Sync + 'static {
     /// invoking.
     async fn defragment(&self) -> StorageResult<()> {
         Ok(())
+    }
+
+    /// Rewrite the store into a fresh, compact file in the background and
+    /// switch to it (fastetcd#177): reads and writes go on while it copies;
+    /// only the switch pauses them, briefly. `pace` throttles the copy: it
+    /// sleeps `pace` times as long as each chunk took, so it uses about
+    /// `1 / (1 + pace)` of the disk. `Ok(None)`: the engine cannot.
+    async fn rewrite(&self, pace: u32) -> StorageResult<Option<RewriteReport>> {
+        let _ = pace;
+        Ok(None)
     }
 }
 

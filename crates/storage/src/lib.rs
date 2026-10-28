@@ -29,6 +29,6 @@ pub mod redb_engine;
 
 pub use fs_space::FsSpace;
 pub use kvstore::{
-    KvStore, Snapshot, StorageError, StorageResult, StoreUsage, WriteBatch, WriteOptions,
+    KvStore, RewriteReport, Snapshot, StorageError, StorageResult, StoreUsage, WriteBatch, WriteOptions,
 };
 pub use mvcc::{Mutation, MutationResult, MvccError, MvccResult, MvccStore, RangeResult};
