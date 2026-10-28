@@ -4,8 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-28
-- **feat:** `MoveLeader` (`etcdctl move-leader`) hands leadership to
+## [v1.36.0] — 2026-10-28
+
+### Added
+- `MoveLeader` (`etcdctl move-leader`) hands leadership to
   another voter (#57); it answered `Unimplemented`. openraft 0.9 refuses
   every vote while the leader's lease is live, so a third patch to the
   vendored openraft adds `Trigger::accept_leader_transfer`: a member whose
@@ -23,7 +25,9 @@
   `multinode_fastpath::move_leader_*` (3 members under writes, there and
   back, nothing acknowledged lost; with a member older than the RPC).
   Docs: 03 § Multi-node, 00, README, deck. Downgrade stays
-  `Unimplemented` (no cluster version).
+  `Unimplemented` (no cluster version). Verified on a build VM: openraft's
+  suite 190 pass; workspace 464 pass, 0 fail; a transfer ~155 ms each way;
+  with the waiver disabled the transfer times out.
 
 ## [v1.35.3] — 2026-10-21
 

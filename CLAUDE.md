@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.35.3`** — Peer connections time out and notice a dead peer (#168):
+**`1.36.0`** — MoveLeader (#57): the leader holds proposals, waits for the
+target's log, then `TransferLeader` (a third vendored openraft patch:
+the old vote's lease waived, the target elects); `leader_transfer.rs`.
+
+Previous: **`1.35.3`** — Peer connections time out and notice a dead peer (#168):
 the whole dial and an unanswered HTTP/2 ping give up after 1 s +
 `--election-timeout` (`DialOptions`, `dial_peer_with`).
 
@@ -2736,8 +2740,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] openraft `accept_leader_transfer` + engine tests (0d997a1).
     - [x] `leader_transfer.rs`, `Proposer::hold`, `TransferLeader` RPC,
       Maintenance handler, etcd's errors; 3-member tests (62f3c8d).
-    - [ ] sc-build: openraft suite, the new tests, whole workspace.
-    - [ ] Docs (00, 03, README, deck, FASTETCD.md), changelog; release
+    - [x] sc-build: openraft suite 190 pass; workspace 464 pass 0 fail
+      (c7a7243); move_leader tests ~155 ms per transfer; control with the
+      waiver disabled (branch, deleted): `leader transfer took too long`.
+    - [x] Docs (00, 03, README, deck, FASTETCD.md), changelog; release
       1.36.0; close #57.
 
 79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
