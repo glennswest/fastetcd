@@ -10,7 +10,15 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.36.1`** — A start answers its startup probe while it repairs the
+**`1.37.0`** — A start after a kill no longer walks the data file
+(#176, P0): every durable redb commit is a quick-repair commit (owner's
+decision: a torn commit on a device that loses fsync'd writes is a
+restore or re-add, not a rollback). The data file is kept small in the
+background (#177): a throttled rewrite into a fresh file, switched to
+online (`RedbEngine::rewrite`, `space::spawn_rewrite`, `--defrag-*`), and
+`--snapshot-interval-secs`.
+
+Previous: **`1.36.1`** — A start answers its startup probe while it repairs the
 data file (#176): the metrics listener is bound first; `/livez` ok while
 the start makes progress, 503 after 120 s without (`startup.rs`).
 
@@ -3127,7 +3135,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       processes: no walk after durable/defragment; a walked file left
       quick; control: plain redb commit is walked), `clean_shutdown.rs`
       (SIGKILL: unclean, no walk). Docs 03, 05 (the trade-off); release
-      1.36.2.
+      1.37.0.
 
 98. **Keep the data file small in the background (#177, P1).** Owner
     (2026-10-28): compaction, snapshot + purge and an online defrag that
@@ -3162,8 +3170,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       `fastetcd_defrag_rewrite_last_{seconds,before_bytes,after_bytes}`;
       one INFO line per pass (file size, live bytes, free %, took).
     Work items:
-    - [ ] snapshot interval; engine rewrite + capture + tests (content
-      equal, writes during the copy land, readers during the switch, crash
-      leftovers, install abandons); write-behind delegate.
-    - [ ] server task, flags, metrics; tests; docs (01, 04), changelog;
-      release; measure on server1 (file size, open time) once it runs it.
+    - [x] snapshot interval; engine rewrite + capture + tests
+      (`rewrite.rs`: content equal, writes during the copy land, an old
+      snapshot reads on, install abandons, leftover removed); write-behind
+      delegate.
+    - [x] server task, flags, metrics; `background_rewrite.rs` (a serving
+      member: rewritten, smaller, no longer due, every write during it
+      kept, metrics); docs (01, 04), changelog; release 1.37.0.
+    - Found: the in-process harness keeps its raft log in the data file,
+      and redb cuts its file only by whole regions, so a rewritten file
+      can stay well above its live bytes (101 -> 68 MB for 45 MB of pages).
+    - [ ] Measure on server1 (file size, open time) once it runs 1.37.

@@ -164,7 +164,7 @@ the WAL. Start and stop it once before an offline backup if it was not
 stopped cleanly. Restoring onto a node with a different identity needs
 `--force-new-cluster` on its first start, as with etcd.
 
-## redb quick-repair commits (two-phase commit) since 1.36.2
+## redb quick-repair commits (two-phase commit) since 1.37.0
 
 Every durable redb commit (each checkpoint, `sync`, a snapshot install,
 the commits around a defragment) is a redb **quick-repair** commit
@@ -178,7 +178,7 @@ the data file. On server1 (X9, drive-managed SMR) that walk took 179 to
 checkpoint are lost on a kill either way and replayed from the WAL. A
 start says which it was: `data file was not closed cleanly ... quick
 repair, no walk`, or `... redb is repairing it` (a full walk: a file
-whose last durable commit was written before 1.36.2, or by redb itself
+whose last durable commit was written before 1.37.0, or by redb itself
 during a compaction). After a full walk the engine makes one
 quick-repair commit at once, so the next kill is quick again.
 
@@ -219,5 +219,5 @@ durably only at a checkpoint (at most every 100 ms, paced to 4x its own
 duration), so 2PC would no longer be paid per write: it would lengthen
 every checkpoint by about one fsync, and with the pacing, space them
 further apart. On a spindle, where checkpoints already compete with the
-WAL for the disk (#135), that is not free either; it is what 1.36.2
+WAL for the disk (#135), that is not free either; it is what 1.37.0
 pays for a start after a kill that does not walk the file.

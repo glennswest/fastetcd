@@ -4,7 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-10-28
+## [v1.37.0] — 2026-10-28
+
+### Added
 - **feat:** The data file is kept small in the background (#177). A
   rewrite into a fresh file, switched to online: once
   `--defrag-free-percent` (50) of a file of at least
@@ -23,6 +25,8 @@
   and log purge also once the last one is that old and a write came
   since. Compaction: rustkube's apiserver already compacts every 5 min.
   `docs/04-disk-space.md` § Keeps the file small in the background.
+
+### Fixed
 - **fix:** A start after a kill or a power cut no longer walks the whole
   data file (#176, P0; stormcos#626). Every durable redb commit (each
   checkpoint, `sync`, a snapshot install, the commits around a
