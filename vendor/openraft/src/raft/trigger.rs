@@ -3,7 +3,9 @@
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::error::Fatal;
 use crate::raft::RaftInner;
+use crate::LogId;
 use crate::RaftTypeConfig;
+use crate::Vote;
 
 /// Trigger is an interface to trigger an action to RaftCore by external caller.
 ///
@@ -76,5 +78,37 @@ where C: RaftTypeConfig
     /// [`max_in_snapshot_log_to_keep`]: `crate::Config::max_in_snapshot_log_to_keep`
     pub async fn purge_log(&self, upto: u64) -> Result<(), Fatal<C::NodeId>> {
         self.raft_inner.send_external_command(ExternalCommand::PurgeLog { upto }, "purge_log").await
+    }
+
+    /// fastetcd: accept a leader transfer from the leader of `leader_vote` to `to`.
+    ///
+    /// The application sends this to every voter (the leader included) when the leader of
+    /// `leader_vote` hands leadership to `to`, after `to`'s log has caught up with
+    /// `last_log_id`. On a node whose vote is still `leader_vote`:
+    ///
+    /// - vote requests are no longer refused because of that vote's leader lease, for twice the
+    ///   lease (only that vote; election timers are unchanged);
+    /// - if the node is `to`, a voter, and its log holds `last_log_id`, it starts an election.
+    ///
+    /// A node whose vote differs ignores it. The election is an ordinary one: it wins only with
+    /// a quorum whose logs are no newer than the candidate's. Like openraft 0.10's
+    /// `transfer_leader`, minus the leader side (the application holds proposals and waits for
+    /// the target to catch up). Returns at once; the caller watches the metrics for the result.
+    pub async fn accept_leader_transfer(
+        &self,
+        leader_vote: Vote<C::NodeId>,
+        to: C::NodeId,
+        last_log_id: Option<LogId<C::NodeId>>,
+    ) -> Result<(), Fatal<C::NodeId>> {
+        self.raft_inner
+            .send_external_command(
+                ExternalCommand::AcceptLeaderTransfer {
+                    leader_vote,
+                    to,
+                    last_log_id,
+                },
+                "accept_leader_transfer",
+            )
+            .await
     }
 }

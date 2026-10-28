@@ -3,8 +3,10 @@
 use std::fmt;
 
 use crate::core::raft_msg::ResultSender;
+use crate::LogId;
 use crate::RaftTypeConfig;
 use crate::Snapshot;
+use crate::Vote;
 
 /// Application-triggered Raft actions for testing and administration.
 ///
@@ -31,6 +33,16 @@ pub(crate) enum ExternalCommand<C: RaftTypeConfig> {
     ///
     /// [`max_in_snapshot_log_to_keep`]: `crate::Config::max_in_snapshot_log_to_keep`
     PurgeLog { upto: u64 },
+
+    /// fastetcd: the leader of `leader_vote` hands leadership to `to`; see
+    /// [`Trigger::accept_leader_transfer`].
+    ///
+    /// [`Trigger::accept_leader_transfer`]: `crate::raft::trigger::Trigger::accept_leader_transfer`
+    AcceptLeaderTransfer {
+        leader_vote: Vote<C::NodeId>,
+        to: C::NodeId,
+        last_log_id: Option<LogId<C::NodeId>>,
+    },
 }
 
 impl<C> fmt::Debug for ExternalCommand<C>
@@ -60,6 +72,13 @@ where C: RaftTypeConfig
             }
             ExternalCommand::PurgeLog { upto } => {
                 write!(f, "PurgeLog[..={}]", upto)
+            }
+            ExternalCommand::AcceptLeaderTransfer {
+                leader_vote,
+                to,
+                last_log_id,
+            } => {
+                write!(f, "AcceptLeaderTransfer[{} -> {}, last_log_id: {:?}]", leader_vote, to, last_log_id)
             }
         }
     }

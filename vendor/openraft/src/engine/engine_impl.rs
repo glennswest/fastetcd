@@ -42,6 +42,7 @@ use crate::raft::VoteResponse;
 use crate::raft_state::LogStateReader;
 use crate::raft_state::RaftState;
 use crate::summary::MessageSummary;
+use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::ResponderOf;
 use crate::type_config::alias::SnapshotDataOf;
 use crate::type_config::TypeConfigExt;
@@ -92,6 +93,13 @@ where C: RaftTypeConfig
 
     /// Output entry for the runtime.
     pub(crate) output: EngineOutput<C>,
+
+    /// fastetcd: the leader vote whose lease this node does not enforce, and until when.
+    ///
+    /// Set by [`Engine::accept_leader_transfer`]: the leader of this vote is handing leadership
+    /// to another node, so a vote request is not refused by this vote's leader lease. Only this
+    /// vote: if the node's vote changes, the waiver no longer matches and is ignored.
+    pub(crate) lease_waived: Option<(Vote<C::NodeId>, InstantOf<C>)>,
 }
 
 impl<C> Engine<C>
@@ -108,6 +116,7 @@ where C: RaftTypeConfig
             leader: None,
             candidate: None,
             output: EngineOutput::new(4096),
+            lease_waived: None,
         }
     }
 
@@ -293,7 +302,7 @@ where C: RaftTypeConfig
             vote_utime + lease - now
         );
 
-        if vote.is_committed() {
+        if vote.is_committed() && !self.is_lease_waived(now) {
             // Current leader lease has not yet expired, reject voting request
             if now <= vote_utime + lease {
                 tracing::info!(
@@ -339,6 +348,62 @@ where C: RaftTypeConfig
         // Return the updated vote, this way the candidate knows which vote is granted, in case
         // the candidate's vote is changed after sending the vote request.
         VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), res.is_ok())
+    }
+
+    /// fastetcd: the leader of `leader_vote` asks this node to let leadership move to `to`.
+    ///
+    /// If this node's vote is still `leader_vote`, its lease stops refusing vote requests until
+    /// `now + 2 * leader_lease` (only for that vote). If this node is `to`, a voter, and its log
+    /// holds `last_log_id` (the leader's last log id when it asked), it starts an election.
+    ///
+    /// Returns whether the request matched this node's vote. A candidate is still elected only by
+    /// a quorum granting it with their logs no newer than its own, as for any election.
+    pub(crate) fn accept_leader_transfer(
+        &mut self,
+        leader_vote: Vote<C::NodeId>,
+        to: C::NodeId,
+        last_log_id: Option<LogId<C::NodeId>>,
+    ) -> bool {
+        if self.state.vote_ref() != &leader_vote {
+            tracing::info!(
+                leader_vote = display(&leader_vote),
+                my_vote = display(self.state.vote_ref()),
+                "ignore leader transfer: vote does not match"
+            );
+            return false;
+        }
+
+        let deadline = C::now() + self.config.timer_config.leader_lease * 2;
+        self.lease_waived = Some((leader_vote.clone(), deadline));
+
+        tracing::info!(
+            leader_vote = display(&leader_vote),
+            to = display(&to),
+            last_log_id = display(last_log_id.display()),
+            "leader transfer accepted: lease waived for this vote"
+        );
+
+        if to == self.config.id {
+            if !self.state.membership_state.effective().is_voter(&self.config.id) {
+                tracing::info!("leader transfer: this node is not a voter; not electing");
+            } else if self.state.last_log_id() < last_log_id.as_ref() {
+                tracing::info!(
+                    my_last_log_id = display(self.state.last_log_id().display()),
+                    "leader transfer: this node's log is behind the leader's; not electing"
+                );
+            } else {
+                self.elect();
+            }
+        }
+        true
+    }
+
+    /// fastetcd: whether the lease of this node's current vote is waived at `now`.
+    fn is_lease_waived(&self, now: InstantOf<C>) -> bool {
+        match &self.lease_waived {
+            Some((vote, deadline)) => vote == self.state.vote_ref() && now <= *deadline,
+            None => false,
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self, resp))]

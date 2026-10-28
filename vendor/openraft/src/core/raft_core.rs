@@ -1381,6 +1381,13 @@ where
                     ExternalCommand::PurgeLog { upto } => {
                         self.engine.trigger_purge_log(upto);
                     }
+                    ExternalCommand::AcceptLeaderTransfer {
+                        leader_vote,
+                        to,
+                        last_log_id,
+                    } => {
+                        self.engine.accept_leader_transfer(leader_vote, to, last_log_id);
+                    }
                 }
             }
         };
