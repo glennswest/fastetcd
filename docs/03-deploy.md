@@ -498,10 +498,16 @@ write-behind layers are written into the data file and made durable,
 and the data file is closed, which marks it clean. The next start then
 has nothing to replay from the WAL and opens the data file at once. A
 member killed instead (SIGKILL, a kubelet's grace period run out, a
-crash, a power cut) loses nothing acknowledged, but its next start logs
-`data file was not closed cleanly (killed, or crashed); redb is
-repairing it` and walks the whole file before it serves (seconds on a
-spinning disk for a large file), then replays the WAL tail. The clean
+crash, a power cut) loses nothing acknowledged; its next start logs
+`data file was not closed cleanly (killed, or crashed); opened from the
+allocator state its last commit saved (quick repair), no walk of the
+file` and replays the WAL tail. Since 1.36.2 (#176) every durable commit
+of the data file is a redb quick-repair commit, so that start no longer
+walks the whole file (minutes on an SMR disk); the trade-off, a torn
+commit on a device that loses fsync'd writes, is in
+`05-backup-and-recovery.md` § redb quick-repair commits. A file whose
+last durable commit predates 1.36.2 is still walked once
+(`... redb is repairing it`). The clean
 stop takes about one checkpoint: well inside a kubelet's default 30 s
 grace period unless the disk is stalled. A leader does not hand over
 leadership by itself on SIGTERM (etcd does): the others elect a new
@@ -560,7 +566,9 @@ What a repair costs: it walks the whole file, three scans, in redb's
 page order. server1 (X9 blade, drive-managed SMR, 12.55, #176): 176 s
 for the repair alone in a 210 s start, every other phase slow too on the
 saturated disk; the start before it was killed by its startup probe at
-600 s before it finished.
+600 s before it finished. Since 1.36.2 a start after a kill does not
+walk the file (quick-repair commits, above), so a walk is left only for
+a file last written durably by a version before it.
 
 The raft log is purged after each snapshot (`--snapshot-count`), but a
 WAL segment is deleted only once a checkpoint has made the data file

@@ -164,18 +164,42 @@ the WAL. Start and stop it once before an offline backup if it was not
 stopped cleanly. Restoring onto a node with a different identity needs
 `--force-new-cluster` on its first start, as with etcd.
 
-## redb two-phase commit: deliberately off
+## redb quick-repair commits (two-phase commit) since 1.36.2
 
-redb can commit in two phases, with an extra fsync that flips the commit
-slot only once the new one is durable. fastetcd does not use it. In
-redb 2.6, a two-phase commit makes repair trust the primary slot and
-never fall back to the previous commit. So on a device that loses
-fsync'd writes, a torn last commit becomes an unopenable file, and a
-full restore from backup loses up to the backup interval. Without it,
-the same tear is rolled back to the previous commit, losing only that
-write. Its protection is against a deliberate attacker who controls
-flush order and crashes, and it costs a second fsync on every durable
-redb commit. The decision rests on the repair behaviour, not the cost.
+Every durable redb commit (each checkpoint, `sync`, a snapshot install,
+the commits around a defragment) is a redb **quick-repair** commit
+(#176). It saves the allocator state with the commit, so a start after a
+kill or a power cut loads that state instead of walking every page of
+the data file. On server1 (X9, drive-managed SMR) that walk took 179 to
+600+ s per start and was the main cause of its reboot failures
+(stormcos#626); a quick-repair open reads about 0.1 MiB at any size
+(`crates/storage/tests/repair_cost.rs`: 9–83 ms where the walk took
+0.4–8 s on a build VM). The applies committed non-durably after the last
+checkpoint are lost on a kill either way and replayed from the WAL. A
+start says which it was: `data file was not closed cleanly ... quick
+repair, no walk`, or `... redb is repairing it` (a full walk: a file
+whose last durable commit was written before 1.36.2, or by redb itself
+during a compaction). After a full walk the engine makes one
+quick-repair commit at once, so the next kill is quick again.
+
+**The trade-off (owner's decision on #176, 2026-10-28).** Quick-repair
+forces redb's two-phase commit, which 1.4.0 (#37) had deliberately left
+off. With it, redb trusts the newest commit slot and never falls back to
+the previous one. So on a device that loses fsync'd writes (stormblock#171,
+#334), a torn checkpoint makes the file **unopenable** where it used to
+roll back one commit:
+
+- a lone member restores its newest backup that verifies (losing the
+  writes since it) and raises the CORRUPT alarm (above; needs
+  `--backup-dir`);
+- a member of a multi-member cluster refuses to start: remove it and add
+  it back (above), and it is caught up by a raft snapshot.
+
+Kills and warm resets happen on every install; a device that loses
+fsync'd writes is the rarer failure (stormblock#334 is fixed, and
+stormblock's health lists `ublk_stuck`), and a member hit by it still
+recovers. It costs one extra fsync per checkpoint, not per write (#67
+below).
 
 **What it costs (#67).** `crates/storage/tests/two_phase_commit_cost.rs`
 (500 one-key commits, off and on, interleaved; `--ignored`), sc-build on a
@@ -195,6 +219,5 @@ durably only at a checkpoint (at most every 100 ms, paced to 4x its own
 duration), so 2PC would no longer be paid per write: it would lengthen
 every checkpoint by about one fsync, and with the pacing, space them
 further apart. On a spindle, where checkpoints already compete with the
-WAL for the disk (#135), that is not free either. If a redb release
-makes repair fall back past a torn two-phase commit, this is the number
-to weigh.
+WAL for the disk (#135), that is not free either; it is what 1.36.2
+pays for a start after a kill that does not walk the file.

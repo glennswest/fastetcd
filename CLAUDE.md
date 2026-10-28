@@ -3119,7 +3119,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `repair_cost` measurement: full repair grows with the file (0.4 s
       at 64 MiB of data to 2–8 s at 256–512 MiB on a build VM, a lower
       bound); quick-repair opens in ~10–80 ms at any size.
-    - [ ] Owner: redb quick-repair commits at checkpoints (near-instant
-      recovery after a kill, but two-phase commit, which #37 kept off so a
-      torn commit on a device that loses fsync'd writes rolls back instead
-      of making the file unopenable). Asked on #176.
+    - [x] Owner (2026-10-28): option 1, quick-repair on every durable
+      commit (P0). `redb_engine.rs` `durability()` on every durable commit,
+      one more after defragment's compaction and after a full repair at
+      open; `unclean_at_open` (redb header's RECOVERY_REQUIRED bit) so a
+      start still says it was killed. Tests: `quick_repair.rs` (child
+      processes: no walk after durable/defragment; a walked file left
+      quick; control: plain redb commit is walked), `clean_shutdown.rs`
+      (SIGKILL: unclean, no walk). Docs 03, 05 (the trade-off); release
+      1.36.2.

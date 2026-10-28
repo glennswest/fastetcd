@@ -4,6 +4,24 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-10-28
+- **fix:** A start after a kill or a power cut no longer walks the whole
+  data file (#176, P0; stormcos#626). Every durable redb commit (each
+  checkpoint, `sync`, a snapshot install, the commits around a
+  defragment) is a redb quick-repair commit: the allocator state is saved
+  with it, and a file left open by a kill reopens from it (about 0.1 MiB
+  read, 9–83 ms on a build VM) instead of redb's full repair (179 to
+  600+ s per start on server1's SMR disk). After a full repair (a file
+  last written durably before this version) the engine commits once at
+  open so the next kill is quick. The start logs which it was;
+  `RedbEngine::unclean_at_open`. **Trade-off** (owner's decision on #176):
+  quick-repair forces redb's two-phase commit, which #37 left off, so on
+  a device that loses fsync'd writes a torn checkpoint makes the file
+  unopenable instead of rolling back one commit: a lone member restores
+  its newest backup (CORRUPT alarm), a cluster member is removed and
+  re-added. Costs one extra fsync per checkpoint, not per write.
+  `docs/05-backup-and-recovery.md` § redb quick-repair commits.
+
 ## [v1.36.1] — 2026-10-28
 
 ### Fixed

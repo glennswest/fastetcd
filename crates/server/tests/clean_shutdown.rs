@@ -4,9 +4,11 @@
 //! was handled, so every stop was a kill: the write-behind layers lost
 //! from RAM and redb's file left marked dirty, so the next start walked
 //! the whole file to repair it and replayed the WAL tail. Run the real
-//! binary: the start after a SIGKILL reports redb's repair (the control,
-//! so the check below can see one); after SIGTERM the member exits 0, the
-//! file opens with no repair and holds every acknowledged write.
+//! binary: the start after a SIGKILL reports the unclean stop (the
+//! control, so the check below can see one) and, since fastetcd#176's
+//! quick-repair commits, opens without walking the file; after SIGTERM
+//! the member exits 0, the file opens clean and holds every acknowledged
+//! write.
 
 use std::path::Path;
 use std::time::Duration;
@@ -51,7 +53,7 @@ async fn put_keys(kv: &mut KvClient<tonic::transport::Channel>, round: i64) {
 /// it, and the revision it holds. Dropping the engine closes it cleanly.
 async fn open_file(dir: &Path) -> (bool, i64) {
     let engine = RedbEngine::open(dir.join("fastetcd.redb")).unwrap();
-    let repaired = engine.repaired_at_open();
+    let repaired = engine.unclean_at_open();
     let rev = MvccStore::open(std::sync::Arc::new(engine)).await.unwrap().current_revision().await;
     (repaired, rev)
 }
@@ -60,9 +62,12 @@ async fn open_file(dir: &Path) -> (bool, i64) {
 async fn sigterm_leaves_nothing_to_repair_or_replay() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Control: a kill leaves the file for redb to repair.
+    // Control: a kill leaves the file not closed cleanly. Killed after a
+    // checkpoint (every 100 ms), as a member running for more than a
+    // moment always is.
     let (mut member, mut kv) = start(dir.path()).await;
     put_keys(&mut kv, 1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     member.child.kill().await.unwrap();
     member.child.wait().await.unwrap();
 
@@ -71,7 +76,13 @@ async fn sigterm_leaves_nothing_to_repair_or_replay() {
     let log = std::fs::read_to_string(&member.log).unwrap_or_default();
     assert!(
         log.contains("data file was not closed cleanly"),
-        "the start after SIGKILL reported no repair: the check cannot see an unclean stop:\n{}",
+        "the start after SIGKILL reported no unclean stop: the check cannot see one:\n{}",
+        member.log_tail()
+    );
+    assert!(
+        !log.contains("redb is repairing it"),
+        "the start after SIGKILL walked the whole file: the last checkpoint was not a \
+         quick-repair commit (fastetcd#176):\n{}",
         member.log_tail()
     );
     put_keys(&mut kv, 2).await;
@@ -95,7 +106,7 @@ async fn sigterm_leaves_nothing_to_repair_or_replay() {
     assert!(log.contains("applied state is durable; stopped"), "no clean-stop line:\n{}", member.log_tail());
 
     let (repaired, on_disk) = open_file(dir.path()).await;
-    assert!(!repaired, "after SIGTERM redb still had to repair the file:\n{}", member.log_tail());
+    assert!(!repaired, "after SIGTERM the file was still not closed cleanly:\n{}", member.log_tail());
     assert_eq!(on_disk, acknowledged, "every acknowledged write is in the data file: nothing left to replay");
     assert_eq!(acknowledged, 2 * KEYS);
 

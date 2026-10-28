@@ -964,7 +964,13 @@ async fn main() -> anyhow::Result<()> {
     };
     startup.phase_with(
         "data_file_open",
-        if engine.repaired_at_open() { "redb repaired a file that was not closed cleanly" } else { "" },
+        if engine.repaired_at_open() {
+            "redb repaired a file that was not closed cleanly"
+        } else if engine.unclean_at_open() {
+            "not closed cleanly; quick repair, no walk"
+        } else {
+            ""
+        },
     );
     // Applies (non-durable commits) are held in RAM and written into the
     // data file in batches by the checkpoint, so an apply never waits on

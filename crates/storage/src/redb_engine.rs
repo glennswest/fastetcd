@@ -55,6 +55,23 @@ struct RedbInner {
     /// redb found the file not closed cleanly and walked it to rebuild
     /// its allocator state (fastetcd#161).
     repaired_at_open: bool,
+    /// The file was not closed cleanly, repaired by a walk or not.
+    unclean_at_open: bool,
+}
+
+/// Whether redb's header marks the file as not closed cleanly. redb sets
+/// `RECOVERY_REQUIRED` (bit 1 of the byte after its 9-byte magic, redb
+/// 2.6's header) when it opens a file for writing and clears it when the
+/// last handle is dropped. A file that is missing, short or not redb's
+/// says no: the open reports those.
+fn closed_uncleanly(path: &Path) -> bool {
+    const MAGIC: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+    const RECOVERY_REQUIRED: u8 = 2;
+    use std::io::Read;
+    let mut head = [0u8; 10];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| head[..9] == MAGIC && head[9] & RECOVERY_REQUIRED != 0)
 }
 
 /// Classify an error from opening the database file.
@@ -117,6 +134,7 @@ impl RedbEngine {
         // handle never dropped: a kill, a crash) by walking every page,
         // seconds on a spinning disk; say so (fastetcd#161).
         let repaired = Arc::new(AtomicBool::new(false));
+        let unclean = closed_uncleanly(&path);
         let db = std::panic::catch_unwind(|| {
             let mut builder = Database::builder();
             if let Some(bytes) = cache_bytes {
@@ -146,6 +164,22 @@ impl RedbEngine {
                 ))
             })?
             .map_err(open_error)?;
+        let repaired = repaired.load(Ordering::Relaxed);
+        if unclean && !repaired {
+            tracing::warn!(
+                file = %path.display(),
+                "data file was not closed cleanly (killed, or crashed); opened from the allocator \
+                 state its last commit saved (quick repair), no walk of the file"
+            );
+        }
+        if repaired {
+            // A full repair commits without saving the allocator state: a
+            // kill before the first checkpoint would walk the file again
+            // (fastetcd#176).
+            let mut txn = db.begin_write().map_err(StorageError::io)?;
+            durability(&mut txn, true);
+            txn.commit().map_err(StorageError::io)?;
+        }
         Ok(Self {
             inner: Arc::new(RedbInner {
                 db: Arc::new(RwLock::new(db)),
@@ -154,7 +188,8 @@ impl RedbEngine {
                 readers_drained: Arc::new(Notify::new()),
                 defrag_pending: Arc::new(AtomicBool::new(false)),
                 defrag_done: Arc::new(Notify::new()),
-                repaired_at_open: repaired.load(Ordering::Relaxed),
+                repaired_at_open: repaired,
+                unclean_at_open: unclean || repaired,
             }),
         })
     }
@@ -173,6 +208,13 @@ impl RedbEngine {
     /// using it did not close it cleanly (fastetcd#161).
     pub fn repaired_at_open(&self) -> bool {
         self.inner.repaired_at_open
+    }
+
+    /// Whether the last process using the file did not close it cleanly,
+    /// whether or not that cost a walk of the file: since fastetcd#176
+    /// a kill usually does not ([`durability`]).
+    pub fn unclean_at_open(&self) -> bool {
+        self.inner.unclean_at_open
     }
 
     fn table_def(name: &str) -> TableDefinition<'_, &'static [u8], &'static [u8]> {
@@ -238,11 +280,7 @@ impl KvStore for RedbEngine {
         let db_guard = self.inner.db.clone().read_owned().await;
         let result = task::spawn_blocking(move || -> StorageResult<()> {
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
-            if !opts.sync {
-                // Visible to readers at once, persisted by the next
-                // durable commit (fastetcd#71).
-                txn.set_durability(Durability::None);
-            }
+            durability(&mut txn, opts.sync);
             for op in batch.ops() {
                 apply_op(&txn, op)?;
             }
@@ -267,9 +305,7 @@ impl KvStore for RedbEngine {
         let db_guard = self.inner.db.clone().read_owned().await;
         task::spawn_blocking(move || -> StorageResult<()> {
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
-            if !opts.sync {
-                txn.set_durability(Durability::None);
-            }
+            durability(&mut txn, opts.sync);
             for op in ops {
                 apply_op(&txn, &op?)?;
             }
@@ -286,7 +322,8 @@ impl KvStore for RedbEngine {
         // before it (`WriteOptions { sync: false }`).
         let db_guard = self.inner.db.clone().read_owned().await;
         task::spawn_blocking(move || -> StorageResult<()> {
-            let txn = db_guard.begin_write().map_err(StorageError::io)?;
+            let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
+            durability(&mut txn, true);
             txn.commit().map_err(StorageError::io)
         })
         .await
@@ -423,10 +460,39 @@ impl KvStore for RedbEngine {
         // a member taking writes the newest one nearly always is
         // (fastetcd#119). One empty durable commit, under the exclusive
         // lock so nothing commits after it, makes the state durable first.
-        let txn = db_guard.begin_write().map_err(StorageError::io)?;
+        let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
+        durability(&mut txn, true);
         txn.commit().map_err(StorageError::io)?;
         let _changed = db_guard.compact().map_err(StorageError::io)?;
+        // redb's compaction commits without saving the allocator state, so
+        // a kill now would walk the whole file: one more quick-repair
+        // commit (fastetcd#176).
+        let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
+        durability(&mut txn, true);
+        txn.commit().map_err(StorageError::io)?;
         Ok(())
+    }
+}
+
+/// Set a write transaction's durability. A non-durable commit is visible
+/// to readers at once and persisted by the next durable commit
+/// (fastetcd#71). Every durable commit is a redb quick-repair commit
+/// (fastetcd#176): it saves the allocator state with the commit, so a
+/// start after a kill or a power cut loads it instead of walking every
+/// page of the file (minutes on an SMR disk). Non-durable commits after
+/// it leave it valid: they are lost in a crash, and the file reopens at
+/// the last durable commit.
+///
+/// Quick-repair forces two-phase commit, and with it redb trusts the
+/// newest commit slot: on a device that loses fsync'd writes, a torn
+/// commit is an unopenable file (a lone member restores its newest
+/// backup, a cluster member is removed and re-added) where it used to
+/// roll back one commit. Owner's decision on #176 (2026-10-28).
+fn durability(txn: &mut redb::WriteTransaction, durable: bool) {
+    if durable {
+        txn.set_quick_repair(true);
+    } else {
+        txn.set_durability(Durability::None);
     }
 }
 
