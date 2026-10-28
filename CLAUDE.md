@@ -2725,6 +2725,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     for `vendor/openraft`, or a non-auto mode), not another decision.
     2026-10-14 (third try): refused again; tree reverted. Asked on #57
     (allow rule for `vendor/openraft/**` recommended) and `wait-owner`.
+    2026-10-28 (fourth try): owner approved the edit (2026-10-14), the
+    classifier still refused it. Waiting on a person's step (`wait-owner
+    --action`): `Edit(vendor/openraft/**)` / `Write(vendor/openraft/**)` in
+    `.claude/settings.local.json`. Patch shape on #57.
 
 79. **The wal and iouring engines cannot be selected (#55, P3) — waiting on
     the owner (asked 2026-10-14).** Only `benches/mvcc.rs` uses them; the
