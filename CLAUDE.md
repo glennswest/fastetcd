@@ -2345,6 +2345,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     so X9 stays on 11.88). Queued after stormcos#561; start at power-on if
     server1 is still on 12.21 (lease it; blade_rss.py 8+ h + a
     blade_getlatency.py round every 30 min).
+    2026-10-28 23:35Z: still no X9 run. Every blade is off (power window
+    until ~11:00Z). server1 failed every install since 12.37 (rustkube#185,
+    now closed; 12.55-flowsdn at 18:48Z), but its disk holds 12.55
+    (fastetcd >= 1.35, process metrics). Parked on a probe of
+    192.168.16.101:2381. When it answers: lease server1, blade_rss.py 8 h +
+    a blade_getlatency.py round every 30 min.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
