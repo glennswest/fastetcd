@@ -140,6 +140,50 @@ order that actually frees bytes:
    writes while it runs — so it is skipped when the live data itself is
    what fills the volume.
 
+**Keeps the file small in the background** (since 1.37.0, #177), before
+any mark is reached:
+
+- **Compaction.** Under Kubernetes the apiserver compacts: rustkube's
+  kube-apiserver every 5 min (`--etcd-compaction-interval`, upstream's
+  default, one apiserver per interval). A store with no apiserver sets
+  `--auto-compaction-retention`.
+- **Raft snapshot + log purge** every `--snapshot-count` writes (#80), and
+  since 1.37.0 also once the last snapshot is `--snapshot-interval-secs`
+  old (1800) and any write was applied since, so a quiet member's raft log
+  and WAL segments are purged too.
+- **A rewrite of the data file into a fresh one**, every
+  `--defrag-check-interval-secs` (600) once at least
+  `--defrag-free-percent` (50) of a file of at least
+  `--defrag-min-file-bytes` (64 MiB) is free pages, and the copy (about
+  the live bytes) fits under the high-water mark. Free pages are what
+  compaction and purges leave behind: a copy-on-write B-tree never gives
+  them back on its own. Reads and writes go on during the rewrite:
+  1. a read transaction is taken, and from that moment every commit to
+     the data file is also recorded (in RAM, at most 256 MiB: more and
+     the rewrite gives up);
+  2. every table is copied from it into `fastetcd.redb.rewrite`, 4 MiB at
+     a time, sleeping `--defrag-pace` (4) times as long as each chunk
+     took, so the copy uses about a fifth of the disk (an HDD keeps
+     serving); the new file is then compacted;
+  3. the recorded commits are applied to it in passes, until little is
+     left;
+  4. **the switch**: commits and new reads wait while the rest is
+     applied, the new file is committed durably, closed, reopened and
+     renamed over `fastetcd.redb`, and the directory synced. That pause
+     is about two fsyncs. Reads already running finish on the old file,
+     whose blocks are freed when the last of them ends.
+
+  The volume needs room for the copy while it runs, which is why it is
+  checked against the high-water mark first; above the mark the reclaim
+  below (an in-place defragment, which needs no room) does the job. A raft
+  snapshot installed during the copy abandons it (the copy is out of
+  date). A kill at any point leaves `fastetcd.redb` as it was: an
+  unfinished `fastetcd.redb.rewrite` is removed at the next start. Each
+  pass logs `data file rewritten and switched` (target
+  `fastetcd::space`) with the sizes before and after, the live bytes, the
+  free share, the records copied, the commits caught up, the time taken
+  and the switch's pause; skipped checks log why at debug.
+
 **Alarms at the alarm mark** (default 95%), while the store still works.
 `NOSPACE` is raised, and writes — `Put`, a `Txn` containing a put,
 `LeaseGrant` — are refused with gRPC `ResourceExhausted` and etcd's
@@ -163,6 +207,11 @@ itself once occupancy falls back below `--space-clear-percent` (70).
 | `--auto-compaction-retention` | `0` | Steady-state compaction (off; Kubernetes drives its own). |
 | `--snapshot-count` | `5000` | Applied writes between raft snapshots (a batched log entry counts each write in it, #80). |
 | `--max-in-snapshot-log-to-keep` | `1000` | Writes kept in the log after a purge. |
+| `--snapshot-interval-secs` | `1800` | Also snapshot once the last one is this old and a write came since. `0` = by count only. |
+| `--defrag-free-percent` | `50` | Rewrite the data file in the background once this share of it is free pages. `0` = off. |
+| `--defrag-min-file-bytes` | `64 MiB` | Leave a smaller file alone. |
+| `--defrag-check-interval-secs` | `600` | How often to check. |
+| `--defrag-pace` | `4` | The copy sleeps N times each chunk's time: about 1/(1+N) of the disk. |
 
 Each has an `ETCD_*` environment fallback where etcd has the same flag,
 so an unmodified etcd `EnvironmentFile` keeps working.
@@ -183,6 +232,11 @@ fastetcd_disk_total_bytes                  # the volume
 fastetcd_disk_available_bytes
 fastetcd_store_space_used_ratio            # 0-1; 0.8 reclaims, 0.95 alarms
 fastetcd_nospace_alarm_active              # 1 while writes are refused
+fastetcd_defrag_rewrites_total{result}     # background rewrites, ok / failed
+fastetcd_defrag_rewrite_last_seconds       # the last one's duration
+fastetcd_defrag_rewrite_last_pause_seconds # how long its switch held reads and writes
+fastetcd_defrag_rewrite_last_before_bytes  # the file before and after it
+fastetcd_defrag_rewrite_last_after_bytes
 ```
 
 A useful alert fires well before the alarm does:

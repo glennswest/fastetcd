@@ -5,6 +5,24 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-28
+- **feat:** The data file is kept small in the background (#177). A
+  rewrite into a fresh file, switched to online: once
+  `--defrag-free-percent` (50) of a file of at least
+  `--defrag-min-file-bytes` (64 MiB) is free pages (checked every
+  `--defrag-check-interval-secs`, 600), every table is copied from one
+  read transaction into `fastetcd.redb.rewrite`, throttled
+  (`--defrag-pace` 4: about a fifth of the disk), while every commit made
+  meanwhile is recorded and applied after; then a short switch (commits
+  and new reads wait about two fsyncs) renames it over the data file.
+  Reads already open finish on the old file. Skipped when the copy would
+  take the volume past the high-water mark. `RedbEngine::rewrite`,
+  `KvStore::rewrite`, `space::spawn_rewrite`; metrics
+  `fastetcd_defrag_rewrites_total{result}`,
+  `fastetcd_defrag_rewrite_last_{seconds,pause_seconds,before_bytes,after_bytes}`;
+  a log line per pass. `--snapshot-interval-secs` (1800): a raft snapshot
+  and log purge also once the last one is that old and a write came
+  since. Compaction: rustkube's apiserver already compacts every 5 min.
+  `docs/04-disk-space.md` § Keeps the file small in the background.
 - **fix:** A start after a kill or a power cut no longer walks the whole
   data file (#176, P0; stormcos#626). Every durable redb commit (each
   checkpoint, `sync`, a snapshot install, the commits around a

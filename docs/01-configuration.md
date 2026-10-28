@@ -72,6 +72,7 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 | `--election-timeout` | `1000` | `FASTETCD_ELECTION_TIMEOUT` | `ETCD_ELECTION_TIMEOUT` | Milliseconds a follower waits for the leader before calling an election (each member picks from [t, 2t)). A leader sends no heartbeat during a WAL fsync, so on a disk that stalls set it above the longest stall (#103; [03-deploy](03-deploy.md#timeouts-and-slow-disks)). At least 2x the heartbeat (etcd asks 5x), at most 50 000. |
 | `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied writes, as etcd counts them. A log entry can be a batch of writes (#75, #94); since 1.18 each counts (#80; 1.10–1.17 counted entries). |
 | `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted writes kept in the log after a purge, for followers just behind (since 1.18 counted in writes, #80). |
+| `--snapshot-interval-secs` | `1800` | `FASTETCD_SNAPSHOT_INTERVAL_SECS` | | Also snapshot (then purge) once the last snapshot is this old and a write was applied since, so a quiet member's log and WAL are purged (#177). `0` = by `--snapshot-count` only. fastetcd's own. |
 | `--max-snapshots` | `1` | `FASTETCD_MAX_SNAPSHOTS` | `ETCD_MAX_SNAPSHOTS` | Snapshots kept on disk (each a full copy), rolled off before a new one is written. |
 
 ## Memory (RAM cache)
@@ -111,6 +112,10 @@ made durable in the background ([03-deploy](03-deploy.md#storage-engine), #85).
 | `--space-check-interval-secs` | `30` | `FASTETCD_SPACE_CHECK_INTERVAL_SECS` | | Occupancy sampling; `0` disables the monitor. |
 | `--space-reclaim-retention` | `1000` | `FASTETCD_SPACE_RECLAIM_RETENTION` | | Revisions kept when compacting under pressure (even with auto-compaction off). |
 | `--auto-defrag` | `true` | `FASTETCD_AUTO_DEFRAG` | | Let reclaim defragment. `--auto-defrag=false` turns it off. |
+| `--defrag-free-percent` | `50` | `FASTETCD_DEFRAG_FREE_PERCENT` | | Rewrite the data file into a fresh one in the background and switch to it once this share of it is free pages (#177; `04-disk-space.md`). Reads and writes go on; the switch pauses them briefly. `0` = off. |
+| `--defrag-min-file-bytes` | `67108864` | `FASTETCD_DEFRAG_MIN_FILE_BYTES` | | The background rewrite leaves a smaller file alone. |
+| `--defrag-check-interval-secs` | `600` | `FASTETCD_DEFRAG_CHECK_INTERVAL_SECS` | | How often the background rewrite checks whether it is due. |
+| `--defrag-pace` | `4` | `FASTETCD_DEFRAG_PACE` | | The rewrite's copy sleeps N times each chunk's time: about 1/(1+N) of the disk. |
 | `--expected-nodes` | `0` (off) | `FASTETCD_EXPECTED_NODES` | | Check the volume against the sizing model at startup (warn only); enables auto-compaction if it was left at 0. |
 | `--expected-pods-per-node` | `30` | `FASTETCD_EXPECTED_PODS_PER_NODE` | | Pod density for `--expected-nodes`. |
 
