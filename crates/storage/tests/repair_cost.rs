@@ -18,6 +18,15 @@
 //! (two-phase commit + the allocator state saved), and their cost is
 //! reported too.
 //!
+//! A build VM (2026-10-28, two rounds): full repair 0.4–0.7 s at 64 MiB of
+//! data (a 257 MiB file), 1.5–8 s at 256 MiB, 2.0–2.3 s at 512 MiB;
+//! quick-repair opens in 9–83 ms (one 720 ms) at every size, reading
+//! 0.1 MiB. redb's repair reads every page (its checksum pass walks the
+//! leaves), yet `read_bytes` showed about a tenth of the data: the page
+//! cache drop was partial, so the full-repair times are a lower bound for
+//! a cold disk. Durable commit medians were too noisy on a shared VM to
+//! compare (23 ms–1.3 s either way).
+//!
 //! The file goes in cargo's per-target temp dir (on the build disk), or
 //! `$REPAIR_COST_DIR`, never `/tmp` (often a tmpfs).
 

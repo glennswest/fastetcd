@@ -4,6 +4,30 @@
 
 <!-- New unreleased changes go here -->
 
+## [v1.36.1] — 2026-10-28
+
+### Fixed
+- A start that is repairing the data file answers its startup probe
+  (#176). server1 (X9, drive-managed SMR, 12.55): after a warm reset the
+  first start never answered `/livez`, was killed at the kubelet's 600th
+  probe, and the next start repaired the file again from the beginning
+  (176 s of a 210 s start, `data_file_open`); the apiserver was ready at
+  1005 s. The metrics listener was bound only once the member served. Now
+  it is bound first, before the data file is opened
+  (`metrics::spawn_early_server`), and until the member serves it answers
+  from the start's status (`startup::StartupStatus`): `/livez` 200 `ok`
+  with the phase, its time and redb's repair progress while the start
+  makes progress (a phase ends, a repair report, the process reads,
+  writes or uses CPU), 503 once nothing has moved for 120 s;
+  `/readyz` and `/health` 503 `starting`; `/metrics` the phase. The data
+  file is opened on a blocking thread so the runtime's workers answer
+  meanwhile. `RedbEngine::repair_progress`. Tests: `health_checks::
+  the_metrics_listener_answers_while_the_member_starts`,
+  `a_stalled_start_fails_livez`, startup unit tests. Docs: 03 § Probes
+  while a member starts.
+- `repair_cost` (ignored, `--ignored --nocapture`): redb's repair after a
+  kill by file size, and redb's quick-repair commits for comparison.
+
 ## [v1.36.0] — 2026-10-28
 
 ### Added

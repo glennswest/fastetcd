@@ -10,7 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.36.0`** — MoveLeader (#57): the leader holds proposals, waits for the
+**`1.36.1`** — A start answers its startup probe while it repairs the
+data file (#176): the metrics listener is bound first; `/livez` ok while
+the start makes progress, 503 after 120 s without (`startup.rs`).
+
+Previous: **`1.36.0`** — MoveLeader (#57): the leader holds proposals, waits for the
 target's log, then `TransferLeader` (a third vendored openraft patch:
 the old vote's lease waived, the target elects); `leader_transfer.rs`.
 
@@ -3099,3 +3103,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     - Verified: sc-build of 3e127b4, workspace 471 pass 0 fail, peer_dial
       4/4, peer_tls 3/3; control without the options (branch, deleted):
       all three peer tests still waiting after 30 s.
+
+97. **A start repairing the data file is killed by its startup probe (#176,
+    P1).** server1 (X9, SMR, 12.55): after a warm reset the first start did
+    not answer `/livez` for 10 min (the metrics listener was bound only once
+    serving), was killed at 600 probes, and the next start repaired redb
+    again from scratch (176 s of 210 s in `data_file_open`); apiserver at
+    1005 s. The first start's log is not in the boot log (replaced on the
+    kill); the second's phases are (`pods.log`, `/api/v1/installs/
+    server1-1793208481/bootlog/files/pods.log`).
+    - [x] Metrics listener bound before the data file opens; `/livez` from
+      `StartupStatus` while starting (progress: phases, redb repair
+      reports, `/proc/self/io` rchar/wchar, CPU; 503 after 120 s without);
+      open on a blocking thread. Tests; docs (03); release 1.36.1.
+    - [x] `repair_cost` measurement: full repair grows with the file (0.4 s
+      at 64 MiB of data to 2–8 s at 256–512 MiB on a build VM, a lower
+      bound); quick-repair opens in ~10–80 ms at any size.
+    - [ ] Owner: redb quick-repair commits at checkpoints (near-instant
+      recovery after a kill, but two-phase commit, which #37 kept off so a
+      torn commit on a device that loses fsync'd writes rolls back instead
+      of making the file unopenable). Asked on #176.
