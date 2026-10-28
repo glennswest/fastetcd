@@ -80,7 +80,15 @@ async fn a_fragmented_store_is_rewritten_while_it_serves() {
         "data file {before} -> {after} bytes; usage {usage_before:?} -> {usage_after:?}\n\
          tables before (records, bytes): {tables_before:?}\ntables after: {tables_after:?}"
     );
-    assert!(after * 2 < before, "data file {before} -> {after} bytes");
+    // This harness keeps its raft log in the data file (production's is
+    // the WAL, #85), so the live data is that log as much as the keys. The
+    // new file holds them in what redb can cut its file to (whole regions):
+    // smaller, and no longer due (checked below).
+    assert!(after < usage_before.file_bytes, "data file {before} -> {after} bytes");
+    assert!(
+        usage_after.reclaimable_bytes() * 100 < usage_after.file_bytes * config().rewrite.free_percent as u64,
+        "the rewritten file is still mostly free pages: {usage_after:?}"
+    );
 
     let count = |key: &[u8], end: &[u8]| {
         let (mut kv, key, end) = (kv.clone(), key.to_vec(), end.to_vec());
