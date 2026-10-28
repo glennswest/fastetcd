@@ -30,15 +30,15 @@ fn config() -> SpaceConfig {
 async fn a_fragmented_store_is_rewritten_while_it_serves() {
     let h = start_test_server_with_space(Some(config())).await;
     let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
-    let value = vec![b'v'; 4096];
-    for i in 0..3000 {
+    let value = vec![b'v'; 16 << 10];
+    for i in 0..1000 {
         kv.put(pb::PutRequest { key: format!("k{i:05}").into_bytes(), value: value.clone(), ..Default::default() })
             .await
             .unwrap();
     }
     // Delete most of it and compact the history away: the pages are free.
     let rev = kv
-        .delete_range(pb::DeleteRangeRequest { key: b"k0".to_vec(), range_end: b"k2".to_vec(), ..Default::default() })
+        .delete_range(pb::DeleteRangeRequest { key: b"k00000".to_vec(), range_end: b"k00700".to_vec(), ..Default::default() })
         .await
         .unwrap()
         .into_inner()
@@ -84,7 +84,7 @@ async fn a_fragmented_store_is_rewritten_while_it_serves() {
                 .count
         }
     };
-    assert_eq!(count(b"k", b"l").await, 1000, "the keys kept");
+    assert_eq!(count(b"k", b"l").await, 300, "the keys kept");
     assert_eq!(count(b"live", b"livf").await, written, "every write during the rewrite");
 
     // Not due again: the file is compact now.
