@@ -51,6 +51,8 @@ async fn a_fragmented_store_is_rewritten_while_it_serves() {
 
     let engine = h.state.sm.mvcc().engine().clone();
     let before = engine.size_on_disk().await.unwrap();
+    let tables_before = tables(&engine).await;
+    let usage_before = engine.usage().await.unwrap();
 
     // Writes and reads go on through the rewrite.
     let traffic = {
@@ -72,6 +74,12 @@ async fn a_fragmented_store_is_rewritten_while_it_serves() {
     let r = &h.state.space.rewrites;
     assert_eq!(r.ok.load(std::sync::atomic::Ordering::Relaxed), 1, "the rewrite was not due or did not run");
     let after = engine.size_on_disk().await.unwrap();
+    let usage_after = engine.usage().await.unwrap();
+    let tables_after = tables(&engine).await;
+    eprintln!(
+        "data file {before} -> {after} bytes; usage {usage_before:?} -> {usage_after:?}\n\
+         tables before (records, bytes): {tables_before:?}\ntables after: {tables_after:?}"
+    );
     assert!(after * 2 < before, "data file {before} -> {after} bytes");
 
     let count = |key: &[u8], end: &[u8]| {
@@ -122,4 +130,16 @@ fn when_a_rewrite_is_due() {
     assert!(rewrite_decision(&cfg, 80, 100 * mib, 30 * mib, 780 * mib, 1000 * mib).is_err());
     let off = RewriteConfig { free_percent: 0, ..cfg };
     assert!(rewrite_decision(&off, 80, 100 * mib, 1, 0, 0).is_err());
+}
+
+/// Each table's records and key + value bytes.
+async fn tables(engine: &std::sync::Arc<dyn fastetcd_storage::KvStore>) -> Vec<(String, usize, usize)> {
+    let snap = engine.snapshot().await.unwrap();
+    let mut out = Vec::new();
+    for name in snap.table_names().await.unwrap() {
+        let rows = snap.range(&name, std::ops::Bound::Unbounded, std::ops::Bound::Unbounded, 0).await.unwrap();
+        let bytes = rows.iter().map(|(k, v)| k.len() + v.len()).sum();
+        out.push((name, rows.len(), bytes));
+    }
+    out
 }
