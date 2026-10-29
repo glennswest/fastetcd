@@ -2351,6 +2351,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     (fastetcd >= 1.35, process metrics). Parked on a probe of
     192.168.16.101:2381. When it answers: lease server1, blade_rss.py 8 h +
     a blade_getlatency.py round every 30 min.
+    2026-10-29 13:10Z: server1 answers (fastetcd >= 1.35) but the release
+    is installing 12.58 on it until 17:00Z. Lease 6930084ad4 queued behind
+    it (420 min); `tmp/rss84-server1.sh` waits for it, then runs
+    blade_rss.py until 23:40Z (power-off 00:00Z) with a
+    blade_getlatency.py round every 30 min, into `tmp/rss84-server1/`.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
