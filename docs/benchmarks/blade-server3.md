@@ -141,5 +141,67 @@ This is a VM disk shared with other test machines, not the spinning
 disk the acceptance is about; server3's read-only numbers above stay the
 reference for the 20 ms target.
 
-Left for #84: the same run on an X9 blade with a release carrying
-fastetcd >= 1.24, for many hours, to see the RSS floor level off.
+That run on an X9 blade follows.
+
+## RSS, GETs and lease renewals over six hours (#84), X9 blade server1
+
+**server1** (X9 blade, one 7200 rpm disk), 2026-10-29 14:47–20:47Z,
+leased. Release 12.58's install had just failed on it (a flowsdn image,
+not fastetcd), leaving the node serving with 12.58's fastetcd: commit
+1579bfa (1.36.1 plus #176's quick-repair commits), one member, cilium,
+the node's real store. Same tools as on pvetest2: `blade_rss.py <node> 6
+60`, and a `blade_getlatency.py` round with writes on every 30 min (12
+rounds; 40 clients renewing Leases, ~170–270 PUTs/s here). Defaults for
+the caches. Raw data: `data/rss-server1/`.
+
+**RSS** (360 samples, one process start, open fds 21, data file 145 MiB
+throughout, key index ~440 keys / 0.6–1.0 MiB, value cache ~1 MiB):
+
+| hour | min | median | max |
+|---|---|---|---|
+| 1 | 64 MiB | 96 MiB | 230 MiB |
+| 2 | 86 MiB | 109 MiB | 179 MiB |
+| 3 | 93 MiB | 116 MiB | 167 MiB |
+| 4 | 93 MiB | 112 MiB | 174 MiB |
+| 5 | 95 MiB | 121 MiB | 172 MiB |
+| 6 | 98 MiB | 125 MiB | 209 MiB |
+
+The floor rose in the first two hours and then held at 93–98 MiB (+5 MiB
+over four hours), with the data file not growing: a cache filling, then
+full, not a leak. The maximum, 230 MiB, is far inside the budget (value
+cache 128 + engine cache 256 + index ~1 MiB). The swings follow the
+write-behind layers (up to 67 MiB before a checkpoint).
+
+**GETs** (single object, through the apiserver): idle p99 2.8–12.3 ms;
+under the renewal load p50 1.8–2.0 ms, p99 14.6–18.5 ms (target < 20 ms:
+met, now with writes going on), max 0.15–3.2 s; value cache 99.96% hits.
+
+**Writes** are where the disk shows: in the load rounds a lease PUT took
+p50 60–80 ms, p99 0.9–4.1 s, max 5.8–14.7 s (WAL fsyncs mean 40–72 ms,
+~15 proposals per fsync, checkpoints using 6–30 s of each 120 s).
+
+**Lease renewals** (kube-system, polled each second, no poll error):
+
+| lease | renewals | longest gap | leaseDuration | gaps > 15 s (in load rounds) |
+|---|---|---|---|---|
+| cilium-operator-resource-lock | 6 945 | 377 s | 15 s | 53 (13) |
+| kube-controller-manager | 8 155 | 49 s | 15 s | 40 (8) |
+| kube-scheduler | 8 150 | 49 s | 15 s | 39 (8) |
+| stormipmi | 3 643 | 48 s | 15 s | 42 (9) |
+| snapshot-controller-leader | 5 263 | 151 s | 15 s | 21 (5) |
+| stormupdate | 2 124 | 48 s | 45 s | |
+| vmimages | 719 | 75 s | 90 s | |
+
+Not on time: cilium-operator's lock changed holder 84 times. The late
+renewals fall at the same moments for every lease, mostly outside the
+load rounds, and at those moments the store took almost no writes (24
+and 29 puts in the minutes at 17:14Z and 17:25Z, 500–800 around them):
+store-wide write stalls of ~20–60 s on the node's ordinary traffic. Over
+the process's life the longest WAL fsync was 17.8 s and the longest
+checkpoint commit 96.6 s. Reads did not stall. Filed as #180 (with #135,
+the checkpoint and the WAL sharing the spindle).
+
+What #84 asked, on this blade: GET p99 < 20 ms on a spinning disk, yes
+(also with writes); RSS flat, yes after the first two hours, inside its
+budget; cilium-operator lease renewals on time, no, because of write
+stalls (#180), not the read cache #82 added.

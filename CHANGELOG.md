@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-29
+- **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
+
 <!-- New unreleased changes go here -->
 
 ## [v1.37.0] — 2026-10-28

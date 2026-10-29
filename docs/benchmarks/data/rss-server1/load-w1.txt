@@ -1,0 +1,8 @@
+== w1 on 192.168.16.101 at 14:57:23Z, load 120 s
+idle  GET lease              n   200  p50     1.6 ms  p99     7.8 ms  max    13.6 ms
+load  GET lease              n 43350  p50     2.0 ms  p99    17.6 ms  max   145.5 ms
+load  renewal (PUT lease)    n 24861  p50    80.0 ms  p99  1951.3 ms  max  6268.7 ms
+load  renewals 207/s by 40 clients
+fastetcd over 120 s: 1675 WAL fsyncs, mean 59.5 ms, 15.4 proposals per fsync; 4 checkpoints using 28.2 s; write-behind back-pressure 3
+fastetcd since start: max WAL fsync 17.764 s, max checkpoint commit 96.612 s, back-pressure 42
+fastetcd value cache over the load: 363563 hits, 171 misses (99.95% hits)

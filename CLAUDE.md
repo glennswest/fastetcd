@@ -2356,6 +2356,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     it (420 min); `tmp/rss84-server1.sh` waits for it, then runs
     blade_rss.py until 23:40Z (power-off 00:00Z) with a
     blade_getlatency.py round every 30 min, into `tmp/rss84-server1/`.
+    Done 14:47–20:47Z (`blade-server3.md` § X9 blade, six hours): RSS
+    floor levels off at 93–98 MiB (max 230); GET p99 14.6–18.5 ms under
+    writes; leases late in store-wide write stalls (#180, filed). Asked
+    the owner on #84 whether to close it with the lease criterion on #180.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
