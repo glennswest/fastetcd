@@ -10,7 +10,7 @@ B-tree.
 
 ## Status
 
-`v1.13.0` (see `CHANGELOG.md`). What works today, all through Raft,
+`v1.37.0` (see `CHANGELOG.md`). What works today, all through Raft,
 single- and multi-member, with linearizable reads by default:
 
 - The etcd v3 gRPC API: KV (Range, Put, DeleteRange, Txn, Compact),
@@ -23,11 +23,15 @@ single- and multi-member, with linearizable reads by default:
 - TLS on the client and peer ports, independently.
 - A bounded on-disk footprint (reclaim, NOSPACE alarm), periodic
   backups with self-restore of a lone member from a corrupt file,
-  offline `backup` / `restore` / `fsck` / `defrag`, volume sizing.
+  offline `backup` / `restore` / `fsck` / `defrag`, volume sizing; the
+  data file is rewritten into a fresh one in the background and
+  switched to online (#177), and a start after a kill does not walk it
+  (quick-repair commits, #176).
+- `MoveLeader` (#57), a metrics-port `/livez` that answers while a
+  member is still starting (#176), Lock and Election services (#64).
 - Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
 
-Not implemented (each has an issue):
-Downgrade (#57, no cluster version), raising an alarm by
+Not implemented: Downgrade (#57, no cluster version; stays so), raising an alarm by
 hand (deliberate), the etcd v2 API (out of scope). Differences from
 etcd are listed under [Compatibility boundary](#compatibility-boundary).
 
