@@ -3181,8 +3181,8 @@ Tracked live in the Claude task system. Snapshot of the order:
       >= `--defrag-free-percent` (50; 0 = off) and file >=
       `--defrag-min-file-bytes` (64 MiB), and the copy (live bytes) fits
       under `--space-high-water-percent`; else skipped, logged.
-    - Metrics `fastetcd_defrag_rewrite_total{result}`,
-      `fastetcd_defrag_rewrite_last_{seconds,before_bytes,after_bytes}`;
+    - Metrics `fastetcd_defrag_rewrites_total{result}`,
+      `fastetcd_defrag_rewrite_last_{seconds,pause_seconds,before_bytes,after_bytes}`;
       one INFO line per pass (file size, live bytes, free %, took).
     Work items:
     - [x] snapshot interval; engine rewrite + capture + tests

@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-30
-- **docs:** Refreshed from the code since 2026-10-23: README status (v1.37.0; background rewrite, quick-repair start, MoveLeader, startup `/livez`), CLAUDE.md metric names for #177. Flags, ports, metrics, 03/04/05 were already current. Open issues already cover what the docs do not promise (#180, #177 measurement on server1).
+- **docs:** Refreshed from the code since 2026-10-23: README status (v1.37.0; background rewrite, quick-repair start, MoveLeader, startup `/livez`), CLAUDE.md metric names for #177 (rewrites_total, pause_seconds). Flags, ports, metrics, 03/04/05 were already current. Open issues already cover what the docs do not promise (#180, #177 measurement on server1).
 
 ### 2026-10-29
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
