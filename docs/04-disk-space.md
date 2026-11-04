@@ -226,7 +226,8 @@ snapshot beside it for long. Measured with `tests/large_values_space.sh`
 | Written | Data file on the device | WAL | Snapshot | Used |
 |---|---|---|---|---|
 | 281 MiB | 322 MiB | 82 MiB | 281 MiB | 67% |
-| 351 MiB | 402 MiB | 32–132 MiB | 351 MiB | 77–90% |
+| 351 MiB | 402 MiB | 32 MiB | 351 MiB | 77% |
+| 421 MiB | 482 MiB | 98 MiB | 351 MiB | 91% |
 | 457 MiB | 522 MiB | 132 MiB | 351 MiB | 98%: NOSPACE |
 
 Above 80% the reclaim runs at every sample, without changing what the data
