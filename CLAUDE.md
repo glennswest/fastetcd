@@ -3207,3 +3207,20 @@ Tracked live in the Claude task system. Snapshot of the order:
       switched` and the `startup phase` lines in the install's pods.log
       (pvetest1 first, it is a look, not the acceptance), then server1 the same.
       Asked the master for server1 on 12.61; parked on a probe of server1:2381.
+
+99. **NOSPACE at under 320 MiB in use on the 1 GiB volume, and it never
+    clears (#182, P0).** fastetcd's log on pvetest2 (12.61): file 807 MB,
+    in use 475 MB, `used` 1243 MB of capacity 1282 MB on a 1 GiB volume, WAL
+    never purged. Suspects: `used` counts apparent sizes (redb's file has
+    holes); the WAL is bounded only in proposals (5000 to a snapshot, 1000
+    kept: 900 MB at 900 KiB each); reclaim's snapshot does not fit and its
+    purge keeps the whole log; defragment frees nothing (rewrite refused
+    above the high-water mark); reclaim's retention keeps deleted keys.
+    Plan: measure (`tests/large_values_space.sh`), then:
+    - [ ] `used` from allocated blocks.
+    - [ ] WAL bounded in bytes: snapshot + purge past a byte limit (an
+      eighth of the volume), and reclaim purges all it can.
+    - [ ] Reclaim waits for its snapshot; rewrites when in-place frees
+      little; compacts harder under the alarm, so deleting keys clears it.
+    - [ ] Docs (04: what fits on a volume), changelog; release; answer the
+      issue's three questions.

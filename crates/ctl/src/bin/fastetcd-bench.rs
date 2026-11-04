@@ -36,6 +36,9 @@ struct Args {
     /// Number of distinct keys to spread over.
     #[arg(long, default_value_t = 10_000)]
     keys: usize,
+    /// put: the keys' prefix.
+    #[arg(long, default_value = "/bench/")]
+    key_prefix: String,
     /// read-under-load: how long to run the load.
     #[arg(long, default_value_t = 20)]
     duration_secs: u64,
@@ -539,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
             let Some(c) = connect_kv(&args.endpoint, &errors).await else { return };
             let mut local = Vec::with_capacity(per);
             for i in 0..per {
-                let key = format!("/bench/{}", (w * per + i) % args.keys).into_bytes();
+                let key = format!("{}{}", args.key_prefix, (w * per + i) % args.keys).into_bytes();
                 let t = Instant::now();
                 let done = match args.mode.as_str() {
                     "put" => {
