@@ -3198,3 +3198,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       and redb cuts its file only by whole regions, so a rewritten file
       can stay well above its live bytes (101 -> 68 MB for 45 MB of pages).
     - [ ] Measure on server1 (file size, open time) once it runs 1.37.
+      2026-11-04 22:10Z: not yet. 12.61 (fastetcd bb06386, >= 1.37) is composed,
+      on no machine: its install waits on pvetest1 behind 12.58.1; server1 does
+      not answer (its last install, 12.58, failed). Before, 1.36 (12.58): server1
+      file 152 MB (2026-10-29, `data/rss-server1/`), `data_file_open` 668 ms +
+      `index_load` 1065 ms (707 keys); pvetest1 113.9 MB, 29.5 MB in use (74%
+      free, so due at 1.37's first check). Then: read `data file rewritten and
+      switched` and the `startup phase` lines in the install's pods.log
+      (pvetest1 first, it is a look, not the acceptance), then server1 the same.
+      Asked the master for server1 on 12.61; parked on a probe of server1:2381.
