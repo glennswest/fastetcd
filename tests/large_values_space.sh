@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Large values on a bounded volume (fastetcd#182).
 #
-#   tests/large_values_space.sh [report]
+#   tests/large_values_space.sh [report [baseline-sha]]
 #
 # One member, --quota-backend-bytes VOLUME (default 1 GiB, stormcos's
 # fastetcd-data), ~900 KiB values (stormcentral#1169's fill). Prints, for
@@ -11,7 +11,8 @@
 #   2. fill on until the alarm refuses a write;
 #   3. delete every key: the alarm clears by itself (no disarm) and a
 #      write works again.
-# `report` only prints (for a baseline that fails the checks).
+# `report` only prints (for a baseline that fails the checks); a full sha
+# after it runs that commit's server.
 # Run it through sc-build: `sc-build tests/large_values_space.sh`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,19 +28,30 @@ VAL=${VAL:-921600}
 cargo build --release --locked -p fastetcd-server -p fastetcd-ctl
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 BENCH=$TARGET/release/fastetcd-bench
+SERVER=$TARGET/release/fastetcd
+if [ -n "${2:-}" ]; then
+    # sc-build's checkout is shallow, with no remote.
+    git fetch -q https://github.com/glennswest/fastetcd.git "$2"
+    git worktree add --detach "$WORK/base-src" "$2" >/dev/null
+    (cd "$WORK/base-src" && CARGO_TARGET_DIR=$TARGET/baseline cargo build --release --locked -p fastetcd-server)
+    git worktree remove --force "$WORK/base-src"
+    SERVER=$TARGET/baseline/release/fastetcd
+fi
 EP=http://127.0.0.1:23791
 METRICS=http://127.0.0.1:23811/metrics
 DATA=$WORK/data
 
-"$TARGET/release/fastetcd" --name n1 --data-dir "$DATA" \
+"$SERVER" --data-dir "$DATA" \
     --listen-client-urls $EP --advertise-client-urls $EP \
-    --listen-peer-urls http://127.0.0.1:23801 \
-    --listen-metrics-urls http://127.0.0.1:23811 \
+    --listen-peer-urls http://127.0.0.1:23801 --initial-advertise-peer-urls http://127.0.0.1:23801 \
+    --listen-metrics-url 127.0.0.1:23811 \
     --quota-backend-bytes "$VOLUME" --space-check-interval-secs 2 \
     >"$WORK/log" 2>&1 &
 PID=$!
 trap 'kill -9 $PID 2>/dev/null || true; grep -E "fastetcd::space|fastetcd::snapshot" "$WORK/log" | cut -c1-260 | tail -40' EXIT
-for _ in $(seq 100); do curl -sf "$EP/health" >/dev/null && break; sleep 0.2; done
+up=0
+for _ in $(seq 100); do curl -sf "$EP/health" >/dev/null && { up=1; break; }; sleep 0.2; done
+[ $up = 1 ] || { echo "the server did not start:"; tail -20 "$WORK/log"; exit 1; }
 
 fail=0
 check() { # name ok?
