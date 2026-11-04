@@ -154,7 +154,7 @@ the node's real store. Same tools as on pvetest2: `blade_rss.py <node> 6
 rounds; 40 clients renewing Leases, ~170–270 PUTs/s here). Defaults for
 the caches. Raw data: `data/rss-server1/`.
 
-**RSS** (360 samples, one process start, open fds 21, data file 145 MiB
+**RSS** (360 samples, one process start, open fds 21–23, data file 145 MiB
 throughout, key index ~440 keys / 0.6–1.0 MiB, value cache ~1 MiB):
 
 | hour | min | median | max |
@@ -204,4 +204,5 @@ the checkpoint and the WAL sharing the spindle).
 What #84 asked, on this blade: GET p99 < 20 ms on a spinning disk, yes
 (also with writes); RSS flat, yes after the first two hours, inside its
 budget; cilium-operator lease renewals on time, no, because of write
-stalls (#180), not the read cache #82 added.
+stalls (#180), not the read cache #82 added. Owner's decision (2026-11-03):
+#84 closed; the lease criterion is #180's acceptance.

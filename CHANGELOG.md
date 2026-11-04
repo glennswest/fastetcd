@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-03
+- **docs:** #84 closed (owner's decision): #82's read cache is verified on an X9 blade; the lease-renewal criterion moves to #180. Re-checked the write-up against its raw data: open fds were 21–23, not 21. Deck's open-issue table updated.
+
 ### 2026-10-30
 - **docs:** Refreshed from the code since 2026-10-23: README status (v1.37.0; background rewrite, quick-repair start, MoveLeader, startup `/livez`), CLAUDE.md metric names for #177 (rewrites_total, pause_seconds). Flags, ports, metrics, 03/04/05 were already current. Open issues already cover what the docs do not promise (#180, #177 measurement on server1).
 

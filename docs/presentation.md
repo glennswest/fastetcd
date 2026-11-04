@@ -202,8 +202,8 @@ ahead, #94).
 
 | | Issue |
 |---|---|
-| P1 | #151 restart logs `Can not initialize` |
-| P2 | #155 idle RSS of a restarted member tracks its data file · #115 lease check at apply · #135 / #84 spinning-disk checks on a blade · #153 safety-backup pruning · #157 h2 / rustls advisories |
+| P1 | #151 restart logs `Can not initialize` · #180 write stalls on a spinning disk, leases late |
+| P2 | #155 idle RSS of a restarted member tracks its data file · #115 lease check at apply · #135 checkpoint vs WAL on a spindle · #153 safety-backup pruning · #157 h2 / rustls advisories |
 
 Auth: no known authorization gap; tokens expire `--auth-token-ttl` after last use.
 `gh issue list` for everything.
