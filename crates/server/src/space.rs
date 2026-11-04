@@ -742,12 +742,13 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
     Ok(())
 }
 
-/// History the reclaim keeps. Under the alarm, a tenth: writes are refused
-/// and a window counted in revisions can hold more than the volume (deleted
-/// values of 900 KiB, #182); a client that needed older revisions relists.
+/// History the reclaim keeps. Under the alarm, none: writes are refused, so
+/// the revision stands still, and any window before it holds on to every
+/// value live at its start, those of the keys just deleted included (#182).
+/// A client that needed an older revision relists.
 fn reclaim_retention(cfg: &SpaceConfig, nospace: bool) -> i64 {
     if nospace {
-        (cfg.reclaim_retention / 10).max(1)
+        0
     } else {
         cfg.reclaim_retention
     }
@@ -757,10 +758,16 @@ fn reclaim_retention(cfg: &SpaceConfig, nospace: bool) -> i64 {
 /// that needs what is purged gets a snapshot; under disk pressure the log is
 /// the first thing to go (#182: a log of large values outweighs the rest).
 async fn snapshot_and_purge(state: &ServerState) {
-    let applied = state.raft.metrics().borrow().last_applied.map(|l| l.index);
-    if let Err(e) = state.raft.trigger().snapshot().await {
-        tracing::debug!(target: "fastetcd::space", "snapshot trigger declined: {e}");
-        return;
+    let (applied, have) = {
+        let m = state.raft.metrics().borrow().clone();
+        (m.last_applied.map(|l| l.index), m.snapshot.map(|l| l.index))
+    };
+    // Nothing new: writing the same database out again frees nothing.
+    if have < applied {
+        if let Err(e) = state.raft.trigger().snapshot().await {
+            tracing::debug!(target: "fastetcd::space", "snapshot trigger declined: {e}");
+            return;
+        }
     }
     let done = state
         .raft
@@ -795,6 +802,19 @@ mod tests {
                 ..SpaceConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn under_the_alarm_the_reclaim_keeps_no_history() {
+        let cfg = SpaceConfig { reclaim_retention: 1000, ..SpaceConfig::default() };
+        assert_eq!(reclaim_retention(&cfg, false), 1000);
+        assert_eq!(reclaim_retention(&cfg, true), 0);
+    }
+
+    #[test]
+    fn used_is_what_the_directory_holds_on_the_device() {
+        assert_eq!(used_bytes(400, 800, 100), 400, "lengths with holes are no measure");
+        assert_eq!(used_bytes(0, 800, 100), 900, "the directory unreadable");
     }
 
     #[test]

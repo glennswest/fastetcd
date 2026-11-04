@@ -49,14 +49,15 @@ DATA=$WORK/data
     --quota-backend-bytes "$VOLUME" --space-check-interval-secs 2 \
     >"$WORK/log" 2>&1 &
 PID=$!
-trap 'kill -9 $PID 2>/dev/null || true; grep -E "fastetcd::space|fastetcd::snapshot" "$WORK/log" | cut -c1-260 | tail -40' EXIT
+trap 'kill -9 $PID 2>/dev/null || true; grep -E "fastetcd::space|fastetcd::snapshot" "$WORK/log" | sed "s/\x1b\[[0-9;]*m//g" | cut -c1-240 | tail -12; cat "$WORK/summary" 2>/dev/null' EXIT
 up=0
 for _ in $(seq 100); do curl -sf "$EP/health" >/dev/null && { up=1; break; }; sleep 0.2; done
 [ $up = 1 ] || { echo "the server did not start:"; tail -20 "$WORK/log"; exit 1; }
 
 fail=0
 check() { # name ok?
-    if [ "$2" = 1 ]; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi
+    if [ "$2" = 1 ]; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi | tee -a "$WORK/summary"
+    [ "$2" = 1 ] || fail=1
 }
 metric() { curl -s "$METRICS" | awk -v m="$1" '$1==m{print $2; exit}'; }
 mib() { echo $(($1 / 1048576)); }
@@ -70,7 +71,7 @@ report() {
     sleep 3 # a space sample, and the checkpoint that may purge
     printf '%-14s written=%4d MiB file=%s wal=%s snap=%s (apparent/allocated MiB) used_ratio=%s\n' \
         "$1" "$(mib "$written")" "$(sizes "$DATA/fastetcd.redb")" "$(sizes "$DATA/wal")" \
-        "$(sizes "$DATA/snapshots")" "$(metric fastetcd_store_space_used_ratio)"
+        "$(sizes "$DATA/snapshots")" "$(metric fastetcd_store_space_used_ratio)" | tee -a "$WORK/summary"
 }
 written=0
 # Puts until `limit` MiB are written or a put is refused: `$BENCH` counts
