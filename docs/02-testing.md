@@ -130,6 +130,11 @@ tmpfs, and the WAL's fsync count and mean fsync over each run, so a slow
 lone write splits into the device's fsync and the rest
 (`docs/benchmarks/idle-write.md`).
 
+Large values on a bounded volume (#182): `sc-build tests/large_values_space.sh`
+(`report <full sha>` prints a baseline commit's numbers): the data file, WAL
+and snapshots after each step, no NOSPACE at 320 MiB, the WAL bounded, the
+alarm clearing by itself once the keys are deleted.
+
 Health probes under write load (#145): `sc-build 'tests/readyz_latency.sh
 v1.32.0 2'` runs one member of each build in turn (rounds interleaved)
 under `fastetcd-bench --mode put` (`CONNS`, 1000 clients over 1000 keys)

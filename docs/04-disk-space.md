@@ -79,6 +79,17 @@ effective capacity is the *smaller* of `--quota-backend-bytes` and what
 the store can really reach on the device. A 2 GiB quota on a 64 MB
 volume is not a limit, it is a fiction — and it is that fiction that let
 the store run into `ENOSPC` with every threshold reporting healthy.
+What the data directory holds is counted in allocated blocks (since 1.38.0,
+#182): redb grows its file ahead of what it has written, and those holes
+take no space, so `dbSize` can be twice what the file holds on the device.
+
+**Bounds the raft log in bytes** (since 1.38.0, #182), not only in writes:
+once the WAL's segments pass `--wal-max-bytes` (default an eighth of the
+volume or the quota, 64 MiB to 1 GiB) a snapshot is taken at once, and a
+purge keeps at most half of that, whatever `--max-in-snapshot-log-to-keep`
+allows. With small objects the counts are what bind; at 900 KiB a value,
+5000 writes between snapshots are 4.5 GiB of log. A follower further behind
+than the log gets a snapshot.
 
 **Rolls snapshots off before writing new ones.** Snapshots are retained
 as a numbered set and pruned oldest-first *ahead* of the next write, so
@@ -138,7 +149,16 @@ order that actually frees bytes:
 3. Defragment, if at least a few MB would come back. This is the only
    step that returns space to the filesystem, and it pauses reads and
    writes while it runs — so it is skipped when the live data itself is
-   what fills the volume.
+   what fills the volume. In place it often frees nothing (see above), so
+   it is followed by the rewrite below, if that is due and now fits.
+
+The snapshot step waits for its snapshot and purges the whole log it covers
+(since 1.38.0, #182), and is skipped when nothing was applied since the last
+one. While the alarm is raised the reclaim runs whatever the occupancy, and
+step 1 compacts to the current revision: writes are refused, so the revision
+stands still, and any window before it keeps every value live at its start,
+including those of the keys just deleted. A client that wanted an older
+revision relists.
 
 **Keeps the file small in the background** (since 1.37.0, #177), before
 any mark is reached:
@@ -190,7 +210,28 @@ any mark is reached:
 message, `etcdserver: mvcc: database space exceeded`. Reads, deletes,
 compaction and defragment are deliberately **not** gated: refusing those
 is what turns a full volume into an unrecoverable one. The alarm clears
-itself once occupancy falls back below `--space-clear-percent` (70).
+itself once occupancy falls back below `--space-clear-percent` (70): delete
+keys, and the reclaim (within `--space-check-interval-secs`, at most once a
+minute) brings the store down with no `alarm disarm`.
+
+## What fits on a volume
+
+The store needs, at its peak, the data file (the live data, about 1.15x with
+the engine's overhead), a snapshot (1x, a full copy) and the raft log (up to
+`--wal-max-bytes`, an eighth of the volume). So **live data of up to about
+40% of the volume** stays out of the alarm; anything more cannot hold its own
+snapshot beside it for long. Measured with `tests/large_values_space.sh`
+(900 KiB values, one member, a 1 GiB limit):
+
+| Written | Data file on the device | WAL | Snapshot | Used |
+|---|---|---|---|---|
+| 281 MiB | 322 MiB | 82 MiB | 281 MiB | 67% |
+| 351 MiB | 402 MiB | 32–132 MiB | 351 MiB | 77–90% |
+| 457 MiB | 522 MiB | 132 MiB | 351 MiB | 98%: NOSPACE |
+
+Above 80% the reclaim runs at every sample, without changing what the data
+needs. For Kubernetes-sized objects use `fastetcd sizing`, which also allows
+for MVCC history and upgrade backups.
 
 ## Flags
 
@@ -201,12 +242,13 @@ itself once occupancy falls back below `--space-clear-percent` (70).
 | `--space-alarm-percent` | `95` | Raise `NOSPACE` and refuse writes here. |
 | `--space-clear-percent` | `70` | Clear the alarm below here. |
 | `--space-check-interval-secs` | `30` | Sampling cadence. `0` disables the monitor entirely. |
-| `--space-reclaim-retention` | `1000` | Revisions kept when compacting under pressure. |
+| `--space-reclaim-retention` | `1000` | Revisions kept when compacting under pressure (none under the alarm). |
 | `--auto-defrag` | `true` | Let the reclaim path defragment. |
 | `--max-snapshots` | `1` | Snapshots retained on disk. |
 | `--auto-compaction-retention` | `0` | Steady-state compaction (off; Kubernetes drives its own). |
 | `--snapshot-count` | `5000` | Applied writes between raft snapshots (a batched log entry counts each write in it, #80). |
 | `--max-in-snapshot-log-to-keep` | `1000` | Writes kept in the log after a purge. |
+| `--wal-max-bytes` | `0` | Snapshot once the WAL's segments hold more; a purge keeps at most half. `0` = an eighth of the volume or quota, 64 MiB to 1 GiB. |
 | `--snapshot-interval-secs` | `1800` | Also snapshot once the last one is this old and a write came since. `0` = by count only. |
 | `--defrag-free-percent` | `50` | Rewrite the data file in the background once this share of it is free pages. `0` = off. |
 | `--defrag-min-file-bytes` | `64 MiB` | Leave a smaller file alone. |

@@ -10,7 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.37.0`** — A start after a kill no longer walks the data file
+**`1.38.0`** — The raft log is bounded in bytes and a NOSPACE alarm clears
+once keys are deleted (#182, P0): `--wal-max-bytes`, occupancy in allocated
+blocks, the reclaim purges its log and compacts to the current revision
+under the alarm. Live data of up to about 40% of the volume fits.
+
+Previous: **`1.37.0`** — A start after a kill no longer walks the data file
 (#176, P0): every durable redb commit is a quick-repair commit (owner's
 decision: a torn commit on a device that loses fsync'd writes is a
 restore or re-add, not a rollback). The data file is kept small in the
@@ -3207,6 +3212,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       switched` and the `startup phase` lines in the install's pods.log
       (pvetest1 first, it is a look, not the acceptance), then server1 the same.
       Asked the master for server1 on 12.61; parked on a probe of server1:2381.
+      2026-11-04 22:48Z, server1 on 12.61: rewrite 152.1 -> 67.9 MB, 5.46 s,
+      switch pause 209 ms, in use 32.9 MB (78% free), 12454 records, 24
+      commits caught up. Start before it: `data_file_open` 500 ms +
+      `index_load` 781 ms (437 keys). Left: the open time of a restart after.
 
 99. **NOSPACE at under 320 MiB in use on the 1 GiB volume, and it never
     clears (#182, P0).** fastetcd's log on pvetest2 (12.61): file 807 MB,
@@ -3217,10 +3226,15 @@ Tracked live in the Claude task system. Snapshot of the order:
     purge keeps the whole log; defragment frees nothing (rewrite refused
     above the high-water mark); reclaim's retention keeps deleted keys.
     Plan: measure (`tests/large_values_space.sh`), then:
-    - [ ] `used` from allocated blocks.
-    - [ ] WAL bounded in bytes: snapshot + purge past a byte limit (an
+    - [x] `used` from allocated blocks.
+    - [x] WAL bounded in bytes: snapshot + purge past a byte limit (an
       eighth of the volume), and reclaim purges all it can.
-    - [ ] Reclaim waits for its snapshot; rewrites when in-place frees
-      little; compacts harder under the alarm, so deleting keys clears it.
-    - [ ] Docs (04: what fits on a volume), changelog; release; answer the
-      issue's three questions.
+    - [x] Reclaim waits for its snapshot; rewrites when in-place frees
+      little; compacts to the current revision under the alarm (a window
+      before it, tried first, kept the deleted keys' values).
+    - [x] Docs (04: what fits on a volume), changelog; release 1.38.0; answer
+      the issue's three questions.
+    - Verified: `tests/large_values_space.sh` against the fix (a953454) and
+      the unfixed 7cbfc95: 351 MiB written, used 1.47 -> 0.77, WAL 382 -> 32
+      MiB; alarm at 457 MiB; delete: cleared by itself, file 807 -> 7 MB
+      (unfixed: raised still after 10 min).

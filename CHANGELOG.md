@@ -13,6 +13,20 @@
 
 <!-- New unreleased changes go here -->
 
+## [v1.38.0] — 2026-11-04
+
+### Added
+- **feat:** `--wal-max-bytes` (#182, P0): the raft log is bounded in bytes. A snapshot once the WAL's segments pass it (default an eighth of the volume or quota, 64 MiB to 1 GiB), and a purge keeps at most half, also for a log from before a restart. 5000 writes between snapshots and 1000 kept are more than a 1 GiB volume at 900 KiB a value. `fastetcd-bench --key-prefix`; `tests/large_values_space.sh`.
+
+### Fixed
+- **fix:** NOSPACE on a 1 GiB volume, then every write refused for good (#182). Measured at 351 MiB of 900 KiB values, 1 GiB limit: used ratio 1.47 → 0.77, WAL 382 → 32 MiB; after deleting every key the alarm stayed raised for 10 min and more, and now clears within a minute with the file at 7 MB (was 807 MB).
+  - Occupancy counts allocated blocks: redb's file has holes, so lengths came to more than the volume.
+  - The reclaim waits for its snapshot and purges all the log it covers; it writes no snapshot when nothing changed since the last one, and follows a defragment that frees little with the rewrite (#177).
+  - While the alarm is raised the reclaim runs whatever the occupancy (between 70 and 80% nothing did) and compacts to the current revision: writes are refused, so a window counted back from it kept every value of the keys just deleted.
+
+### Documentation
+- **docs:** `docs/04-disk-space.md` § What fits on a volume: live data of up to about 40% of the volume.
+
 ## [v1.37.0] — 2026-10-28
 
 ### Added

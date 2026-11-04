@@ -95,6 +95,7 @@ made durable in the background ([03-deploy](03-deploy.md#storage-engine), #85).
 | Flag | Default | Env | etcd env | Meaning |
 |---|---|---|---|---|
 | `--wal-segment-bytes` | `16777216` (16 MiB) | `FASTETCD_WAL_SEGMENT_BYTES` | | Size each WAL segment is preallocated to. |
+| `--wal-max-bytes` | `0` | `FASTETCD_WAL_MAX_BYTES` | | Take a raft snapshot and purge once the WAL's segments hold more than this, however few writes that is; a purge keeps at most half of it (#182). `0` = an eighth of the volume (or of `--quota-backend-bytes`, if smaller), at least 64 MiB and at most 1 GiB. fastetcd's own. |
 | `--wal-checkpoint-interval-ms` | `100` | `FASTETCD_WAL_CHECKPOINT_INTERVAL_MS` | | Longest time between an apply and the durable commit of the data file that covers it, on a disk where a checkpoint is quick. After a checkpoint that took `d`, the next waits at least `4·d`, so on a slow disk checkpoints use at most a fifth of its time (#95). |
 | `--wal-checkpoint-entries` | `10000` | `FASTETCD_WAL_CHECKPOINT_ENTRIES` | | ...or checkpoint as soon as this many raft entries were applied since the last one. |
 | `--write-behind-bytes` | `67108864` (64 MiB) | `FASTETCD_WRITE_BEHIND_BYTES` | | Applied writes held in RAM until a checkpoint writes them into the data file. Past it, an apply writes them out first. |
@@ -199,7 +200,7 @@ users keep their etcd passwords (#60).
 **`fastetcd-bench`** — load generator. `--endpoint`, `--mode put |
 get-lin | get-ser | read-under-load | durability-write | durability-check
 | keepalive | idle-put` (default `put`), `--conns 64`,
-`--total 50000`, `--val-bytes 256`, `--keys 10000`. `read-under-load`
+`--total 50000`, `--val-bytes 256`, `--keys 10000`, `--key-prefix /bench/` (put). `read-under-load`
 (#71): `--conns` clients loop GET + CAS Txn on their own key (a prefix
 Range every fifth loop) for `--duration-secs 20` while a probe makes
 `--probes 200` sequential linearizable, then serializable, Ranges;
