@@ -2315,7 +2315,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     renewals 278–465/s, p50 32–37 ms, p99 1.5–4 s, max 13.5 s; checkpoints
     up to 28 s of 60, WAL fsync up to 27.8 s: the write tail is #135.
 
-63. **Verify #82 on an X9 blade (#84, P2).** server3 (fastetcd 1.18):
+63. **Verify #82 on an X9 blade (#84, P2) — done (docs; no release).** server3 (fastetcd 1.18):
     apiserver GET of the cilium-operator lease p99 2.9–6.4 ms idle, 9.4–
     12.1 ms at ~4 500 GETs/s (read-only: #138 stalled its writes); value
     cache 99.8% hits over the day, 99.5% of hit reads < 1 ms in the store.
@@ -2360,6 +2360,8 @@ Tracked live in the Claude task system. Snapshot of the order:
     floor levels off at 93–98 MiB (max 230); GET p99 14.6–18.5 ms under
     writes; leases late in store-wide write stalls (#180, filed). Asked
     the owner on #84 whether to close it with the lease criterion on #180.
+    2026-11-03: owner approved; closed. Numbers re-checked against
+    `docs/benchmarks/data/rss-server1/`. The lease criterion is #180's.
 
 64. **Write-behind back-pressure does not wait behind the checkpoint's
     fsync (#93, P2) — done, shipped in v1.24.1.** `WriteBehind::sync` (the checkpoint) held the flush
