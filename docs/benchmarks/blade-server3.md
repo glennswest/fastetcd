@@ -216,7 +216,7 @@ the member's log and `/metrics`:
 |---|---|
 | Due at the first check, 600 s after the start | file 152.1 MB, 32.9 MB in use (78% free) |
 | Rewrite | 12,454 records, 24 commits caught up, 5.46 s, switch pause 209 ms |
-| After | 67.9 MB; 34.2 MB by 23:07Z (a later pass, or compaction's room; its log went with the restart) |
+| After | 67.9 MB; 34.2 MB by 23:07Z (what took it there was not captured, likely a later pass: its log went with the restart) |
 
 A start's open, both after a kill-like stop ("not closed cleanly; quick
 repair, no walk"):
