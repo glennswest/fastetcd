@@ -206,3 +206,29 @@ What #84 asked, on this blade: GET p99 < 20 ms on a spinning disk, yes
 budget; cilium-operator lease renewals on time, no, because of write
 stalls (#180), not the read cache #82 added. Owner's decision (2026-11-03):
 #84 closed; the lease criterion is #180's acceptance.
+
+## The background rewrite on server1 (#177, 2026-11-04)
+
+Release 12.61 (fastetcd 1.37, bb06386), an X9 blade's kept data file. From
+the member's log and `/metrics`:
+
+| | |
+|---|---|
+| Due at the first check, 600 s after the start | file 152.1 MB, 32.9 MB in use (78% free) |
+| Rewrite | 12,454 records, 24 commits caught up, 5.46 s, switch pause 209 ms |
+| After | 67.9 MB; 34.2 MB by 23:07Z (a later pass, or compaction's room; its log went with the restart) |
+
+A start's open, both after a kill-like stop ("not closed cleanly; quick
+repair, no walk"):
+
+| | File | `data_file_open` | `index_load` |
+|---|---|---|---|
+| Before the rewrite (22:38Z, install's first boot) | 152.1 MB | 500 ms | 781 ms (437 keys) |
+| After (23:17Z, warm reset) | 34.2 MB | 637 ms | 580 ms (723 keys) |
+
+The file is 4.4x smaller; the open is about the same, since quick-repair
+(#176) no longer walks the file. These are single starts, with different
+key counts, not a controlled comparison. The rest of the 23:17Z start
+(`wal_open` 2334 ms, `raft_start` 832 ms; 666 and 51 ms at 22:38Z) has
+nothing to do with the data file's size. The 22:38Z start also spent 7661 ms
+on the upgrade safety backup (#174).

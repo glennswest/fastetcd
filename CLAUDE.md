@@ -3215,7 +3215,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       2026-11-04 22:48Z, server1 on 12.61: rewrite 152.1 -> 67.9 MB, 5.46 s,
       switch pause 209 ms, in use 32.9 MB (78% free), 12454 records, 24
       commits caught up. Start before it: `data_file_open` 500 ms +
-      `index_load` 781 ms (437 keys). Left: the open time of a restart after.
+      `index_load` 781 ms (437 keys). Warm reset 23:17Z, file 34.2 MB:
+      `data_file_open` 637 ms + `index_load` 580 ms (723 keys), no walk. So
+      the file is 4.4x smaller and the open about the same: #176's
+      quick-repair had already taken file size out of it. Closed.
 
 99. **NOSPACE at under 320 MiB in use on the 1 GiB volume, and it never
     clears (#182, P0).** fastetcd's log on pvetest2 (12.61): file 807 MB,

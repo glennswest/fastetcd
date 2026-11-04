@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-04
+- **docs:** #177 measured on server1 (12.61): the background rewrite took the file from 152.1 to 67.9 MB in 5.46 s with a 209 ms switch pause (34.2 MB later); a restart's open is about the same, 500 + 781 ms before and 637 + 580 ms after. `docs/benchmarks/blade-server3.md`.
+
 ### 2026-11-03
 - **docs:** #84 closed (owner's decision): #82's read cache is verified on an X9 blade; the lease-renewal criterion moves to #180. Re-checked the write-up against its raw data: open fds were 21–23, not 21. Deck's open-issue table updated.
 
