@@ -422,6 +422,7 @@ pub struct WalLogStore {
     stats: Arc<WalStats>,
     committed_index: Arc<AtomicU64>,
     progress: LogProgress,
+    segment_bytes: u64,
 }
 
 impl WalLogStore {
@@ -513,7 +514,8 @@ impl WalLogStore {
         engine: Arc<dyn KvStore>,
         opts: WalLogOptions,
     ) -> anyhow::Result<Self> {
-        let wal_opts = WalOptions { segment_bytes: opts.segment_bytes };
+        let segment_bytes = opts.segment_bytes;
+        let wal_opts = WalOptions { segment_bytes };
         if !has_segments(dir) {
             let copied = migrate(dir, &engine, wal_opts).await?;
             if copied > 0 {
@@ -607,7 +609,7 @@ impl WalLogStore {
                 .name("raft-wal".into())
                 .spawn(move || writer(wal, rx, state, stats, opts))?;
         }
-        Ok(Self { state, tx, reader, engine, stats, committed_index, progress })
+        Ok(Self { state, tx, reader, engine, stats, committed_index, progress, segment_bytes })
     }
 
     /// The store's progress, for [`crate::read_index::LocalReadIndex`].
@@ -622,6 +624,31 @@ impl WalLogStore {
 
     pub fn stats(&self) -> Arc<WalStats> {
         self.stats.clone()
+    }
+
+    /// What the WAL's segments hold on disk (#182).
+    pub fn bytes_on_disk(&self) -> u64 {
+        self.stats.segments.load(Ordering::Relaxed).saturating_mul(self.segment_bytes)
+    }
+
+    /// Where to purge so that the log up to `upto` keeps about
+    /// `keep_bytes` of entries: the newest index with at least that many
+    /// bytes after it, up to `upto` (#182). `None` if the log up to `upto`
+    /// holds less.
+    pub fn purge_point_keeping(&self, upto: u64, keep_bytes: u64) -> Option<u64> {
+        let st = self.state.lock().unwrap();
+        let mut held = 0u64;
+        for (index, slot) in st.entries.range(..=upto).rev() {
+            if held >= keep_bytes {
+                return Some(*index);
+            }
+            held += match (&slot.loc, &slot.bytes) {
+                (Some(l), _) => l.len as u64,
+                (None, Some(b)) => b.len() as u64,
+                (None, None) => 0,
+            };
+        }
+        None
     }
 
     fn send(&self, cmd: Cmd) -> io::Result<()> {

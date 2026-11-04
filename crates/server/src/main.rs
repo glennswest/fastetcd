@@ -482,6 +482,14 @@ struct Args {
     )]
     wal_segment_bytes: u64,
 
+    /// Take a raft snapshot and purge once the WAL's segments hold more
+    /// than this, however few writes that is (#182: `--snapshot-count` says
+    /// nothing about bytes); a purge then keeps at most half of it. `0`: an
+    /// eighth of the volume (or of `--quota-backend-bytes`, if smaller), at
+    /// least 64 MiB and at most 1 GiB. fastetcd's own.
+    #[arg(long, env = "FASTETCD_WAL_MAX_BYTES", default_value_t = 0)]
+    wal_max_bytes: u64,
+
     /// Recent raft log entries kept in RAM, in bytes, so replicating to
     /// a follower rarely reads the WAL back from disk.
     #[arg(long, env = "FASTETCD_WAL_CACHE_BYTES", default_value_t = 64 * 1024 * 1024)]
@@ -1123,6 +1131,17 @@ async fn main() -> anyhow::Result<()> {
     let committed_index = log.committed_index();
     let wal_stats = log.stats();
     let checkpoint_log = log.clone();
+    let bound_log = log.clone();
+    let wal_max_bytes = if args.wal_max_bytes > 0 {
+        args.wal_max_bytes
+    } else {
+        let volume = fastetcd_storage::fs_space::probe(&args.data_dir).map(|f| f.total);
+        let quota = (args.quota_backend_bytes > 0).then_some(args.quota_backend_bytes);
+        fastetcd_raft::snapshot_policy::default_wal_max_bytes(match (volume, quota) {
+            (Some(v), Some(q)) => Some(v.min(q)),
+            (v, q) => v.or(q),
+        })
+    };
 
     // Snapshot + purge is what bounds the raft log: openraft snapshots
     // every `snapshot_count` applied entries and then purges the log,
@@ -1273,6 +1292,11 @@ async fn main() -> anyhow::Result<()> {
         args.max_in_snapshot_log_to_keep,
         (args.snapshot_interval_secs > 0)
             .then(|| std::time::Duration::from_secs(args.snapshot_interval_secs)),
+        Some(fastetcd_raft::snapshot_policy::WalBound {
+            store: bound_log,
+            max_bytes: wal_max_bytes,
+            keep_bytes: wal_max_bytes / 2,
+        }),
     );
 
     // Bootstrap: only the `new` state initializes; `existing` waits

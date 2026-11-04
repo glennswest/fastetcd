@@ -31,7 +31,9 @@
 //!    still functions.
 //!
 //! The alarm clears itself once occupancy drops back below the low-water
-//! mark; `etcdctl alarm disarm` clears it manually.
+//! mark; `etcdctl alarm disarm` clears it manually. While it is raised the
+//! reclaim keeps running, whatever the occupancy: it is what brings the
+//! store down once keys have been deleted (fastetcd#182).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -199,8 +201,7 @@ impl SpaceStats {
     /// the directory scan came up short (a data dir elsewhere, an
     /// unreadable subdirectory).
     pub fn used_bytes(&self) -> u64 {
-        self.data_dir_bytes
-            .max(self.db_bytes.saturating_add(self.snapshot_bytes))
+        used_bytes(self.data_dir_bytes, self.db_bytes, self.snapshot_bytes)
     }
 
     /// Occupancy as a fraction of capacity, 0.0–1.0+.
@@ -415,10 +416,10 @@ impl SpaceGuard {
                 self.db_bytes.load(Ordering::Relaxed)
             });
         let snapshot_bytes = state.sm.snapshot_bytes();
-        let data_dir_bytes = fastetcd_storage::fs_space::dir_size(&self.data_dir);
+        let data_dir_bytes = fastetcd_storage::fs_space::dir_allocated(&self.data_dir);
         let fs = fastetcd_storage::fs_space::probe(&self.data_dir);
 
-        let used = data_dir_bytes.max(db_bytes.saturating_add(snapshot_bytes));
+        let used = used_bytes(data_dir_bytes, db_bytes, snapshot_bytes);
         let capacity = self.capacity_bytes(used, fs.map(|f| f.available));
         let used_ppm = if capacity == 0 {
             0
@@ -519,6 +520,18 @@ impl SpaceGuard {
     }
 }
 
+/// What the store holds on its volume: the data directory's allocated
+/// blocks. A file's length is no measure, a hole in it takes no space
+/// (fastetcd#182). The lengths of the database and snapshots only where the
+/// directory could not be read.
+fn used_bytes(data_dir_bytes: u64, db_bytes: u64, snapshot_bytes: u64) -> u64 {
+    if data_dir_bytes > 0 {
+        data_dir_bytes
+    } else {
+        db_bytes.saturating_add(snapshot_bytes)
+    }
+}
+
 fn pct_ppm(percent: u8) -> u64 {
     percent as u64 * 10_000
 }
@@ -544,7 +557,9 @@ pub fn spawn(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<()>> {
                 .in_use_bytes(state.sm.mvcc().engine(), IN_USE_MAX_AGE)
                 .await;
             let high_ppm = pct_ppm(cfg.high_water_percent);
-            if stats.capacity_bytes == 0 || stats.used_ppm < high_ppm {
+            // Under the alarm too: between the low and the high mark nothing
+            // else would ever bring the store down to clear it.
+            if stats.capacity_bytes == 0 || (stats.used_ppm < high_ppm && !stats.nospace) {
                 continue;
             }
             let now = tokio::time::Instant::now();
@@ -649,6 +664,9 @@ pub async fn rewrite_if_due(state: &ServerState, cfg: &SpaceConfig) -> anyhow::R
     }
 }
 
+/// How long a reclaim waits for its snapshot before going on without it.
+const RECLAIM_SNAPSHOT_WAIT: Duration = Duration::from_secs(120);
+
 /// One reclaim pass: compact MVCC history, snapshot so the raft log can
 /// be purged, then defragment to hand the freed pages back.
 ///
@@ -661,7 +679,7 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
     //    every member compacts identically.
     match crate::compaction::compact_to_retention(
         state,
-        cfg.reclaim_retention,
+        reclaim_retention(cfg, state.space.nospace()),
         "compacting MVCC history under disk pressure",
     )
     .await
@@ -677,12 +695,7 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
     //    `--snapshot-count` boundary. Purging the log is gated on having
     //    snapshotted the entries first, so this is what lets the log
     //    shrink between thresholds.
-    if let Err(e) = state.raft.trigger().snapshot().await {
-        tracing::debug!(target: "fastetcd::space", "snapshot trigger declined: {e}");
-    }
-    // Give the snapshot + purge a moment to land before measuring what
-    // a defragment could return.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    snapshot_and_purge(state).await;
 
     // 3. Defragment. This is the only step that returns space to the
     //    filesystem, and it blocks the engine while it runs, so only do
@@ -720,7 +733,54 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
         freed_bytes = usage.file_bytes.saturating_sub(after),
         "defragment complete"
     );
+    // In place, redb only cuts whole regions off the end of the file, often
+    // nothing. The copy gets it all, now that the log has made room for it
+    // (`rewrite_decision` says whether it fits and is worth it).
+    if let Err(e) = rewrite_if_due(state, cfg).await {
+        tracing::warn!(target: "fastetcd::space", "rewrite under disk pressure failed: {e}");
+    }
     Ok(())
+}
+
+/// History the reclaim keeps. Under the alarm, a tenth: writes are refused
+/// and a window counted in revisions can hold more than the volume (deleted
+/// values of 900 KiB, #182); a client that needed older revisions relists.
+fn reclaim_retention(cfg: &SpaceConfig, nospace: bool) -> i64 {
+    if nospace {
+        (cfg.reclaim_retention / 10).max(1)
+    } else {
+        cfg.reclaim_retention
+    }
+}
+
+/// Snapshot now, wait for it, and purge the whole log it covers. A follower
+/// that needs what is purged gets a snapshot; under disk pressure the log is
+/// the first thing to go (#182: a log of large values outweighs the rest).
+async fn snapshot_and_purge(state: &ServerState) {
+    let applied = state.raft.metrics().borrow().last_applied.map(|l| l.index);
+    if let Err(e) = state.raft.trigger().snapshot().await {
+        tracing::debug!(target: "fastetcd::space", "snapshot trigger declined: {e}");
+        return;
+    }
+    let done = state
+        .raft
+        .wait(Some(RECLAIM_SNAPSHOT_WAIT))
+        .metrics(|m| m.snapshot.map(|l| l.index) >= applied, "reclaim's snapshot")
+        .await;
+    let snapshot = match done {
+        Ok(m) => m.snapshot.map(|l| l.index),
+        Err(e) => {
+            tracing::warn!(target: "fastetcd::space", "reclaim's snapshot: {e}");
+            state.raft.metrics().borrow().snapshot.map(|l| l.index)
+        }
+    };
+    if let Some(s) = snapshot {
+        if let Err(e) = state.raft.trigger().purge_log(s).await {
+            tracing::debug!(target: "fastetcd::space", "purge trigger declined: {e}");
+        }
+    }
+    // The next checkpoint lets the purge delete the WAL's segments.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 }
 
 #[cfg(test)]

@@ -87,9 +87,48 @@ pub fn dir_size(dir: &Path) -> u64 {
     total
 }
 
+/// Bytes the files under `dir` hold on the device, recursively: their
+/// allocated blocks, not their lengths. redb grows its file ahead of what
+/// it has written, and those holes take no space, so lengths can add up to
+/// more than the volume (fastetcd#182).
+#[cfg(unix)]
+pub fn dir_allocated(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_allocated(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.blocks().saturating_mul(512));
+        }
+    }
+    total
+}
+
+#[cfg(not(unix))]
+pub fn dir_allocated(dir: &Path) -> u64 {
+    dir_size(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hole_takes_no_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(dir.path().join("sparse")).unwrap();
+        f.set_len(64 << 20).unwrap();
+        std::fs::write(dir.path().join("written"), vec![1u8; 1 << 20]).unwrap();
+        f.sync_all().unwrap();
+        assert_eq!(dir_size(dir.path()), (64 << 20) + (1 << 20));
+        let allocated = dir_allocated(dir.path());
+        assert!((1 << 20..8 << 20).contains(&allocated), "allocated {allocated}");
+    }
 
     #[test]
     fn probe_reports_a_plausible_filesystem() {

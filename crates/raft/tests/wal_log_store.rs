@@ -592,7 +592,7 @@ async fn snapshots_and_purges_are_counted_in_proposals() {
     assert!(entries < 200, "300 writes took {entries} log entries: not batched enough to tell");
 
     // The policy: a snapshot (by proposals), then a purge to ~100 kept.
-    fastetcd_raft::snapshot_policy::spawn(raft.clone(), sm.proposal_log(), 200, 100, None);
+    fastetcd_raft::snapshot_policy::spawn(raft.clone(), sm.proposal_log(), 200, 100, None, None);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let m = metrics(&raft);
@@ -610,6 +610,77 @@ async fn snapshots_and_purges_are_counted_in_proposals() {
     assert!(snap <= entries + 2, "snapshot at {snap}: by proposals, not entries");
     assert!(kept >= 100, "only {kept} proposals kept after the purge, asked for 100");
     assert!(purged > 0 && purged < snap, "purged to {purged}, snapshot at {snap}");
+    raft.shutdown().await.unwrap();
+}
+
+/// fastetcd#182: at 900 KiB a value, 5000 proposals to a snapshot and 1000
+/// kept outweigh a 1 GiB volume. The WAL's bytes trigger a snapshot and cap
+/// what the purge keeps, also for a log the process did not apply itself (a
+/// restart: the proposal log starts empty, as here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_wal_is_bounded_in_bytes() {
+    use openraft::RaftMetrics;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Arc::new(
+        Config {
+            heartbeat_interval: 100,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1_000_000),
+            max_in_snapshot_log_to_keep: 1_000_000,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap(),
+    );
+    let (raft, log, _sm) = slow_node_with(dir.path(), Duration::ZERO, Duration::ZERO, cfg).await;
+    const MIB: usize = 1 << 20;
+    for i in 0..60 {
+        let entry = FastetcdLogEntry::Apply {
+            mutations: vec![Mutation::Put {
+                key: format!("k{i:04}").into_bytes(),
+                value: vec![b'v'; MIB],
+                lease: 0,
+                prev_kv: false,
+                ignore_value: false,
+                ignore_lease: false,
+            }],
+        };
+        raft.client_write(entry).await.unwrap();
+    }
+    let metrics = |r: &Raft<TypeConfig>| -> RaftMetrics<NodeId, openraft::BasicNode> { r.metrics().borrow().clone() };
+    assert!(metrics(&raft).snapshot.is_none(), "a snapshot before the policy runs");
+    assert!(log.bytes_on_disk() as usize > 32 * MIB, "WAL {} bytes", log.bytes_on_disk());
+    let last = metrics(&raft).last_applied.unwrap().index;
+    // Nothing kept but about 8 MiB of the log, out of 60.
+    assert!(log.purge_point_keeping(last, 1 << 40).is_none(), "the log holds less than that");
+    let point = log.purge_point_keeping(last, 8 << 20).expect("the log holds more than 8 MiB");
+    assert!(last - point <= 10, "kept {} entries of 1 MiB", last - point);
+
+    fastetcd_raft::snapshot_policy::spawn(
+        raft.clone(),
+        Default::default(),
+        1_000_000,
+        1_000_000,
+        None,
+        Some(fastetcd_raft::snapshot_policy::WalBound {
+            store: log.clone(),
+            max_bytes: 32 << 20,
+            keep_bytes: 8 << 20,
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let m = metrics(&raft);
+        if m.snapshot.is_some() && m.purged.is_some() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no snapshot and purge: {:?} / {:?}", m.snapshot, m.purged);
+        sleep_ms(100).await;
+    }
+    let m = metrics(&raft);
+    let (snap, purged) = (m.snapshot.unwrap().index, m.purged.unwrap().index);
+    assert!(snap - purged <= 10 && purged > 40, "snapshot at {snap}, purged to {purged}: too much kept");
     raft.shutdown().await.unwrap();
 }
 

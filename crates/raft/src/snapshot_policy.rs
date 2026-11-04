@@ -15,6 +15,11 @@
 //! last one, and after each snapshot purges the log down to about
 //! `keep` proposals. openraft's own entry-counted policy stays as the
 //! backstop; without batching the two agree.
+//!
+//! Counts say nothing about bytes: at 900 KiB a value, 5000 proposals
+//! between snapshots and 1000 kept are more than a 1 GiB volume holds
+//! (fastetcd#182). So a [`WalBound`] also snapshots once the WAL's
+//! segments pass `max_bytes`, and caps what a purge keeps at `keep_bytes`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +29,7 @@ use std::time::Duration;
 use openraft::Raft;
 
 use crate::types::TypeConfig;
+use crate::wal_log_store::WalLogStore;
 
 /// Proposals applied, per log index, since this process started.
 #[derive(Debug, Default)]
@@ -106,6 +112,27 @@ pub fn snapshot_due(since: u64, count: u64, age: Duration, interval: Option<Dura
     (count > 0 && since >= count) || (since > 0 && interval.is_some_and(|i| age >= i))
 }
 
+/// The WAL's limit in bytes (fastetcd#182).
+#[derive(Clone)]
+pub struct WalBound {
+    pub store: WalLogStore,
+    /// Snapshot once the WAL's segments hold more than this.
+    pub max_bytes: u64,
+    /// A purge keeps at most about this much of the log.
+    pub keep_bytes: u64,
+}
+
+/// `--wal-max-bytes` left at 0: an eighth of the volume, as `fastetcd
+/// sizing` assumes the log is small beside a snapshot, at least 64 MiB and
+/// at most 1 GiB (etcd's five 64 MiB WAL files are 320 MiB on any volume).
+pub fn default_wal_max_bytes(volume_bytes: Option<u64>) -> u64 {
+    const MIB: u64 = 1 << 20;
+    match volume_bytes {
+        Some(v) if v > 0 => (v / 8).clamp(64 * MIB, 1024 * MIB),
+        _ => 1024 * MIB,
+    }
+}
+
 /// Run the policy for this member until the process ends.
 pub fn spawn(
     raft: Raft<TypeConfig>,
@@ -113,6 +140,7 @@ pub fn spawn(
     snapshot_count: u64,
     keep: u64,
     interval: Option<Duration>,
+    bound: Option<WalBound>,
 ) {
     tokio::spawn(async move {
         let mut asked_after: Option<u64> = None;
@@ -128,17 +156,23 @@ pub fn spawn(
             let since = log.total().saturating_sub(snap.map_or(0, |s| log.cumulative_at(s)));
             // Once per snapshot: openraft builds it in the background, and
             // the next request only once it shows in the metrics.
-            if snapshot_due(since, snapshot_count, last_snap.1.elapsed(), interval)
+            // Not `since`: it starts at 0 with the process, and a log from
+            // before a restart fills the volume just as well.
+            let over_bytes = bound.as_ref().is_some_and(|b| b.store.bytes_on_disk() > b.max_bytes)
+                && m.last_applied.map(|l| l.index) > snap;
+            if (over_bytes || snapshot_due(since, snapshot_count, last_snap.1.elapsed(), interval))
                 && asked_after != Some(snap.unwrap_or(0))
             {
                 if raft.trigger().snapshot().await.is_err() {
                     return;
                 }
-                tracing::debug!(target: "fastetcd::snapshot_policy", since, "snapshot: proposals since the last");
+                tracing::debug!(target: "fastetcd::snapshot_policy", since, over_bytes, "snapshot: proposals since the last, or the WAL's bytes");
                 asked_after = Some(snap.unwrap_or(0));
             }
             if let Some(s) = snap.filter(|s| purged_for != Some(*s)) {
-                if let Some(p) = log.purge_point(s, keep) {
+                // The later of the two: keep what both limits allow.
+                let by_bytes = bound.as_ref().and_then(|b| b.store.purge_point_keeping(s, b.keep_bytes));
+                if let Some(p) = log.purge_point(s, keep).max(by_bytes) {
                     if Some(p) > m.purged.map(|l| l.index) && raft.trigger().purge_log(p).await.is_err() {
                         return;
                     }
@@ -176,6 +210,15 @@ mod tests {
         // Purged right up to a snapshot: nothing new since it.
         l.forget_upto(5);
         assert_eq!(l.total() - l.cumulative_at(5), 0);
+    }
+
+    #[test]
+    fn the_wal_limit_follows_the_volume() {
+        const MIB: u64 = 1 << 20;
+        assert_eq!(default_wal_max_bytes(Some(1024 * MIB)), 128 * MIB);
+        assert_eq!(default_wal_max_bytes(Some(64 * MIB)), 64 * MIB, "the floor");
+        assert_eq!(default_wal_max_bytes(Some(1 << 40)), 1024 * MIB);
+        assert_eq!(default_wal_max_bytes(None), 1024 * MIB);
     }
 
     #[test]
