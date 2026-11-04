@@ -1136,7 +1136,7 @@ async fn main() -> anyhow::Result<()> {
         args.wal_max_bytes
     } else {
         let volume = fastetcd_storage::fs_space::probe(&args.data_dir).map(|f| f.total);
-        let quota = (args.quota_backend_bytes > 0).then_some(args.quota_backend_bytes);
+        let quota = (args.quota_backend_bytes > 0).then_some(args.quota_backend_bytes as u64);
         fastetcd_raft::snapshot_policy::default_wal_max_bytes(match (volume, quota) {
             (Some(v), Some(q)) => Some(v.min(q)),
             (v, q) => v.or(q),
