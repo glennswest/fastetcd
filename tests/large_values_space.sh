@@ -44,6 +44,7 @@ DATA=$WORK/data
 "$SERVER" --data-dir "$DATA" \
     --listen-client-urls $EP --advertise-client-urls $EP \
     --listen-peer-urls http://127.0.0.1:23801 --initial-advertise-peer-urls http://127.0.0.1:23801 \
+    --initial-cluster default=http://127.0.0.1:23801 \
     --listen-metrics-url 127.0.0.1:23811 \
     --quota-backend-bytes "$VOLUME" --space-check-interval-secs 2 \
     >"$WORK/log" 2>&1 &
