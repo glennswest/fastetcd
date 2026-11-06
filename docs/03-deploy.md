@@ -53,7 +53,7 @@ are the authority; as of stormcos 27add14 (2026-10-07):
   (stormcos#523).
 - **Volumes:** `/data/fastetcd` from the blank golden `fastetcd-data`
   (1G, headroom on top of fastetcd's own bounded growth, see
-  [Disk space](#disk-space)); `/data/backup` from `fastetcd-backup` (2G),
+  [Disk space](#disk-space)); `/data/backup` from `fastetcd-backup` (3G; the static pod sets `FASTETCD_BACKUP_RETAIN=2`, stormcos#648),
   where `FASTETCD_BACKUP_DIR` points the periodic backups (#37); logs.
 - **Started** by stormpump's `30-kube`, first, before the apiserver, by
   role (`start fastetcd roles=sno,master`, stormcos#282).

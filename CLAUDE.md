@@ -2458,7 +2458,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     from fetched trees at main's tip at that moment (no `/root`; the
     stage takes no commit); stormd config: mutual TLS on 2379, metrics
     on 0.0.0.0:2381, backups to /data/backup (FASTETCD_BACKUP_DIR), TCP
-    liveness; blank goldens fastetcd-data 1G and fastetcd-backup 2G;
+    liveness; blank goldens fastetcd-data 1G and fastetcd-backup 3G (stormcos#648, retain 2);
     started first in 30-kube on sno/master. Also: dev.g8.lo is retired
     (2026-10-07): sc-build runs on build VMs (README, 02, 03).
     Work items:

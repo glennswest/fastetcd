@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-06
+- **docs:** Refreshed from the code since 2026-10-30 (#177, #182, #84 only; `--wal-max-bytes`, 04 sizing, 01 flags were already current). Fixed #181: the `fastetcd-backup` golden is 3G with `FASTETCD_BACKUP_RETAIN=2` (stormcos#648), not 2G (03-deploy, deck, CLAUDE.md). No promise left that the code does not keep; open issues already cover the gaps.
+
 ### 2026-11-04
 - **docs:** #177 measured on server1 (12.61): the background rewrite took the file from 152.1 to 67.9 MB in 5.46 s with a 209 ms switch pause (34.2 MB later); a restart's open is about the same, 500 + 781 ms before and 637 + 580 ms after. `docs/benchmarks/blade-server3.md`.
 

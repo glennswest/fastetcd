@@ -186,7 +186,7 @@ ahead, #94).
   peer ports are mutual TLS; the kubelet probes `/livez` and `/readyz` on
   :2381.
 - **Golden `fastetcd-data`** (1G blank) is `/data/fastetcd`;
-  **`fastetcd-backup`** (2G) is `/data/backup`.
+  **`fastetcd-backup`** (3G, `FASTETCD_BACKUP_RETAIN=2`) is `/data/backup`.
 - **Starts**: stormpump's `30-kube`, first, before the apiserver, by role
   (sno, master). A worker carries the golden unstarted.
 - **Updated** by a stormcos release that carries a new golden; the data
