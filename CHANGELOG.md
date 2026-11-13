@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-13
+- **docs:** Refreshed from the code since 2026-11-06: no code changed (the one commit is `docs/research/2026-11-10.md`), so README, docs/ and CLAUDE.md already say what the code does (v1.38.0). Nothing promised that the code lacks; the gaps are open issues (#187 MemberList client URLs only for the answering member, already documented in 01; #188, #189 dependency follow-ups).
+
 ### 2026-11-06
 - **docs:** Refreshed from the code since 2026-10-30 (#177, #182, #84 only; `--wal-max-bytes`, 04 sizing, 01 flags were already current). Fixed #181: the `fastetcd-backup` golden is 3G with `FASTETCD_BACKUP_RETAIN=2` (stormcos#648), not 2G (03-deploy, deck, CLAUDE.md). No promise left that the code does not keep; open issues already cover the gaps.
 
