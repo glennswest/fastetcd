@@ -1506,3 +1506,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] sc-build passed on 87bc426 (clippy -D warnings; downgrade unit,
       authz_admin, gateway tests); release 1.39.0; 1.39.1 logs the version
       on `startup: listening` (a proof for `shipped`); close #192.
+
+91. **OTLP trace export (#193, P3) — owner's decision.** No trace
+    collector on the platform: none in the component registry, and
+    ironprom takes OTLP metrics only. Asked on #193: (a) close as not
+    wanted until a collector exists (recommended) or (b) build
+    `--otlp-endpoint` anyway. Waiting on the owner (`wait-owner`).
