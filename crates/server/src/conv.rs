@@ -122,10 +122,11 @@ pub fn request_op_from_proto(op: &pb::RequestOp) -> Result<TxnOp, Status> {
     }
 }
 
+/// A txn's compares, its success branch and its failure branch.
+pub type TxnParts = (Vec<Compare>, Vec<TxnOp>, Vec<TxnOp>);
+
 /// A `TxnRequest`'s compares and its two branches, converted.
-pub fn txn_request_parts(
-    req: &pb::TxnRequest,
-) -> Result<(Vec<Compare>, Vec<TxnOp>, Vec<TxnOp>), Status> {
+pub fn txn_request_parts(req: &pb::TxnRequest) -> Result<TxnParts, Status> {
     let compares = req.compare.iter().map(compare_from_proto).collect::<Result<_, _>>()?;
     let success = req.success.iter().map(request_op_from_proto).collect::<Result<_, _>>()?;
     let failure = req.failure.iter().map(request_op_from_proto).collect::<Result<_, _>>()?;

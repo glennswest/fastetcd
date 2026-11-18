@@ -410,7 +410,7 @@ impl SnapshotChunks {
         let blob = std::mem::take(&mut self.buf);
         self.sent += blob.len() as u64;
         let resp = pb::SnapshotResponse {
-            header: Some(self.header.clone()),
+            header: Some(self.header),
             remaining_bytes: self.total.saturating_sub(self.sent),
             blob,
             version: ETCD_COMPAT_VERSION.to_string(),

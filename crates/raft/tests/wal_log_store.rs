@@ -722,7 +722,7 @@ async fn a_stuck_fsync_or_checkpoint_says_which_it_is() {
     fastetcd_raft::wal_log_store::spawn_checkpointer(log.clone(), sm.applied_index(), Default::default());
     raft.client_write(put(2)).await.unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !stats.checkpoint_inflight().is_some_and(|d| d >= Duration::from_secs(1)) {
+    while stats.checkpoint_inflight().is_none_or(|d| d < Duration::from_secs(1)) {
         assert!(tokio::time::Instant::now() < deadline, "no checkpoint in flight");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

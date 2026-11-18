@@ -879,12 +879,12 @@ async fn list_revision_matches_contents_and_watch_continues_it() {
 
     // LIST -> WATCH from rv+1 on the same member: together they hold
     // every key. Take a spread of LISTs from each member.
-    for r in 0..2 {
+    for (r, endpoint) in endpoints.iter().enumerate() {
         let mine: Vec<_> = lists.iter().filter(|l| l.0 == r).collect();
         for l in mine.iter().step_by((mine.len() / 4).max(1)) {
             let (_, rev, listed) = l;
             let expected = all_keys.len() - listed.len();
-            let mut watch = WatchClient::connect(endpoints[r].clone()).await.unwrap();
+            let mut watch = WatchClient::connect(endpoint.clone()).await.unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             tx.send(pb::WatchRequest {
                 request_union: Some(pb::watch_request::RequestUnion::CreateRequest(

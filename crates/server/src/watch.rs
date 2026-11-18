@@ -869,7 +869,7 @@ mod tests {
         for (n, p) in parts.iter().enumerate() {
             assert_eq!(p.fragment, n + 1 < parts.len(), "part {n}");
             assert!(p.encoded_len() < max, "part {n}: {}", p.encoded_len());
-            assert_eq!((p.watch_id, p.header.clone()), (whole.watch_id, whole.header.clone()));
+            assert_eq!((p.watch_id, p.header), (whole.watch_id, whole.header));
         }
         let joined: Vec<_> = parts.into_iter().flat_map(|p| p.events).collect();
         assert_eq!(joined, events);

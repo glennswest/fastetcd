@@ -185,7 +185,8 @@ async fn preserve_revisions_keeps_every_generation() {
         Arc::new(RedbEngine::open(target.join("fastetcd.redb")).unwrap());
     let mvcc = MvccStore::open(engine).await.unwrap();
     // (revision, Some((value, create_revision, version)) or None when deleted)
-    let want: [(i64, Option<(&[u8], i64, i64)>); 9] = [
+    type Want = (i64, Option<(&'static [u8], i64, i64)>);
+    let want: [Want; 9] = [
         (1, Some((b"a1", 1, 1))),
         (2, Some((b"a2", 1, 2))),
         (3, None),

@@ -614,7 +614,7 @@ pub async fn rewrite_if_due(state: &ServerState, cfg: &SpaceConfig) -> anyhow::R
     let stats = guard.refresh(state).await;
     let in_use = guard.in_use_bytes(&engine, IN_USE_MAX_AGE).await;
     let file = engine.size_on_disk().await?;
-    let free_pct = if file == 0 { 0 } else { file.saturating_sub(in_use) * 100 / file };
+    let free_pct = (file.saturating_sub(in_use) * 100).checked_div(file).unwrap_or(0);
     if let Err(why) = rewrite_decision(
         &cfg.rewrite,
         cfg.high_water_percent,

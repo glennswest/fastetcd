@@ -89,6 +89,8 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// Takes `bincode::Error` (a `Box`) as is, to be passed to `map_err`.
+#[allow(clippy::boxed_local)]
 fn bincode_io(e: bincode::Error) -> io::Error {
     match *e {
         bincode::ErrorKind::Io(io) => io,
@@ -281,7 +283,7 @@ pub fn list(dir: &Path) -> Vec<PathBuf> {
             Some((ms, e.path()))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
     found.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -445,7 +447,7 @@ pub fn due(
     // A membership change is backed up at once: whether a node may
     // restore itself depends on whether it was alone (fastetcd#37).
     members != last.members
-        || since.map_or(true, |s| s >= cfg.interval)
+        || since.is_none_or(|s| s >= cfg.interval)
         || (cfg.every_revisions > 0 && revision - last.revision >= cfg.every_revisions)
 }
 

@@ -981,12 +981,15 @@ async fn move_leader(node: &Node, target: NodeId) -> Result<(), Status> {
         .map(|_| ())
 }
 
+/// What each writer acknowledged (key -> value), and the writer tasks.
+type Writers = (Arc<Mutex<BTreeMap<String, u64>>>, Vec<tokio::task::JoinHandle<()>>);
+
 /// Writers that keep putting through every member, tolerating errors
 /// (leadership moves under them), recording what was acknowledged.
 fn spawn_tolerant_writers(
     clients: Vec<String>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-) -> (Arc<Mutex<BTreeMap<String, u64>>>, Vec<tokio::task::JoinHandle<()>>) {
+) -> Writers {
     let acked: Arc<Mutex<BTreeMap<String, u64>>> = Arc::default();
     let mut tasks = Vec::new();
     for (w, url) in clients.into_iter().cycle().take(6).enumerate() {

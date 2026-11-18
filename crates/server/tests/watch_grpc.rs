@@ -395,7 +395,7 @@ async fn a_fragmenting_watcher_gets_large_responses_in_parts() {
     // Collect until the fragmenting watcher's last part and the whole one.
     let mut parts = Vec::new();
     let mut whole_resp = None;
-    while whole_resp.is_none() || parts.last().map_or(true, |p: &pb::WatchResponse| p.fragment) {
+    while whole_resp.is_none() || parts.last().is_none_or(|p: &pb::WatchResponse| p.fragment) {
         let r = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("watch responses within 10 s")
@@ -439,7 +439,7 @@ async fn a_fragmenting_watcher_gets_large_responses_in_parts() {
     let ack = stream.next().await.unwrap().unwrap();
     assert!(ack.created);
     let mut replayed = Vec::new();
-    while replayed.last().map_or(true, |p: &pb::WatchResponse| p.fragment) {
+    while replayed.last().is_none_or(|p: &pb::WatchResponse| p.fragment) {
         let r = tokio::time::timeout(Duration::from_secs(10), stream.next())
             .await
             .expect("replay within 10 s")
