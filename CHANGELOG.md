@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-18
-- **fix:** `cargo clippy --all-targets -D warnings` is clean again (#196): an unused `skip` outcome in the test container crate removed, a type alias for `chosen_mutations`'s boxed future, `bincode_io` keeps its boxed argument for `map_err`.
+- **fix:** `cargo clippy --all-targets -D warnings` is clean again (#196): an unused `skip` outcome and `Clients` import in the test container crate removed, type aliases for the bolt reader's visitors, a type alias for `chosen_mutations`'s boxed future, `bincode_io` keeps its boxed argument for `map_err`.
 - **fix:** `fastetcd-migrate --preserve-revisions` imports every generation of a key (#191). A key deleted and put again lost its live generation: only the history up to its last tombstone came across, so the key was missing after the import. `BulkKey` is now one revision-ordered record list per key (tombstones included) and `bulk_load_records` closes a generation at each tombstone.
 - **BREAKING (gRPC surface):** `Maintenance/Downgrade` is no longer served (#191): it answers as an unknown method does (`Unimplemented`, empty message, for any caller, no auth check), and the gateway's `/v3/maintenance/downgrade` is gone (JSON 404). It used to answer `Unimplemented` with a message to root. Serving it in fastetcd's terms is #192.
 - **docs:** No stub markers left (#191): 00-design says only what the code does (`--log-level` works since #54, token expiry since #46; OTLP is #193, a dedicated apply thread #194), 02-testing's robustness-suite adapter is #195, README/03-deploy say what is not served.

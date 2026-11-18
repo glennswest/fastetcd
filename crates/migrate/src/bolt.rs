@@ -27,6 +27,11 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
+/// Called with `(key, value, is_bucket)` for each entry of a page.
+type EntryVisitor<'f> = dyn FnMut(&[u8], &[u8], bool) -> anyhow::Result<()> + 'f;
+/// Called with `(key, value)` for each key of a bucket.
+pub type KvVisitor<'f> = dyn FnMut(&[u8], &[u8]) -> anyhow::Result<()> + 'f;
+
 const MAGIC: u32 = 0xED0C_DAED;
 const VERSION: u32 = 2;
 const PAGE_HEADER: usize = 16;
@@ -125,7 +130,7 @@ impl BoltFile {
     fn walk(
         &self,
         p: &[u8],
-        f: &mut dyn FnMut(&[u8], &[u8], bool) -> anyhow::Result<()>,
+        f: &mut EntryVisitor<'_>,
     ) -> anyhow::Result<()> {
         let (flags, count) = (u16_at(p, 8), u16_at(p, 10) as usize);
         for i in 0..count {
@@ -169,7 +174,7 @@ impl BoltFile {
     pub fn for_each(
         &self,
         b: &Bucket,
-        f: &mut dyn FnMut(&[u8], &[u8]) -> anyhow::Result<()>,
+        f: &mut KvVisitor<'_>,
     ) -> anyhow::Result<()> {
         self.walk(&self.bucket_page(b)?, &mut |k, v, is_bucket| if is_bucket { Ok(()) } else { f(k, v) })
     }

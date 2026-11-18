@@ -12,7 +12,7 @@ use fastetcd_proto::mvccpb::event::EventType;
 use tokio::time::{sleep, Instant};
 use tonic::Code;
 
-use crate::client::{next_events, Clients};
+use crate::client::next_events;
 use crate::env::Env;
 use crate::member::{Cluster, Member};
 use crate::report::{fail, pass, Outcome, Report};
