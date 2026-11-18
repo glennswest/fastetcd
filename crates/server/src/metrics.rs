@@ -48,6 +48,10 @@
 //!     through raft because a member is older than 1.23 (#92);
 //!     `fastetcd_lease_promotions_total`: terms it gave every lease a
 //!     full TTL in, on becoming leader
+//!   - `fastetcd_runtime_schedule_delay_seconds` (histogram) and
+//!     `fastetcd_runtime_schedule_delay_max_seconds`: how long a task
+//!     spawned on the shared runtime waited for its first poll, sampled
+//!     every 10 ms (#194; `runtime_probe.rs`)
 //!   - `fastetcd_watch_resyncs_total` / `fastetcd_watch_lag_cancels_total`
 //!     (counters, process-wide): watchers caught up from history, and
 //!     watchers cancelled because that history was gone (#16)
@@ -157,6 +161,9 @@ pub struct Metrics {
     pub rewrite_last_after_bytes: Gauge,
     /// etcd's `process_*` (fastetcd#84).
     pub process: crate::process_metrics::ProcessMetrics,
+    /// The shared runtime's scheduling delay (#194); its thread is
+    /// started by the binary (`ScheduleProbe::spawn`).
+    pub runtime: Arc<crate::runtime_probe::ScheduleProbe>,
     /// Last leader id we saw, so leader_changes_total tracks
     /// monotonic edges.
     last_leader: AtomicU64,
@@ -243,6 +250,7 @@ impl Metrics {
             rewrite_last_before_bytes: Gauge::default(),
             rewrite_last_after_bytes: Gauge::default(),
             process: Default::default(),
+            runtime: Default::default(),
             last_leader: AtomicU64::new(0),
         });
         {
@@ -469,6 +477,7 @@ impl Metrics {
             m.cache.register(&mut reg);
             m.wal.register(&mut reg);
             m.process.register(&mut reg);
+            m.runtime.register(&mut reg);
         }
         m
     }

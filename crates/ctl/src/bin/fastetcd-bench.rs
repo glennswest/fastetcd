@@ -49,6 +49,60 @@ struct Args {
     /// to back).
     #[arg(long, default_value_t = 2000)]
     idle_ms: u64,
+    /// put: watch streams on the key prefix, each draining every event,
+    /// opened before the puts start (fastetcd#194: write latency under a
+    /// busy watch load). Spread over a connection per 100 streams.
+    #[arg(long, default_value_t = 0)]
+    watchers: usize,
+}
+
+/// `n` watch streams on `prefix`, each counting the events it receives
+/// into `events`. Returns once every stream is created.
+async fn start_watchers(
+    endpoint: &str,
+    prefix: &[u8],
+    n: usize,
+    events: Arc<std::sync::atomic::AtomicU64>,
+) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
+    use fastetcd_proto::etcdserverpb::watch_client::WatchClient;
+    use tokio_stream::StreamExt;
+
+    let mut range_end = prefix.to_vec();
+    if let Some(last) = range_end.last_mut() {
+        *last += 1;
+    }
+    let mut clients = Vec::new();
+    for _ in 0..n.div_ceil(100) {
+        clients.push(WatchClient::connect(endpoint.to_string()).await?);
+    }
+    let mut tasks = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut client = clients[i / 100].clone();
+        let create = pb::WatchRequest {
+            request_union: Some(pb::watch_request::RequestUnion::CreateRequest(pb::WatchCreateRequest {
+                key: prefix.to_vec(),
+                range_end: range_end.clone(),
+                ..Default::default()
+            })),
+        };
+        // The request stream stays open (an ended one cancels the watch).
+        let (tx, rx) = tokio::sync::mpsc::channel::<pb::WatchRequest>(1);
+        tx.send(create).await?;
+        let mut stream =
+            client.watch(tokio_stream::wrappers::ReceiverStream::new(rx)).await?.into_inner();
+        match stream.next().await {
+            Some(Ok(r)) if r.created => {}
+            other => anyhow::bail!("watch {i} not created: {other:?}"),
+        }
+        let events = events.clone();
+        tasks.push(tokio::spawn(async move {
+            let _keep_open = tx;
+            while let Some(Ok(r)) = stream.next().await {
+                events.fetch_add(r.events.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
+    }
+    Ok(tasks)
 }
 
 /// Percentiles of a latency sample in microseconds, as a line in ms.
@@ -160,6 +214,16 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
     // (when the write started, its latency in µs), for the stall list.
     let writes: Arc<Mutex<Vec<(std::time::SystemTime, u64)>>> = Arc::default();
     let errors: Arc<Errors> = Arc::default();
+    let events: Arc<std::sync::atomic::AtomicU64> = Arc::default();
+    let watchers = if args.mode == "put" && args.watchers > 0 {
+        let w = start_watchers(&args.endpoint, args.key_prefix.as_bytes(), args.watchers, events.clone())
+            .await?;
+        println!("watchers: {} streams on {:?} created", w.len(), args.key_prefix);
+        w
+    } else {
+        Vec::new()
+    };
+    let start = Instant::now();
     let mut handles = Vec::new();
     for w in 0..args.conns {
         let (endpoint, value, stop, writes, errors) =
@@ -384,6 +448,25 @@ async fn keepalive(args: &Args) -> anyhow::Result<()> {
     println!("mode=keepalive conns={} ops={}", args.conns, lat.len());
     println!("  throughput: {:.0} ops/sec", lat.len() as f64 / elapsed.as_secs_f64());
     println!("  latency: {}", summary(lat));
+    if !watchers.is_empty() {
+        // Every watcher sees every put: wait (10 s at most) for them all.
+        let want = (n * watchers.len()) as u64;
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let ordering = std::sync::atomic::Ordering::Relaxed;
+        while events.load(ordering) < want && Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        println!(
+            "  watchers: {} streams, {} of {} events delivered, {:.1}s after the last put",
+            watchers.len(),
+            events.load(ordering),
+            want,
+            start.elapsed().saturating_sub(elapsed).as_secs_f64()
+        );
+        for w in watchers {
+            w.abort();
+        }
+    }
     if let Some(e) = errors.line() {
         println!("{e}");
     }
@@ -529,7 +612,6 @@ async fn main() -> anyhow::Result<()> {
 
     let per = args.total / args.conns;
     let lat: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::with_capacity(args.total)));
-    let start = Instant::now();
 
     if !matches!(args.mode.as_str(), "put" | "get-lin" | "get-ser") {
         anyhow::bail!("unknown mode {}", args.mode);

@@ -674,6 +674,7 @@ metrics below give them live.
 | `fastetcd_mvcc_get_duration_seconds{cache}` | histogram | The store's time for each single-key Range (after the read barrier): `cache="hit"` read nothing from the engine, `miss` did. |
 | `process_resident_memory_bytes` / `process_virtual_memory_bytes` | gauge | The process's RSS and virtual size (since 1.24, #84; etcd's names, from `/proc/self/status`). RSS flat over a long run, near the budgets above, is the check. |
 | `process_cpu_seconds_total`, `process_start_time_seconds`, `process_open_fds`, `process_max_fds` | counter / gauge | etcd's other process metrics. |
+| `fastetcd_runtime_schedule_delay_seconds` / `fastetcd_runtime_schedule_delay_max_seconds` | histogram / gauge | How long a task woken on the shared tokio runtime waits before it runs, sampled every 10 ms by a thread of its own (since 1.40, #194). The raft apply task, the proposer, watch fan-out and the gRPC streams share that runtime; a tail here that is a real part of the write latency is a busy runtime, not the disk. |
 
 On server3 (X9 blade, spinning disk, fastetcd 1.18) over a 7.5 h day the
 value cache answered 99.8% of lookups; 99.5% of hits took under 1 ms in

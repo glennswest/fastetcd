@@ -1495,7 +1495,12 @@ async fn main() -> anyhow::Result<()> {
     // Metrics endpoint (Prometheus /metrics).
     // Bound at the start (#176); the full routes answer from here.
     if let Some(early) = &early_metrics {
-        early.install(fastetcd_server::metrics::Metrics::new(), server_state.clone()).await;
+        let metrics = fastetcd_server::metrics::Metrics::new();
+        // The shared runtime's scheduling delay (#194).
+        if let Err(e) = metrics.runtime.spawn(tokio::runtime::Handle::current()) {
+            tracing::warn!(error = %e, "could not start the runtime scheduling probe");
+        }
+        early.install(metrics, server_state.clone()).await;
     }
 
     // Build peer URLs / client URLs for Member representation.
