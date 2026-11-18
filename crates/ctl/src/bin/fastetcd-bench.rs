@@ -214,16 +214,6 @@ async fn read_under_load(args: &Args) -> anyhow::Result<()> {
     // (when the write started, its latency in µs), for the stall list.
     let writes: Arc<Mutex<Vec<(std::time::SystemTime, u64)>>> = Arc::default();
     let errors: Arc<Errors> = Arc::default();
-    let events: Arc<std::sync::atomic::AtomicU64> = Arc::default();
-    let watchers = if args.mode == "put" && args.watchers > 0 {
-        let w = start_watchers(&args.endpoint, args.key_prefix.as_bytes(), args.watchers, events.clone())
-            .await?;
-        println!("watchers: {} streams on {:?} created", w.len(), args.key_prefix);
-        w
-    } else {
-        Vec::new()
-    };
-    let start = Instant::now();
     let mut handles = Vec::new();
     for w in 0..args.conns {
         let (endpoint, value, stop, writes, errors) =
@@ -598,6 +588,16 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("unknown mode {}", args.mode);
     }
     let errors: Arc<Errors> = Arc::default();
+    let events: Arc<std::sync::atomic::AtomicU64> = Arc::default();
+    let watchers = if args.mode == "put" && args.watchers > 0 {
+        let w = start_watchers(&args.endpoint, args.key_prefix.as_bytes(), args.watchers, events.clone())
+            .await?;
+        println!("watchers: {} streams on {:?} created", w.len(), args.key_prefix);
+        w
+    } else {
+        Vec::new()
+    };
+    let start = Instant::now();
     let mut handles = Vec::new();
     for w in 0..args.conns {
         let (args, value, lat, errors) = (args.clone(), value.clone(), lat.clone(), errors.clone());
