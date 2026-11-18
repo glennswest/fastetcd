@@ -265,6 +265,7 @@ impl Startup {
         self.phase("listening");
         tracing::info!(
             target: "fastetcd::startup",
+            version = env!("CARGO_PKG_VERSION"),
             since_start_ms = self.elapsed().as_millis() as u64,
             phases = %self.summary(),
             "startup: listening"

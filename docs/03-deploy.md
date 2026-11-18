@@ -530,7 +530,7 @@ began), in this order:
 | `raft_start` | Starting raft (and, for a new cluster, initializing it). |
 | `listening` | Binding the client and peer ports. |
 
-Then `startup: listening` with every phase on one line (`phases=data_file_open=12ms
+Then `startup: listening` with the fastetcd `version` (since 1.39.1) and every phase on one line (`phases=data_file_open=12ms
 index_load=3ms ...`), and, when this member first knows a leader (what
 `/readyz` waits for), `phase=raft_ready` with `since_start_ms`, the
 `leader`, `term` and `is_leader`. A start that answers probes late says

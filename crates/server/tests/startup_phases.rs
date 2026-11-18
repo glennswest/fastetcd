@@ -57,6 +57,8 @@ fn check_phases(log: &str, tail: &str) {
     for phase in PHASES {
         assert!(summary.contains(&format!("{phase}=")), "summary lacks {phase}: {summary}");
     }
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(summary.contains(version), "summary lacks the version {version}: {summary}");
     assert!(log.contains("raft_ready"), "no raft_ready line:\n{tail}");
 }
 
