@@ -1476,7 +1476,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     Election" and "hyper" notes. Nothing promised that the code lacks.
 
 
-89. **No stubs (#191, P-1) — in progress.** Every stub marker
+89. **No stubs (#191, P-1) — done.** Every stub marker
     marker the master's sweep found (code and docs, tests and vendor/
     excluded) is implemented or removed from the surface, with the gap
     an issue:
@@ -1487,4 +1487,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] 00-design: only what the code does (OTLP #193, apply thread
       #194, `--log-level`/#54 and token expiry/#46 already done);
       02-testing robustness adapter #195; README/03-deploy wording.
-    - [ ] sc-build passes; close #191 with the grep proof.
+    - [x] sc-build: all tests passed on 689be3a; on 5304d7d all but
+      lease_clock_step, which fails on main before #191 too (#198, P1).
+      clippy -D warnings clean on rust 1.95 (#196, #197). Gaps
+      #192–#195 at P3.
