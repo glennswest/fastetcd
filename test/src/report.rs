@@ -11,8 +11,6 @@ use std::time::Instant;
 pub enum Outcome {
     Pass(String),
     Fail(String),
-    /// Not run, and why. Never a pass.
-    Skip(String),
 }
 
 pub fn pass(d: impl Into<String>) -> Outcome {
@@ -20,9 +18,6 @@ pub fn pass(d: impl Into<String>) -> Outcome {
 }
 pub fn fail(d: impl Into<String>) -> Outcome {
     Outcome::Fail(d.into())
-}
-pub fn skip(d: impl Into<String>) -> Outcome {
-    Outcome::Skip(d.into())
 }
 
 /// A test body's error is the test failing (fastetcd did not do what it
@@ -72,7 +67,6 @@ impl Report {
         match o {
             Outcome::Pass(d) => self.line(test, "pass", ms, &d, None),
             Outcome::Fail(d) => self.line(test, "fail", ms, &d, None),
-            Outcome::Skip(d) => self.line(test, "skip", ms, &d, None),
         }
     }
 

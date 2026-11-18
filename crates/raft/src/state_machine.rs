@@ -542,7 +542,9 @@ struct WrittenSnapshot {
 }
 
 /// Unwrap bincode's error so an I/O failure keeps its OS error code:
-/// the store recognises a full volume by it (ENOSPC).
+/// the store recognises a full volume by it (ENOSPC). It takes
+/// `bincode::Error` (a `Box`) as is, to be passed to `map_err`.
+#[allow(clippy::boxed_local)]
 fn bincode_io(e: bincode::Error) -> std::io::Error {
     match *e {
         bincode::ErrorKind::Io(io) => io,

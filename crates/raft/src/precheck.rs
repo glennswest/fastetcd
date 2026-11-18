@@ -144,6 +144,9 @@ fn any_mutation(ops: &[TxnOp], pred: &dyn Fn(&Mutation) -> bool) -> bool {
     })
 }
 
+/// What [`chosen_mutations`] returns: boxed, as it recurses into nested txns.
+type ChosenMutations<'a> = Pin<Box<dyn Future<Output = Result<Vec<&'a Mutation>, String>> + Send + 'a>>;
+
 /// The mutations a txn would run now, in order: the branch its compares
 /// choose, and inside it the branches its nested txns' compares choose
 /// (#56). Every compare is judged on the state now, as the apply judges
@@ -153,7 +156,7 @@ fn chosen_mutations<'a>(
     compares: &'a [Compare],
     success: &'a [TxnOp],
     failure: &'a [TxnOp],
-) -> Pin<Box<dyn Future<Output = Result<Vec<&'a Mutation>, String>> + Send + 'a>> {
+) -> ChosenMutations<'a> {
     Box::pin(async move {
         let ops = if mvcc.txn_would_succeed(compares).await.map_err(|e| e.to_string())? {
             success
