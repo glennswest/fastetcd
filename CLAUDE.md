@@ -10,10 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.38.0`** — The raft log is bounded in bytes and a NOSPACE alarm clears
-once keys are deleted (#182, P0): `--wal-max-bytes`, occupancy in allocated
-blocks, the reclaim purges its log and compacts to the current revision
-under the alarm. Live data of up to about 40% of the volume fits.
+**`1.39.0`** — `etcdctl downgrade validate <fastetcd version>` says whether
+the cluster may go back to it, naming each version floor that refuses it
+(#192); enable/cancel answer Unimplemented (no cluster version).
 
 ## Work plan and history
 

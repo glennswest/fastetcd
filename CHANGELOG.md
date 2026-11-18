@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-18
-- **feat:** `Maintenance/Downgrade` is served in fastetcd's terms (#192). `etcdctl downgrade validate <fastetcd version>` (`1.33`, `1.33.0`, `v1.33.0`) says whether the cluster may go back to it: every version floor above the target that applies refuses it (`FailedPrecondition`, naming each and the lowest version allowed) — 1.10 once the log has batched, 1.12 (raft log in `wal/`), 1.22 (a nested txn's use is not recorded, #134), 1.23 (RAM keep-alives), 1.33 once the cluster id is replicated. An etcd version (`3.5`) or a target not older than the member is `InvalidArgument`; a pass answers with the member's fastetcd version. `enable`/`cancel` answer `Unimplemented` with why (no cluster version to lower). Root only while auth is on; the gateway's `/v3/maintenance/downgrade` is back. 03-deploy § Downgrades.
 - **fix:** `cargo clippy --all-targets -D warnings` is clean again (#196): an unused `skip` outcome and `Clients` import in the test container crate removed, type aliases for the bolt reader's visitors, and the lints rust 1.95's clippy added (is_none_or, Copy clones, checked_div, sort_by_key, type aliases), a type alias for `chosen_mutations`'s boxed future, `bincode_io` keeps its boxed argument for `map_err`.
 - **fix:** `fastetcd-migrate --preserve-revisions` imports every generation of a key (#191). A key deleted and put again lost its live generation: only the history up to its last tombstone came across, so the key was missing after the import. `BulkKey` is now one revision-ordered record list per key (tombstones included) and `bulk_load_records` closes a generation at each tombstone.
 - **BREAKING (gRPC surface):** `Maintenance/Downgrade` is no longer served (#191): it answers as an unknown method does (`Unimplemented`, empty message, for any caller, no auth check), and the gateway's `/v3/maintenance/downgrade` is gone (JSON 404). It used to answer `Unimplemented` with a message to root. Serving it in fastetcd's terms is #192.
@@ -28,6 +27,11 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.39.0] — 2026-11-18
+
+### Added
+- **feat:** `Maintenance/Downgrade` is served in fastetcd's terms (#192). `etcdctl downgrade validate <fastetcd version>` (`1.33`, `1.33.0`, `v1.33.0`) says whether the cluster may go back to it: every version floor above the target that applies refuses it (`FailedPrecondition`, naming each and the lowest version allowed) — 1.10 once the log has batched, 1.12 (raft log in `wal/`), 1.22 (a nested txn's use is not recorded, #134), 1.23 (RAM keep-alives), 1.33 once the cluster id is replicated. An etcd version (`3.5`) or a target not older than the member is `InvalidArgument`; a pass answers with the member's fastetcd version. `enable`/`cancel` answer `Unimplemented` with why (no cluster version to lower). Root only while auth is on; the gateway's `/v3/maintenance/downgrade` is back. 03-deploy § Downgrades.
 
 ## [v1.38.0] — 2026-11-04
 
