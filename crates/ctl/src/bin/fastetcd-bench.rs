@@ -448,25 +448,6 @@ async fn keepalive(args: &Args) -> anyhow::Result<()> {
     println!("mode=keepalive conns={} ops={}", args.conns, lat.len());
     println!("  throughput: {:.0} ops/sec", lat.len() as f64 / elapsed.as_secs_f64());
     println!("  latency: {}", summary(lat));
-    if !watchers.is_empty() {
-        // Every watcher sees every put: wait (10 s at most) for them all.
-        let want = (n * watchers.len()) as u64;
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        let ordering = std::sync::atomic::Ordering::Relaxed;
-        while events.load(ordering) < want && Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        println!(
-            "  watchers: {} streams, {} of {} events delivered, {:.1}s after the last put",
-            watchers.len(),
-            events.load(ordering),
-            want,
-            start.elapsed().saturating_sub(elapsed).as_secs_f64()
-        );
-        for w in watchers {
-            w.abort();
-        }
-    }
     if let Some(e) = errors.line() {
         println!("{e}");
     }
@@ -675,6 +656,25 @@ async fn main() -> anyhow::Result<()> {
         pct(0.99),
         l[n - 1] as f64 / 1000.0
     );
+    if !watchers.is_empty() {
+        // Every watcher sees every put: wait (10 s at most) for them all.
+        let want = (n * watchers.len()) as u64;
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let ordering = std::sync::atomic::Ordering::Relaxed;
+        while events.load(ordering) < want && Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        println!(
+            "  watchers: {} streams, {} of {} events delivered, {:.1}s after the last put",
+            watchers.len(),
+            events.load(ordering),
+            want,
+            start.elapsed().saturating_sub(elapsed).as_secs_f64()
+        );
+        for w in watchers {
+            w.abort();
+        }
+    }
     if let Some(e) = errors.line() {
         println!("{e}");
     }
