@@ -209,6 +209,20 @@ async fn status_members_alarms_and_the_keyspace_over_json() {
     let leases = env.ok("/v3/lease/leases", json!({}), None).await;
     assert_eq!(leases["leases"][0]["ID"], id);
 
+    // Downgrade (#192): VALIDATE a fastetcd version; refusals carry the
+    // gRPC code (9 FailedPrecondition, 3 InvalidArgument, 12 Unimplemented).
+    let v = env.ok("/v3/maintenance/downgrade", json!({"action": "VALIDATE", "version": "1.33"}), None).await;
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"), "{v}");
+    for (body, code) in [
+        (json!({"action": "VALIDATE", "version": "1.22"}), 9),
+        (json!({"action": "VALIDATE", "version": "3.5"}), 3),
+        (json!({"action": "ENABLE", "version": "1.33"}), 12),
+        (json!({"action": "CANCEL"}), 12),
+    ] {
+        let (_, err) = env.post("/v3/maintenance/downgrade", body.clone(), None).await;
+        assert_eq!(err["code"], code, "{body}: {err}");
+    }
+
     // Bad input and bad routes.
     let resp = env.http.post(format!("{}/v3/kv/range", env.base)).body("{nope").send().await.unwrap();
     assert_eq!(resp.status(), 400);

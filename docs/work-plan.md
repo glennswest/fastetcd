@@ -1491,3 +1491,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       lease_clock_step, which fails on main before #191 too (#198, P1).
       clippy -D warnings clean on rust 1.95 (#196, #197). Gaps
       #192–#195 at P3.
+
+90. **Downgrade VALIDATE (#192, P3).** `Maintenance/Downgrade` in
+    fastetcd's terms (`crate::downgrade`): VALIDATE a fastetcd version
+    against the floors (1.10 batched if used, 1.12 WAL, 1.22 nested txn —
+    not recorded, #134 — 1.23 RAM keep-alives, 1.33 replicated cluster id
+    if replicated); `FailedPrecondition` naming each refusing floor and the
+    lowest allowed; etcd versions (3.x) and targets not older than this
+    member `InvalidArgument`. ENABLE/CANCEL `Unimplemented` with why
+    (the issue proposed them only if wanted). Root only; gateway route back.
+    - [x] downgrade.rs + unit tests; maintenance handler; gateway route.
+    - [x] tests: authz_admin (root only, validate pass/refuse), gateway JSON.
+    - [x] docs: 03-deploy § Downgrades (floor table), 00-design, README, deck.
+    - [ ] sc-build; release 1.39.0; close #192.

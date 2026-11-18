@@ -380,7 +380,7 @@ user name is empty`), and one with an unknown or expired token
 | Service | Root only | Any logged-in user |
 |---|---|---|
 | Auth | every change (`auth enable`/`disable`, user and role add / delete / grant / revoke, **any** password change, including your own), `AuthStatus`, `UserList`, `RoleList`, `UserGet` of another user, `RoleGet` of a role you do not hold | `UserGet` of yourself, `RoleGet` of a role you hold; `Authenticate` needs no login |
-| Maintenance | `Snapshot` (the whole keyspace), `Defragment`, `Hash`, `HashKV`, `MoveLeader`, `Alarm` activate / disarm | `Status`, `Alarm` list |
+| Maintenance | `Snapshot` (the whole keyspace), `Defragment`, `Hash`, `HashKV`, `MoveLeader`, `Downgrade`, `Alarm` activate / disarm | `Status`, `Alarm` list |
 | Cluster | `MemberAdd`, `MemberRemove`, `MemberUpdate`, `MemberPromote` | `MemberList` |
 | KV | none | `Compact`, as in etcd |
 | fastetcd admin | `auth members`, `auth adopt` | none |
@@ -735,15 +735,39 @@ has no leader transfer: the lease waiver is a patch to the vendored copy
 move leadership off it first: the others then do not wait out
 `--election-timeout`.
 
-**Downgrades.** etcd's `Downgrade` RPC (`etcdctl downgrade`) is not
-served: it answers as a method the server does not have (`Unimplemented`,
-for any caller) and the gateway has no `/v3/maintenance/downgrade`
-(#191; serving it in fastetcd's terms is #192). etcd lowers a cluster
-version every member applies, and fastetcd has none. Each feature that older members cannot
-read is gated on every member's version instead (below). So a downgrade
-is done as a rolling upgrade is, one member process at a time, and only
-to a version the rules below allow; each says which versions a cluster
-cannot go back below once it has used the feature (#57).
+**Downgrades.** etcd lowers a cluster version every member applies, and
+fastetcd has none. Each feature that older members cannot read is gated
+on every member's version instead (below). So a downgrade is done as a
+rolling upgrade is, one member process at a time, and only to a version
+the rules below allow; each says which versions a cluster cannot go back
+below once it has used the feature (#57).
+
+etcd's `Downgrade` RPC answers in those terms (#192; root while auth is
+on; gateway `/v3/maintenance/downgrade`):
+
+- **`etcdctl downgrade validate <version>`** takes a **fastetcd**
+  version (`1.33`, `1.33.0` or `v1.33.0`) and says whether this cluster
+  may go back to it. An etcd version (`3.5`) and a version not older
+  than the answering member's are `InvalidArgument`. Otherwise every
+  floor above the target that applies refuses it, `FailedPrecondition`
+  naming each and the lowest version allowed; a pass answers with the
+  member's fastetcd version (etcdctl prints it as the cluster version).
+  The floors, from the answering member's applied state:
+
+  | Floor | Applies | Why |
+  |---|---|---|
+  | 1.10 | once the log has batched (`fastetcd_log_has_batched` = 1) | batched entries (#77) |
+  | 1.12 | always | the raft log is in `wal/`, not in the data file (#85) |
+  | 1.22 | always | a nested txn may have been applied: not recorded (#134, #56) |
+  | 1.23 | always | keep-alives renewed in the leader's RAM (#92) |
+  | 1.33 | once the cluster id is replicated (`fastetcd_cluster_id_replicated` = 1) | the cluster-id log entry (#38): its purge on every member is not tracked, so this floor stays |
+
+  So a cluster that has run 1.33 or later validates 1.33 and up, and
+  refuses anything older. It checks the data only: it does not ask the
+  members their versions, and changes nothing.
+- **`enable` and `cancel`** answer `Unimplemented`, with why: there is no
+  cluster version to lower or to put back. Validate, then restart one
+  member at a time onto the older binary.
 
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
@@ -1026,7 +1050,7 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
   Watch: `/v3/watch`. Cluster: `/v3/cluster/member/add`, `remove`,
   `update`, `list`, `promote`. Maintenance: `/v3/maintenance/alarm`,
   `status`, `defragment`, `hash`, `hashkv`, `snapshot`,
-  `transfer-leadership`. Auth: `/v3/auth/enable`, `disable`,
+  `transfer-leadership`, `downgrade`. Auth: `/v3/auth/enable`, `disable`,
   `status`, `authenticate`, `user/{add,get,list,delete,changepw,grant,revoke}`,
   `role/{add,get,list,delete,grant,revoke}`. Lock (#64): `/v3/lock/lock`,
   `unlock`. Election: `/v3/election/campaign`, `proclaim`, `leader`,

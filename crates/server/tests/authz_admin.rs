@@ -271,14 +271,15 @@ async fn maintenance_admin_calls_are_root_only() {
     denied("Hash", m.hash(as_user(pb::HashRequest {}, t)).await);
     denied("HashKV", m.hash_kv(as_user(pb::HashKvRequest { revision: 0 }, t)).await);
     denied("MoveLeader", m.move_leader(as_user(pb::MoveLeaderRequest { target_id: 1 }, t)).await);
-    // Downgrade is not served: an unknown method's answer, for root too (#191).
-    for who in [t.as_str(), e.root.as_str()] {
-        let err = m
-            .downgrade(as_user(pb::DowngradeRequest { action: 0, version: "3.5.0".into() }, who))
-            .await
-            .unwrap_err();
-        assert_eq!((err.code(), err.message()), (Code::Unimplemented, ""), "{err:?}");
-    }
+    // Downgrade is root only, as in etcd (#192); root's VALIDATE of a
+    // version above every floor passes, with this member's version.
+    let validate = |v: &str| pb::DowngradeRequest { action: 0, version: v.into() };
+    denied("Downgrade", m.downgrade(as_user(validate("1.33"), t)).await);
+    let ok = m.downgrade(as_user(validate("1.33"), &e.root)).await.expect("root validates").into_inner();
+    assert_eq!(ok.version, env!("CARGO_PKG_VERSION"));
+    let err = m.downgrade(as_user(validate("1.22"), &e.root)).await.unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("below 1.23.0"), "{err:?}");
     denied(
         "Alarm disarm",
         m.alarm(as_user(

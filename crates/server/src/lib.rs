@@ -25,6 +25,7 @@ pub mod cluster_id;
 pub mod compaction;
 pub mod concurrency;
 pub mod conv;
+pub mod downgrade;
 pub mod etcd_errors;
 pub mod gateway;
 pub mod health;
