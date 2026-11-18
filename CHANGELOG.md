@@ -3,9 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-18
-- **docs:** A dedicated raft apply thread measured and not built (#194): under 1000 watch streams a task woken on the shared runtime waits 2 ms on average (p99 10–25 ms, max 31–37 ms), and the apply task's wait is one of several hops in a write whose p99 (95–162 ms) is set by WAL fsyncs. `docs/benchmarks/apply-thread-194.md`, 00-design § Async runtime.
-- **feat:** `fastetcd_runtime_schedule_delay_seconds` (histogram) and `fastetcd_runtime_schedule_delay_max_seconds` (#194): how long a task woken on the shared tokio runtime waits before it runs, sampled every 10 ms by a probe thread of its own (`runtime_probe.rs`). The raft apply task shares that runtime with watch fan-out and the gRPC streams; this is what a dedicated apply thread would remove.
-- **feat:** `fastetcd-bench --watchers N` (put mode): N watch streams on the key prefix, draining every event, during the puts; prints the events delivered. `tests/watch_load.sh`: put latency and the runtime's scheduling delay for 1 and 3 members, with 0, 100 and 1000 watchers (#194).
 - **docs:** #193 (OTLP trace export): there is no trace collector on the platform (the registry has none; ironprom takes OTLP metrics only). Asked the owner whether to close it as not wanted (recommended) or build `--otlp-endpoint` anyway; work plan item 91.
 - **fix:** `cargo clippy --all-targets -D warnings` is clean again (#196): an unused `skip` outcome and `Clients` import in the test container crate removed, type aliases for the bolt reader's visitors, and the lints rust 1.95's clippy added (is_none_or, Copy clones, checked_div, sort_by_key, type aliases), a type alias for `chosen_mutations`'s boxed future, `bincode_io` keeps its boxed argument for `map_err`.
 - **fix:** `fastetcd-migrate --preserve-revisions` imports every generation of a key (#191). A key deleted and put again lost its live generation: only the history up to its last tombstone came across, so the key was missing after the import. `BulkKey` is now one revision-ordered record list per key (tombstones included) and `bulk_load_records` closes a generation at each tombstone.
@@ -31,6 +28,15 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.40.0] — 2026-11-18
+
+### Added
+- **feat:** `fastetcd_runtime_schedule_delay_seconds` (histogram) and `fastetcd_runtime_schedule_delay_max_seconds` (#194): how long a task woken on the shared tokio runtime waits before it runs, sampled every 10 ms by a probe thread of its own (`runtime_probe.rs`). The raft apply task shares that runtime with watch fan-out and the gRPC streams; this is what a dedicated apply thread would remove.
+- **feat:** `fastetcd-bench --watchers N` (put mode): N watch streams on the key prefix, draining every event, during the puts; prints the events delivered. `tests/watch_load.sh`: put latency and the runtime's scheduling delay for 1 and 3 members, with 0, 100 and 1000 watchers (#194).
+
+### Documentation
+- **docs:** A dedicated raft apply thread measured and not built (#194): under 1000 watch streams a task woken on the shared runtime waits 2 ms on average (p99 10–25 ms, max 31–37 ms), and the apply task's wait is one of several hops in a write whose p99 (95–162 ms) is set by WAL fsyncs. `docs/benchmarks/apply-thread-194.md`, 00-design § Async runtime.
 
 ## [v1.39.1] — 2026-11-18
 

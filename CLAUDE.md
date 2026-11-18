@@ -10,9 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.39.1`** — `startup: listening` logs the fastetcd version. 1.39.0: `etcdctl downgrade validate <fastetcd version>` says whether
-the cluster may go back to it, naming each version floor that refuses it
-(#192); enable/cancel answer Unimplemented (no cluster version).
+**`1.40.0`** — `fastetcd_runtime_schedule_delay_seconds`: how long a task
+woken on the shared runtime waits (#194; a dedicated apply thread was
+measured and not built, docs/benchmarks/apply-thread-194.md);
+`fastetcd-bench --watchers`. 1.39: Downgrade VALIDATE (#192).
 
 ## Work plan and history
 
