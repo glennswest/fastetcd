@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-18
+- **docs:** A dedicated raft apply thread measured and not built (#194): under 1000 watch streams a task woken on the shared runtime waits 2 ms on average (p99 10–25 ms, max 31–37 ms), and the apply task's wait is one of several hops in a write whose p99 (95–162 ms) is set by WAL fsyncs. `docs/benchmarks/apply-thread-194.md`, 00-design § Async runtime.
 - **feat:** `fastetcd_runtime_schedule_delay_seconds` (histogram) and `fastetcd_runtime_schedule_delay_max_seconds` (#194): how long a task woken on the shared tokio runtime waits before it runs, sampled every 10 ms by a probe thread of its own (`runtime_probe.rs`). The raft apply task shares that runtime with watch fan-out and the gRPC streams; this is what a dedicated apply thread would remove.
 - **feat:** `fastetcd-bench --watchers N` (put mode): N watch streams on the key prefix, draining every event, during the puts; prints the events delivered. `tests/watch_load.sh`: put latency and the runtime's scheduling delay for 1 and 3 members, with 0, 100 and 1000 watchers (#194).
 - **docs:** #193 (OTLP trace export): there is no trace collector on the platform (the registry has none; ironprom takes OTLP metrics only). Asked the owner whether to close it as not wanted (recommended) or build `--otlp-endpoint` anyway; work plan item 91.

@@ -137,7 +137,13 @@ gateway. We serve the exact upstream protos; fastetcd's own services
 ### Async runtime: `tokio`
 
 Multi-threaded scheduler. The Raft apply loop runs on the shared
-runtime (a dedicated thread is #194).
+runtime, with RaftCore, the proposer, watch fan-out and the gRPC
+streams. A dedicated apply thread was measured and not built (#194,
+`docs/benchmarks/apply-thread-194.md`): under 1000 watch streams a woken
+task waits 2 ms on average (p99 10–25 ms), and the apply task's wait is
+one of several hops in a write whose p99 is set by WAL fsyncs.
+`fastetcd_runtime_schedule_delay_seconds` measures the wait on a live
+member.
 
 ### Logging: `tracing`
 
