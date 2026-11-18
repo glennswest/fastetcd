@@ -1512,3 +1512,15 @@ Tracked live in the Claude task system. Snapshot of the order:
     ironprom takes OTLP metrics only. Asked on #193: (a) close as not
     wanted until a collector exists (recommended) or (b) build
     `--otlp-endpoint` anyway. Waiting on the owner (`wait-owner`).
+
+92. **Apply loop on a dedicated thread? Measure first (#194, P3).** The
+    issue's rule: build it only if the shared runtime shows up in write
+    p99 under a busy watch/gRPC load.
+    - [ ] `fastetcd_runtime_schedule_delay_seconds`: a probe thread spawns
+      a task on the runtime every 10 ms and records the wait until it is
+      first polled (what openraft's apply task waits after its wake-up).
+    - [ ] `fastetcd-bench --watchers N` (put mode): N watch streams on the
+      prefix, draining every event, during the puts.
+    - [ ] Measure via `tests/read_latency.sh` (METRICS=1, BENCH_ARGS):
+      1 and 3 members, 0 vs 1000 watchers; write p99 vs schedule delay.
+    - [ ] Decide by the rule; record the numbers in docs/benchmarks.
