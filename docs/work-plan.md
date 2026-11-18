@@ -1528,3 +1528,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       of several in a write whose p99 (95–162 ms) is fsyncs.
       docs/benchmarks/apply-thread-194.md (sc-build e1ed85d). Release
       1.40.0 (the probe, bench --watchers); close #194 via shipped.
+
+93. **etcd robustness suite (#195, P3) — owner's decision first.** Read
+    etcd v3.6.11 tests/robustness: (1) its model starts an empty store at
+    revision 1, fastetcd at 0 (#160, undecided), so every scenario would
+    fail at its first put; (2) validation reads each member's etcd WAL
+    (`report.PersistedRequestsCluster`) for persisted requests. Plan if
+    (a): #160 for new stores, then a WAL-dump debug subcommand + harness
+    patch + shim (flags, "ready to serve client requests"), purge off,
+    faults without gofail (kill, blackhole, member replace). Asked on
+    #195: (a) fix #160 for new stores (recommended), (b) offset revisions
+    in the harness, (c) document only and close.
