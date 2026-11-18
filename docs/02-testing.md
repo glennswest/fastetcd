@@ -214,12 +214,7 @@ to start and supervise an etcd-compatible server process. Adapting
 it to fastetcd is a follow-up effort and the single highest-ROI
 correctness investment beyond the rings above.
 
-Adapter outline (not yet implemented):
-1. Provide a binary path the harness can `exec` — `fastetcd` already
-   accepts the etcd-compatible flag shape.
-2. Tell the harness our snapshot file location matches their
-   conventions (or implement a shim).
-3. Run their suite; triage failures.
+fastetcd does not run it; the adapter and its outline are #195.
 
 ### 3c. Jepsen for etcd
 

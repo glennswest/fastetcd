@@ -380,7 +380,7 @@ user name is empty`), and one with an unknown or expired token
 | Service | Root only | Any logged-in user |
 |---|---|---|
 | Auth | every change (`auth enable`/`disable`, user and role add / delete / grant / revoke, **any** password change, including your own), `AuthStatus`, `UserList`, `RoleList`, `UserGet` of another user, `RoleGet` of a role you do not hold | `UserGet` of yourself, `RoleGet` of a role you hold; `Authenticate` needs no login |
-| Maintenance | `Snapshot` (the whole keyspace), `Defragment`, `Hash`, `HashKV`, `MoveLeader`, `Downgrade`, `Alarm` activate / disarm | `Status`, `Alarm` list |
+| Maintenance | `Snapshot` (the whole keyspace), `Defragment`, `Hash`, `HashKV`, `MoveLeader`, `Alarm` activate / disarm | `Status`, `Alarm` list |
 | Cluster | `MemberAdd`, `MemberRemove`, `MemberUpdate`, `MemberPromote` | `MemberList` |
 | KV | none | `Compact`, as in etcd |
 | fastetcd admin | `auth members`, `auth adopt` | none |
@@ -735,9 +735,11 @@ has no leader transfer: the lease waiver is a patch to the vendored copy
 move leadership off it first: the others then do not wait out
 `--election-timeout`.
 
-**Downgrades.** etcd's `Downgrade` RPC (`etcdctl downgrade`) answers
-`Unimplemented`, and will: etcd lowers a cluster version every member
-applies, and fastetcd has none. Each feature that older members cannot
+**Downgrades.** etcd's `Downgrade` RPC (`etcdctl downgrade`) is not
+served: it answers as a method the server does not have (`Unimplemented`,
+for any caller) and the gateway has no `/v3/maintenance/downgrade`
+(#191; serving it in fastetcd's terms is #192). etcd lowers a cluster
+version every member applies, and fastetcd has none. Each feature that older members cannot
 read is gated on every member's version instead (below). So a downgrade
 is done as a rolling upgrade is, one member process at a time, and only
 to a version the rules below allow; each says which versions a cluster
@@ -1024,7 +1026,7 @@ curl -sN -X POST http://127.0.0.1:2379/v3/watch -d '{"create_request":{"key":"Zm
   Watch: `/v3/watch`. Cluster: `/v3/cluster/member/add`, `remove`,
   `update`, `list`, `promote`. Maintenance: `/v3/maintenance/alarm`,
   `status`, `defragment`, `hash`, `hashkv`, `snapshot`,
-  `transfer-leadership`, `downgrade`. Auth: `/v3/auth/enable`, `disable`,
+  `transfer-leadership`. Auth: `/v3/auth/enable`, `disable`,
   `status`, `authenticate`, `user/{add,get,list,delete,changepw,grant,revoke}`,
   `role/{add,get,list,delete,grant,revoke}`. Lock (#64): `/v3/lock/lock`,
   `unlock`. Election: `/v3/election/campaign`, `proclaim`, `leader`,

@@ -343,60 +343,37 @@ pub async fn migrate_snapshot_with_mode(
             (n, rev)
         }
         MigrationMode::PreserveRevisions => {
-            // For each user key, sort by revision. The last record per
-            // key is either a tombstone (closes a generation) or a put
-            // (live). Multi-generation history is collapsed: we drop
-            // everything before the final tombstone (those would be
-            // unreachable anyway) and import the final generation.
+            // For each user key, every record in revision order: a
+            // tombstone closes a generation, puts after it open the next,
+            // so a key deleted and put again keeps all its history and
+            // its live value (#191). A key is live if its last record is
+            // a put.
             let mut bulk: Vec<BulkKey> = Vec::with_capacity(history.len());
             let mut imported_count: usize = 0;
             for (key, mut records) in history {
                 records.sort_by_key(|(rev, _, _)| *rev);
-                // Find the index after the most recent tombstone.
-                let last_tomb_idx = records
-                    .iter()
-                    .rposition(|(_, _, is_tomb)| *is_tomb);
-                let (puts_recs, tomb_rec) = match last_tomb_idx {
-                    Some(i) => {
-                        // Records before the tombstone are part of
-                        // the now-closed generation. We import them
-                        // along with the tombstone so historical
-                        // reads at those revisions still work.
-                        let mut tomb_rec = records[i].1.clone();
-                        tomb_rec.deleted = true;
-                        tomb_rec.value = Vec::new();
-                        let puts: Vec<KvRecord> = records[..i]
-                            .iter()
-                            .map(|(_, rec, _)| rec.clone())
-                            .collect();
-                        // Plus any records after the tombstone — those
-                        // are a new (live) generation. For simplicity
-                        // here we drop them; multi-generation import
-                        // is a future enhancement.
-                        (puts, Some(tomb_rec))
-                    }
-                    None => {
-                        let mut puts: Vec<KvRecord> =
-                            records.iter().map(|(_, rec, _)| rec.clone()).collect();
+                let mut records: Vec<KvRecord> = records
+                    .into_iter()
+                    .map(|(_, mut rec, is_tomb)| {
+                        if is_tomb {
+                            rec.deleted = true;
+                            rec.value = Vec::new();
+                        }
+                        rec
+                    })
+                    .collect();
+                if let Some(last) = records.last_mut() {
+                    if !last.deleted {
+                        imported_count += 1;
                         // The live record keeps its lease only if the
                         // snapshot holds that lease.
-                        if let Some(last) = puts.last_mut() {
-                            last.lease = keep_lease(last.lease);
-                        }
-                        (puts, None)
+                        last.lease = keep_lease(last.lease);
                     }
-                };
-                if puts_recs.is_empty() && tomb_rec.is_none() {
+                }
+                if records.is_empty() {
                     continue;
                 }
-                if !puts_recs.is_empty() && tomb_rec.is_none() {
-                    imported_count += 1;
-                }
-                bulk.push(BulkKey {
-                    key,
-                    puts: puts_recs,
-                    tombstone: tomb_rec,
-                });
+                bulk.push(BulkKey { key, records });
             }
             mvcc.bulk_load_records(bulk, max_rev)
                 .await

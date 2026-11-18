@@ -295,18 +295,15 @@ pub enum TxnOpResult {
     },
 }
 
-/// Input for `bulk_load_records`. Each `BulkKey` carries one user
-/// key with its (revision-sorted) put records, optionally followed
-/// by a tombstone that closes the most recent generation. Multiple
-/// generations per user key are not yet supported in this Phase-1
-/// migration path — historical reads after the import will return
-/// `None` for keys whose ancient generations were tombstoned (which
-/// is also what etcd does after compaction).
+/// Input for `bulk_load_records`: one user key and every record of it,
+/// in revision order. A record with `deleted` set is a tombstone and
+/// closes the generation before it; records after it open a new one, so
+/// a key deleted and put again keeps both generations (#191). A key
+/// whose last record is a put is live.
 #[derive(Debug, Clone)]
 pub struct BulkKey {
     pub key: Vec<u8>,
-    pub puts: Vec<KvRecord>,
-    pub tombstone: Option<KvRecord>,
+    pub records: Vec<KvRecord>,
 }
 
 /// Outcome of a lease grant.
@@ -1038,56 +1035,45 @@ impl MvccStore {
 
         let mut batch = WriteBatch::new();
         for entry in per_key {
-            let BulkKey {
-                key,
-                puts,
-                tombstone,
-            } = entry;
-            if puts.is_empty() && tombstone.is_none() {
+            let BulkKey { key, records } = entry;
+            if records.is_empty() {
                 continue;
             }
-            // Build KeyIndex from the supplied (sorted) records.
+            // Build the KeyIndex from the (sorted) records: a tombstone
+            // closes the generation open before it.
             let mut idx = KeyIndex::new(key.clone());
-            let mut current_gen_revs: Vec<Revision> = Vec::new();
-            let mut current_gen_created: Option<Revision> = None;
-            for rec in &puts {
+            let mut gen_revs: Vec<Revision> = Vec::new();
+            for rec in &records {
                 let rev = Revision::new(rec.mod_revision, 0);
-                if current_gen_created.is_none() {
-                    current_gen_created = Some(rev);
-                }
-                current_gen_revs.push(rev);
                 let kv_key = make_kv_key(&key, rev);
                 let bytes = bincode::serialize(rec).map_err(|e| {
                     MvccError::Internal(format!("serialize KvRecord: {e}"))
                 })?;
                 batch.put(TABLE_KV, &kv_key, &bytes);
+                if rec.deleted {
+                    let revs = std::mem::take(&mut gen_revs);
+                    idx.generations.push(super::record::Generation {
+                        created: revs.first().copied().unwrap_or(rev),
+                        revs,
+                        tombstone: Some(rev),
+                    });
+                } else {
+                    gen_revs.push(rev);
+                }
+            }
+            if let Some(&created) = gen_revs.first() {
+                idx.generations.push(super::record::Generation {
+                    created,
+                    revs: gen_revs,
+                    tombstone: None,
+                });
             }
             // A key is on its lease only as it is now: the latest record
             // of a live key, not a historical or deleted one (#60).
-            if let (None, Some(last)) = (&tombstone, puts.last()) {
-                if last.lease != 0 {
+            if let Some(last) = records.last() {
+                if !last.deleted && last.lease != 0 {
                     batch.put(TABLE_LEASE_KEYS, &lease_key_index(last.lease, &key), &[]);
                 }
-            }
-            // Close the current generation if a tombstone is supplied.
-            if let Some(tomb) = &tombstone {
-                let rev = Revision::new(tomb.mod_revision, 0);
-                idx.generations.push(super::record::Generation {
-                    created: current_gen_created.unwrap_or(rev),
-                    revs: std::mem::take(&mut current_gen_revs),
-                    tombstone: Some(rev),
-                });
-                let kv_key = make_kv_key(&key, rev);
-                let bytes = bincode::serialize(tomb).map_err(|e| {
-                    MvccError::Internal(format!("serialize tombstone: {e}"))
-                })?;
-                batch.put(TABLE_KV, &kv_key, &bytes);
-            } else if !current_gen_revs.is_empty() {
-                idx.generations.push(super::record::Generation {
-                    created: current_gen_created.unwrap(),
-                    revs: current_gen_revs,
-                    tombstone: None,
-                });
             }
             let idx_bytes = bincode::serialize(&idx)
                 .map_err(|e| MvccError::Internal(format!("serialize KeyIndex: {e}")))?;

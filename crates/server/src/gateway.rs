@@ -152,7 +152,6 @@ pub fn router(gw: Gateway) -> Router {
     let r = unary!(r, "/v3/maintenance/hash", "Maintenance", "Hash", maintenance, Maintenance::hash, HashRequest, true);
     let r = unary!(r, "/v3/maintenance/hashkv", "Maintenance", "HashKV", maintenance, Maintenance::hash_kv, HashKvRequest, true);
     let r = unary!(r, "/v3/maintenance/transfer-leadership", "Maintenance", "MoveLeader", maintenance, Maintenance::move_leader, MoveLeaderRequest, true);
-    let r = unary!(r, "/v3/maintenance/downgrade", "Maintenance", "Downgrade", maintenance, Maintenance::downgrade, DowngradeRequest, true);
     let r = r.route("/v3/maintenance/snapshot", post(snapshot));
     // Bidi streams: the body is a sequence of JSON requests, the
     // response a line per message (see [`bidi`]).

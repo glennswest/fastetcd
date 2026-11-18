@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-18
+- **fix:** `fastetcd-migrate --preserve-revisions` imports every generation of a key (#191). A key deleted and put again lost its live generation: only the history up to its last tombstone came across, so the key was missing after the import. `BulkKey` is now one revision-ordered record list per key (tombstones included) and `bulk_load_records` closes a generation at each tombstone.
+- **BREAKING (gRPC surface):** `Maintenance/Downgrade` is no longer served (#191): it answers as an unknown method does (`Unimplemented`, empty message, for any caller, no auth check), and the gateway's `/v3/maintenance/downgrade` is gone (JSON 404). It used to answer `Unimplemented` with a message to root. Serving it in fastetcd's terms is #192.
+- **docs:** No stub markers left (#191): 00-design says only what the code does (`--log-level` works since #54, token expiry since #46; OTLP is #193, a dedicated apply thread #194), 02-testing's robustness-suite adapter is #195, README/03-deploy say what is not served.
+
 ### 2026-11-13
 - **docs:** Refreshed from the code since 2026-11-06: no code changed (the one commit is `docs/research/2026-11-10.md`), so README, docs/ and CLAUDE.md already say what the code does (v1.38.0). Nothing promised that the code lacks; the gaps are open issues (#187 MemberList client URLs only for the answering member, already documented in 01; #188, #189 dependency follow-ups).
 
@@ -1343,7 +1348,7 @@
   default, `FASTETCD_*` variable and `ETCD_*` fallback, the ports, the
   offline subcommands and the other binaries, taken from the binaries'
   own `--help`.
-- **docs:** README: current status (v1.8.0) and what is not implemented;
+- **docs:** README: current status (v1.8.0) and what it does not do;
   ports; the server is redb-only (it claimed runtime-selectable engines);
   no CI claim; real test count (271 in 34 binaries).
 - **docs:** 00-design marks design vs code (storage engines, apply-thread

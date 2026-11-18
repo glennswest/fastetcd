@@ -116,7 +116,7 @@ goal is a drop-in replacement, not a fork of behavior.
 |---|---|---|
 | Language / runtime | Go, garbage-collected | Rust, no GC |
 | Wire protocol | etcd v3 gRPC | etcd v3 gRPC (wire-compatible) |
-| v2 HTTP API | Present (deprecated) | Not implemented (out of scope) |
+| v2 HTTP API | Present (deprecated) | Not served (out of scope) |
 | Consensus | Raft (etcd-io/raft) | Raft (`openraft`) |
 | Storage engine | BoltDB (bbolt), mmap B+tree | `redb`, behind a `KvStore` trait |
 | MVCC model | Revisions, generations, leases | Same model, reimplemented |
@@ -169,8 +169,8 @@ Txn, Maintenance, Cluster, Auth, Lock, Election, and grpc.health.v1 — and is
 exercised in its test suite by the third-party `etcd-client` Rust crate,
 which shares zero code with fastetcd. Anything that speaks etcd v3
 (including `etcdctl` and Kubernetes' `kube-apiserver`) is the
-intended client. The deprecated **v2 HTTP API is not implemented**
-and is out of scope — it is gone from upstream's roadmap too.
+intended client. The deprecated **v2 HTTP API is out of scope** and
+not served — etcd 3.6 removed it too.
 
 Differences from etcd:
 

@@ -20,7 +20,9 @@
 //!   `fastetcd restore` restores (fastetcd#61).
 //! - `MoveLeader` — hands leadership to a voter once its log matches the
 //!   leader's (`fastetcd_raft::leader_transfer`, #57), with etcd's errors.
-//! - `Downgrade` — `Status::unimplemented`: no cluster version (#57).
+//! - `Downgrade` — not served: it answers as an unknown method does
+//!   (`Unimplemented`, no message), for any caller. etcd's downgrade
+//!   lowers a cluster version fastetcd does not have (#57, #192).
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -341,18 +343,12 @@ impl Maintenance for MaintenanceService {
 
     async fn downgrade(
         &self,
-        request: Request<pb::DowngradeRequest>,
+        _request: Request<pb::DowngradeRequest>,
     ) -> Result<Response<pb::DowngradeResponse>, Status> {
-        // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
-        crate::authz::require_admin(&self.state, &request).await?;
-        // fastetcd has no cluster version for etcd's downgrade to lower:
-        // mixed versions are kept safe by per-feature version gates, and
-        // which downgrades are safe is documented per release (#57).
-        Err(Status::unimplemented(
-            "Downgrade is not implemented in fastetcd: it has no cluster version to lower. \
-             Downgrade one member at a time, within the rules in docs/03-deploy.md \
-             (Multi-node: the versions a cluster cannot go back below)",
-        ))
+        // Not served (#191): the generated trait needs the method, so it
+        // answers exactly as tonic answers a method the service does not
+        // have. Rolling downgrades: docs/03-deploy.md, Downgrades (#192).
+        Err(Status::new(tonic::Code::Unimplemented, ""))
     }
 }
 

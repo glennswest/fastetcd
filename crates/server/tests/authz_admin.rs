@@ -271,10 +271,14 @@ async fn maintenance_admin_calls_are_root_only() {
     denied("Hash", m.hash(as_user(pb::HashRequest {}, t)).await);
     denied("HashKV", m.hash_kv(as_user(pb::HashKvRequest { revision: 0 }, t)).await);
     denied("MoveLeader", m.move_leader(as_user(pb::MoveLeaderRequest { target_id: 1 }, t)).await);
-    denied(
-        "Downgrade",
-        m.downgrade(as_user(pb::DowngradeRequest { action: 0, version: "3.5.0".into() }, t)).await,
-    );
+    // Downgrade is not served: an unknown method's answer, for root too (#191).
+    for who in [t.as_str(), e.root.as_str()] {
+        let err = m
+            .downgrade(as_user(pb::DowngradeRequest { action: 0, version: "3.5.0".into() }, who))
+            .await
+            .unwrap_err();
+        assert_eq!((err.code(), err.message()), (Code::Unimplemented, ""), "{err:?}");
+    }
     denied(
         "Alarm disarm",
         m.alarm(as_user(

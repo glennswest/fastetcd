@@ -1329,7 +1329,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `docs/01-configuration.md`: every flag, default, env var and
       `ETCD_*` fallback; subcommands; fastetcd-ctl, -migrate, -bench.
     - [x] README: status, ports/endpoints, how it builds and ships, what
-      is not implemented; no false engine / CI / test-count claims.
+      it does not do; no false engine / CI / test-count claims.
     - [x] 00-design: what is design and what the code does; 02-testing:
       sc-build, the test files; 03-deploy: storage engine, TLS version.
     - [x] Stale `--help` text in main.rs (advertise URLs, about text,
@@ -1475,3 +1475,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     volume (#158, #140); the deck's open-issue table; stale "no Lock/
     Election" and "hyper" notes. Nothing promised that the code lacks.
 
+
+89. **No stubs (#191, P-1) — in progress.** Every stub marker
+    marker the master's sweep found (code and docs, tests and vendor/
+    excluded) is implemented or removed from the surface, with the gap
+    an issue:
+    - [x] migrate `--preserve-revisions`: every generation of a key is
+      imported (a key deleted and put again was lost); round-trip test.
+    - [x] `Maintenance/Downgrade` not served: unknown-method answer, no
+      gateway route; serving it is #192.
+    - [x] 00-design: only what the code does (OTLP #193, apply thread
+      #194, `--log-level`/#54 and token expiry/#46 already done);
+      02-testing robustness adapter #195; README/03-deploy wording.
+    - [ ] sc-build passes; close #191 with the grep proof.

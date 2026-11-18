@@ -1,8 +1,8 @@
 # 00 — Design
 
 The architectural call for fastetcd, kept current with the code (last
-checked against v1.8.0). Where the design goes beyond what the code
-does, the text says **Design, not implemented** and names the issue.
+checked against v1.38.0). It describes what the code does; ideas not
+built are issues, not text here (#191).
 
 ## Position
 
@@ -136,14 +136,13 @@ gateway. We serve the exact upstream protos; fastetcd's own services
 
 ### Async runtime: `tokio`
 
-Multi-threaded scheduler. **Design, not implemented:** pinning the Raft
-apply loop to a dedicated thread; it runs on the shared runtime today.
+Multi-threaded scheduler. The Raft apply loop runs on the shared
+runtime (a dedicated thread is #194).
 
 ### Logging: `tracing`
 
-`tracing` to stderr, filtered by `RUST_LOG` (default `info`).
-**Design, not implemented:** OTLP export; `--log-level` is ignored
-(#54).
+`tracing` to stderr, filtered by `RUST_LOG`, else `--log-level`
+(etcd's values, #54), else `info`. No trace export (OTLP is #193).
 
 ## Layout
 
@@ -162,14 +161,14 @@ crates/
 
 ## Wire-compat surface
 
-| Service       | Implemented | Not implemented |
+| Service       | Served | Not served |
 |---------------|-------------|-----------------|
 | KV            | Range, Put, DeleteRange, Txn (nested txns too, #56), Compact | |
 | Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel, fragmented responses for a create with `fragment` (#58) | |
 | Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases (authorized over the lease's keys, #47) | |
 | Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
-| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot, MoveLeader (#57) | Downgrade (no cluster version, #57); Alarm ACTIVATE (deliberate) |
-| Auth          | all RPCs; replicated through Raft; token or client-cert CN | token expiry (#46) |
+| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot, MoveLeader (#57) | Downgrade: answers as an unknown method (no cluster version to lower, #192); Alarm ACTIVATE: refused on purpose |
+| Auth          | all RPCs; replicated through Raft; token or client-cert CN; token expiry (`--auth-token-ttl`, #46) | |
 
 The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).
 

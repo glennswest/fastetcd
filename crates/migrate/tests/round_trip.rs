@@ -150,6 +150,86 @@ async fn preserve_revisions_keeps_history_visible_via_range_at_rev() {
     }
 }
 
+/// A key deleted and put again keeps both generations: its live value,
+/// the closed generation's history and the gap between (#191).
+#[tokio::test]
+async fn preserve_revisions_keeps_every_generation() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshot.db");
+    {
+        let mut db = Bolt::open(&snap_path).expect("open rw bolt");
+        db.update(|mut tx| -> bbolt_rs::Result<()> {
+            let mut bucket = tx.create_bucket(b"key")?;
+            bucket.put(bolt_key(1, 0, false), kv_bytes(b"k", b"a1", 1, 1, 1))?;
+            bucket.put(bolt_key(2, 0, false), kv_bytes(b"k", b"a2", 1, 2, 2))?;
+            bucket.put(bolt_key(3, 0, true), kv_bytes(b"k", b"", 0, 3, 0))?;
+            bucket.put(bolt_key(4, 0, false), kv_bytes(b"k", b"b1", 4, 4, 1))?;
+            bucket.put(bolt_key(5, 0, true), kv_bytes(b"k", b"", 0, 5, 0))?;
+            bucket.put(bolt_key(6, 0, false), kv_bytes(b"k", b"c1", 6, 6, 1))?;
+            bucket.put(bolt_key(7, 0, false), kv_bytes(b"k", b"c2", 6, 7, 2))?;
+            bucket.put(bolt_key(8, 0, false), kv_bytes(b"gone", b"g", 8, 8, 1))?;
+            bucket.put(bolt_key(9, 0, true), kv_bytes(b"gone", b"", 0, 9, 0))?;
+            Ok(())
+        })
+        .expect("populate");
+        db.close();
+    }
+    let target = dir.path().join("fastetcd-data");
+    let summary = migrate_snapshot_with_mode(&snap_path, &target, false, MigrationMode::PreserveRevisions)
+        .await
+        .unwrap();
+    assert_eq!((summary.scanned, summary.tombstones, summary.imported), (9, 3, 1));
+    assert_eq!(summary.revision_after, 9);
+
+    let engine: Arc<dyn fastetcd_storage::KvStore> =
+        Arc::new(RedbEngine::open(target.join("fastetcd.redb")).unwrap());
+    let mvcc = MvccStore::open(engine).await.unwrap();
+    // (revision, Some((value, create_revision, version)) or None when deleted)
+    let want: [(i64, Option<(&[u8], i64, i64)>); 9] = [
+        (1, Some((b"a1", 1, 1))),
+        (2, Some((b"a2", 1, 2))),
+        (3, None),
+        (4, Some((b"b1", 4, 1))),
+        (5, None),
+        (6, Some((b"c1", 6, 1))),
+        (7, Some((b"c2", 6, 2))),
+        (8, Some((b"c2", 6, 2))),
+        (9, Some((b"c2", 6, 2))),
+    ];
+    for (rev, w) in want {
+        let r = mvcc.range(b"k", b"", 0, rev, false, false).await.unwrap();
+        match w {
+            None => assert!(r.kvs.is_empty(), "rev {rev}: k is deleted"),
+            Some((value, create, version)) => {
+                assert_eq!(r.kvs.len(), 1, "rev {rev}");
+                assert_eq!(r.kvs[0].value, value, "rev {rev}");
+                assert_eq!((r.kvs[0].create_revision, r.kvs[0].version), (create, version), "rev {rev}");
+            }
+        }
+    }
+    // Now: the live generation of k, and gone stays gone.
+    let now = mvcc.range(b"k", b"", 0, 0, false, false).await.unwrap();
+    assert_eq!(now.kvs[0].value, b"c2");
+    assert!(mvcc.range(b"gone", b"", 0, 0, false, false).await.unwrap().kvs.is_empty());
+    let at8 = mvcc.range(b"gone", b"", 0, 8, false, false).await.unwrap();
+    assert_eq!(at8.kvs[0].value, b"g");
+    // A put after the import continues the live generation.
+    let (rev, _) = mvcc
+        .apply(&[fastetcd_storage::mvcc::Mutation::Put {
+            key: b"k".to_vec(),
+            value: b"c3".to_vec(),
+            lease: 0,
+            ignore_value: false,
+            ignore_lease: false,
+            prev_kv: false,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(rev, 10);
+    let after = mvcc.range(b"k", b"", 0, 0, false, false).await.unwrap();
+    assert_eq!((after.kvs[0].create_revision, after.kvs[0].version), (6, 3));
+}
+
 // ---------- leases and auth (fastetcd#60) ----------
 
 fn kv_leased(key: &[u8], value: &[u8], rev: i64, lease: i64) -> Vec<u8> {
