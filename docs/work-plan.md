@@ -1504,4 +1504,5 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] tests: authz_admin (root only, validate pass/refuse), gateway JSON.
     - [x] docs: 03-deploy § Downgrades (floor table), 00-design, README, deck.
     - [x] sc-build passed on 87bc426 (clippy -D warnings; downgrade unit,
-      authz_admin, gateway tests); release 1.39.0; close #192.
+      authz_admin, gateway tests); release 1.39.0; 1.39.1 logs the version
+      on `startup: listening` (a proof for `shipped`); close #192.

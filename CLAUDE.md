@@ -10,7 +10,7 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.39.0`** — `etcdctl downgrade validate <fastetcd version>` says whether
+**`1.39.1`** — `startup: listening` logs the fastetcd version. 1.39.0: `etcdctl downgrade validate <fastetcd version>` says whether
 the cluster may go back to it, naming each version floor that refuses it
 (#192); enable/cancel answer Unimplemented (no cluster version).
 
