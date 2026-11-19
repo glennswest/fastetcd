@@ -13,8 +13,9 @@
 //!   pass answers with this member's fastetcd version. It reads this
 //!   member's applied state (the floors that depend on it only ever turn
 //!   on), changes nothing, and needs root while auth is on, as in etcd.
-//! - **ENABLE / CANCEL** are refused (`Unimplemented`, with why): there is
-//!   no cluster version to lower or to put back.
+//! - **ENABLE / CANCEL** are not served: they answer as any unknown action
+//!   does (`InvalidArgument`, `unknown downgrade action N`). The gap is
+//!   fastetcd#202.
 
 use fastetcd_proto::etcdserverpb as pb;
 use tonic::Status;
@@ -157,12 +158,7 @@ pub fn serve(state: &ServerState, req: &pb::DowngradeRequest) -> Result<String, 
     use pb::downgrade_request::DowngradeAction;
     match DowngradeAction::try_from(req.action) {
         Ok(DowngradeAction::Validate) => validate(THIS_VERSION, &req.version, Used::of(state)),
-        Ok(DowngradeAction::Enable) | Ok(DowngradeAction::Cancel) => Err(Status::unimplemented(
-            "fastetcd has no cluster version to lower, so a downgrade is not enabled or \
-             cancelled: VALIDATE the target version, then restart one member at a time onto the \
-             older binary (docs/03-deploy.md, Downgrades)",
-        )),
-        Err(_) => Err(Status::invalid_argument(format!("unknown downgrade action {}", req.action))),
+        _ => Err(Status::invalid_argument(format!("unknown downgrade action {}", req.action))),
     }
 }
 

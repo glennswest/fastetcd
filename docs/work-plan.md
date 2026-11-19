@@ -1541,11 +1541,11 @@ Tracked live in the Claude task system. Snapshot of the order:
     in the harness, (c) document only and close.
 
 94. **Downgrade ENABLE/CANCEL stub (#201, P0, nightly stub sweep).**
-    README said "Not implemented: Downgrade ENABLE/CANCEL", and the
+    README listed Downgrade ENABLE/CANCEL under a stub marker, and the
     handler answered them `Unimplemented` with a message: a surface
     ahead of its implementation. Taken out, not built (#192 proposed
     them "only if wanted"; they need a replicated downgrade target):
-    - [ ] ENABLE/CANCEL answer as any unknown action does
+    - [x] ENABLE/CANCEL answer as any unknown action does
       (`InvalidArgument` `unknown downgrade action N`); tests follow.
-    - [ ] README, 00-design, 03-deploy, deck say only what is served.
-    - [ ] File the gap (`gap` label) and propose it.
+    - [x] README, 00-design, 03-deploy, deck say only what is served.
+    - [x] File the gap (`gap` label): #202; propose it.

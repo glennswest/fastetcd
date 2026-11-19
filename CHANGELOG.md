@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-19
+- **fix:** Downgrade ENABLE and CANCEL are no longer a stub (#201): they answered `Unimplemented` with a message saying why they were not done, and README listed them under "Not implemented". They now answer as any unknown action does (`InvalidArgument`, `unknown downgrade action N`); VALIDATE is unchanged. The gap is #202. README, 00-design, 03-deploy and the deck say only what is served.
+
 ### 2026-11-18
 - **docs:** #195 (etcd robustness suite) waits on the owner: the suite's model starts an empty store at revision 1 and fastetcd's at 0 (#160, undecided), so every scenario would fail at its first put; it also reads each member's etcd WAL for persisted requests (adapter planned: a WAL-dump subcommand, a harness patch, a flag shim). Work plan item 93.
 - **docs:** #193 (OTLP trace export): there is no trace collector on the platform (the registry has none; ironprom takes OTLP metrics only). Asked the owner whether to close it as not wanted (recommended) or build `--otlp-endpoint` anyway; work plan item 91.

@@ -766,9 +766,10 @@ on; gateway `/v3/maintenance/downgrade`):
   So a cluster that has run 1.33 or later validates 1.33 and up, and
   refuses anything older. It checks the data only: it does not ask the
   members their versions, and changes nothing.
-- **`enable` and `cancel`** answer `Unimplemented`, with why: there is no
-  cluster version to lower or to put back. Validate, then restart one
-  member at a time onto the older binary.
+- **`enable` and `cancel`** are not served: they answer as an unknown
+  action does (`InvalidArgument` `unknown downgrade action N`; the gap
+  is #202). Validate, then restart one member at a time onto the older
+  binary.
 
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
