@@ -53,6 +53,9 @@ hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 # (tonic::service::Routes converts to/from axum::Router) so the
 # client-port /health route below shares its type.
 axum = "0.7"
+# Keys and values in `persisted-requests` (#195) and the v3 JSON
+# gateway tests (#28).
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3.13"
@@ -64,8 +67,6 @@ etcd-client = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # Test certificates for the peer TLS tests (#23), generated per run.
 rcgen = "0.13"
-# Keys and values in the v3 JSON gateway tests (#28).
-base64 = "0.22"
 
 # ---------------------------------------------------------------
 # Packaging (cargo-deb / cargo-generate-rpm). Built with:
