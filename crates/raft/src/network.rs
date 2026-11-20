@@ -185,7 +185,7 @@ pub struct GrpcNetwork {
     dial: DialOptions,
     /// The dialed client and the URL it was dialed at: used only while
     /// the member's URL in `peers` is still that one (#208).
-    client: tokio::sync::Mutex<Option<(String, pb::raft_peer_client::RaftPeerClient<Channel>)>>,
+    client: tokio::sync::Mutex<Option<DialedClient>>,
 }
 
 impl GrpcNetwork {
@@ -344,8 +344,11 @@ pub struct WriteForwarder {
     dial: DialOptions,
     /// Each member's client and the URL it was dialed at, used only
     /// while that is still the member's URL in `peers` (#208).
-    clients: Arc<RwLock<HashMap<NodeId, (String, pb::raft_peer_client::RaftPeerClient<Channel>)>>>,
+    clients: Arc<RwLock<HashMap<NodeId, DialedClient>>>,
 }
+
+/// A peer client and the URL it was dialed at.
+type DialedClient = (String, pb::raft_peer_client::RaftPeerClient<Channel>);
 
 impl WriteForwarder {
     /// Plaintext peer connections.
