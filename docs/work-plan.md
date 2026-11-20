@@ -1549,3 +1549,13 @@ Tracked live in the Claude task system. Snapshot of the order:
       (`InvalidArgument` `unknown downgrade action N`); tests follow.
     - [x] README, 00-design, 03-deploy, deck say only what is served.
     - [x] File the gap (`gap` label): #202; propose it.
+
+95. **Pre-release versions and a failing watch_load.sh (#203, P2).**
+    Downgrade VALIDATE (and the member version gate) cut a pre-release
+    suffix off, so `1.33.0-rc1` counted as `1.33.0`; tests/watch_load.sh
+    ended each run with `|| true`, so a failed bench exited 0.
+    - [ ] Semver precedence (`X.Y.Z-pre < X.Y.Z`, identifiers per §11)
+      in raft `version_gate::Version`; VALIDATE and the gate compare
+      with it; tests.
+    - [ ] watch_load.sh exits non-zero when a run fails.
+    - [ ] 03-deploy, CHANGELOG; sc-build; release 1.40.1.
