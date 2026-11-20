@@ -63,6 +63,10 @@ done
 echo "==== results"
 grep -E '^\s*--- (PASS|FAIL|SKIP)' "$WORK/go-test.log" || true
 echo "robustness: go test exited $rc"
+if [ "$rc" != 0 ]; then
+    # With go test's own log (a timeout's goroutine dump is in it).
+    gzip -c "$WORK/go-test.log" >"$RESULTS_DIR/go-test.log.gz"
+fi
 if [ -n "$(ls -A "$RESULTS_DIR")" ]; then
     tar -C "$RESULTS_DIR" -czf "$WORK/reports.tgz" --exclude='server-*' .
     echo "==== artifacts ($(stat -c %s "$WORK/reports.tgz") bytes, base64 tar.gz of RESULTS_DIR without data dirs)"
