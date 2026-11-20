@@ -684,6 +684,27 @@ enum Command {
     PersistedRequests,
 }
 
+/// The address to listen on for `host:port`: an IP as given, or a host
+/// name resolved (an IPv4 address first, as Go's listener picks for
+/// `localhost`). etcd's listen URLs may name `localhost`; etcd's own
+/// test harnesses use it (#195).
+fn listen_addr(host_port: &str) -> anyhow::Result<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    if let Ok(a) = host_port.parse() {
+        return Ok(a);
+    }
+    let addrs: Vec<std::net::SocketAddr> = host_port
+        .to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("listen address {host_port:?}: {e}"))?
+        .collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("listen address {host_port:?} resolves to no address"))
+}
+
 /// Pick the first comma-separated URL from a list. Returns the
 /// socket part — strips `http://` / `https://` prefix for parsing
 /// as a SocketAddr in the listener calls.
@@ -983,7 +1004,7 @@ async fn main() -> anyhow::Result<()> {
     let early_metrics = if args.listen_metrics_url.trim().is_empty() {
         None
     } else {
-        let metrics_addr: std::net::SocketAddr = args.listen_metrics_url.parse()?;
+        let metrics_addr = listen_addr(&args.listen_metrics_url)?;
         Some(fastetcd_server::metrics::spawn_early_server(metrics_addr, startup.status()))
     };
 
@@ -1614,8 +1635,8 @@ async fn main() -> anyhow::Result<()> {
     // Renews forwarded keep-alives in RAM and answers LeaseTimeToLive (#92).
     peer_service = peer_service.with_lessor(peer_lessor);
 
-    let client_listen: std::net::SocketAddr = client_listen_url.parse()?;
-    let peer_listen: std::net::SocketAddr = peer_listen_url.parse()?;
+    let client_listen = listen_addr(&client_listen_url)?;
+    let peer_listen = listen_addr(&peer_listen_url)?;
 
     // Bound here, not inside `serve`, so a start can say when it listens
     // (#165); the same socket options `serve` sets (nodelay, no keepalive).
@@ -1873,6 +1894,15 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("fastetcd").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn listen_addresses_may_name_localhost() {
+        assert_eq!(listen_addr("127.0.0.1:2379").unwrap(), "127.0.0.1:2379".parse().unwrap());
+        assert_eq!(listen_addr("[::1]:2380").unwrap(), "[::1]:2380".parse().unwrap());
+        let a = listen_addr("localhost:2379").unwrap();
+        assert!(a.ip().is_loopback() && a.port() == 2379, "{a}");
+        assert!(listen_addr("localhost").is_err(), "no port");
     }
 
     #[test]
