@@ -99,7 +99,8 @@ async fn put_with_valid_token_succeeds_when_auth_enabled() {
     req.metadata_mut()
         .insert("token", MetadataValue::try_from(&token).unwrap());
     let put_resp = kv.put(req).await.unwrap().into_inner();
-    assert_eq!(put_resp.header.unwrap().revision, 1);
+    // The first write on a new store is revision 2, as etcd's (#160).
+    assert_eq!(put_resp.header.unwrap().revision, 2);
 }
 
 #[tokio::test]

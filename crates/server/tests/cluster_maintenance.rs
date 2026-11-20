@@ -48,7 +48,8 @@ async fn status_returns_real_values() {
         .into_inner();
     assert!(resp.header.is_some());
     let header = resp.header.unwrap();
-    assert_eq!(header.revision, 1);
+    // One put on a new store: revision 2, as etcd's (#160).
+    assert_eq!(header.revision, 2);
     assert_eq!(resp.leader, 1); // single-node, leader is self
     assert!(resp.raft_term >= 1);
     assert!(resp.raft_applied_index >= 1);

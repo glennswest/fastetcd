@@ -149,7 +149,8 @@ async fn compact_out_of_range_is_refused_as_etcd_does() {
     );
     assert_eq!(value(&mut kv, "t").await, None);
     kv.put(put("after", "a")).await.unwrap();
-    assert_eq!(revision(&mut kv).await, 6);
+    // Five puts and this one after the start revision, 1 (#160).
+    assert_eq!(revision(&mut kv).await, 7);
 }
 
 #[tokio::test]

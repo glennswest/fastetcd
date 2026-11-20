@@ -62,8 +62,9 @@ async fn acknowledged_puts_survive_sigkill_through_log_replay() {
         MvccStore::open(std::sync::Arc::new(engine)).await.unwrap().current_revision().await
     };
     eprintln!("revision on disk after SIGKILL: {on_disk} (acknowledged: {KEYS})");
+    // The store starts at revision 1 (#160): the last put is KEYS + 1.
     assert!(
-        on_disk < KEYS,
+        on_disk <= KEYS,
         "every apply was on disk ({on_disk}); this test no longer exercises the replay"
     );
 
@@ -82,7 +83,7 @@ async fn acknowledged_puts_survive_sigkill_through_log_replay() {
     for (i, item) in all.kvs.iter().enumerate() {
         assert_eq!(item.key, format!("k{i:03}").into_bytes());
         assert_eq!(item.value, format!("v{i}").into_bytes());
-        assert_eq!(item.mod_revision, i as i64 + 1, "same revision as before the crash");
+        assert_eq!(item.mod_revision, i as i64 + 2, "same revision as before the crash");
     }
-    assert!(all.header.unwrap().revision >= KEYS);
+    assert!(all.header.unwrap().revision > KEYS);
 }

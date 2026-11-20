@@ -54,6 +54,9 @@ async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
     // below, as a long-running leader has.
     let warm = lc.lease_grant(pb::LeaseGrantRequest { ttl: 60, id: 0 }).await.unwrap().into_inner().id;
     lc.lease_time_to_live(pb::LeaseTimeToLiveRequest { id: warm, keys: false }).await.unwrap();
+    // The store's first write also proposes its start revision (#160):
+    // done here, outside the TTL-timed window below.
+    kv.put(pb::PutRequest { key: b"warm".to_vec(), value: b"v".to_vec(), ..Default::default() }).await.unwrap();
 
     let past = grant(&h, 0).await; // persisted deadline: 1970
     let future = grant(&h, YEAR_3000).await; // persisted deadline: year 3000

@@ -108,7 +108,8 @@ async fn sigterm_leaves_nothing_to_repair_or_replay() {
     let (repaired, on_disk) = open_file(dir.path()).await;
     assert!(!repaired, "after SIGTERM the file was still not closed cleanly:\n{}", member.log_tail());
     assert_eq!(on_disk, acknowledged, "every acknowledged write is in the data file: nothing left to replay");
-    assert_eq!(acknowledged, 2 * KEYS);
+    // Two rounds of KEYS puts after the start revision, 1 (#160).
+    assert_eq!(acknowledged, 2 * KEYS + 1);
 
     // And the member starts again with everything.
     let (member, mut kv) = start(dir.path()).await;

@@ -171,7 +171,8 @@ async fn put_then_range_round_trips() {
     let header = put.header.expect("put header");
     assert_eq!(header.cluster_id, 7);
     assert_eq!(header.member_id, 1);
-    assert_eq!(header.revision, 1);
+    // A new store is at revision 1, as etcd's: its first write is 2 (#160).
+    assert_eq!(header.revision, 2);
 
     let range = client
         .range(pb::RangeRequest {
@@ -184,8 +185,8 @@ async fn put_then_range_round_trips() {
     assert_eq!(range.kvs.len(), 1);
     assert_eq!(range.kvs[0].key, b"hello");
     assert_eq!(range.kvs[0].value, b"world");
-    assert_eq!(range.kvs[0].create_revision, 1);
-    assert_eq!(range.kvs[0].mod_revision, 1);
+    assert_eq!(range.kvs[0].create_revision, 2);
+    assert_eq!(range.kvs[0].mod_revision, 2);
     assert_eq!(range.kvs[0].version, 1);
 }
 
@@ -259,10 +260,17 @@ async fn historical_range_returns_old_value() {
         })
         .await
         .unwrap();
+    // Revision 1 is the empty store (#160); the first put is 2.
+    let r0 = client
+        .range(pb::RangeRequest { key: b"k".to_vec(), revision: 1, ..Default::default() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(r0.kvs.is_empty(), "{r0:?}");
     let r1 = client
         .range(pb::RangeRequest {
             key: b"k".to_vec(),
-            revision: 1,
+            revision: 2,
             ..Default::default()
         })
         .await

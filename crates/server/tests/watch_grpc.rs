@@ -255,14 +255,14 @@ async fn watch_with_start_revision_backfills_history() {
     .await
     .unwrap();
 
-    // Now subscribe from rev 2 — should receive the v2 and v3 events
-    // (rev=2, rev=3) as historical backfill.
+    // Now subscribe from rev 3 — should receive the v2 and v3 events
+    // (rev=3, rev=4: the store starts at 1, v1 is 2, #160) as backfill.
     let (tx, rx) = mpsc::channel::<pb::WatchRequest>(8);
     tx.send(pb::WatchRequest {
         request_union: Some(pb::watch_request::RequestUnion::CreateRequest(
             pb::WatchCreateRequest {
                 key: b"k".to_vec(),
-                start_revision: 2,
+                start_revision: 3,
                 ..Default::default()
             },
         )),
