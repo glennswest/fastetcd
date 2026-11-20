@@ -58,6 +58,7 @@ async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
     // done here, outside the TTL-timed window below.
     kv.put(pb::PutRequest { key: b"warm".to_vec(), value: b"v".to_vec(), ..Default::default() }).await.unwrap();
 
+    let granted = Instant::now();
     let past = grant(&h, 0).await; // persisted deadline: 1970
     let future = grant(&h, YEAR_3000).await; // persisted deadline: year 3000
     let logged = lc.lease_grant(pb::LeaseGrantRequest { ttl: TTL, id: 0 }).await.unwrap().into_inner().id;
@@ -72,9 +73,17 @@ async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
         assert!((1..=TTL).contains(&t.ttl), "lease {id}: TimeToLive {} of a {TTL} s lease", t.ttl);
     }
 
+    // Not expired at once: alive after a few sweeper ticks (200 ms).
+    // Checked well inside the TTL, so slow writes on a build VM cannot
+    // use up the margin (#205).
+    sleep(Duration::from_millis(500)).await;
+    assert!(alive(&mut kv, b"past").await, "a lease granted with a 1970 clock expired at once");
+    assert!(alive(&mut kv, b"future").await);
+
     // A keep-alive logged through Raft (as while the 1.23 gate is closed)
-    // with a 1970 clock renews `logged` from when it is applied.
-    sleep(Duration::from_secs(2)).await;
+    // with a 1970 clock renews `logged` from when it is applied: halfway
+    // through its TTL, counted from the grants.
+    tokio::time::sleep_until(granted + Duration::from_millis(1500)).await;
     h.state
         .raft
         .client_write(FastetcdLogEntry::LeaseKeepAlive { id: logged, now_unix: 0 })
@@ -82,10 +91,8 @@ async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
         .expect("keep-alive");
     let renewed = Instant::now();
 
-    // Alive for their TTL ...
+    // Alive after the keep-alive ...
     sleep(Duration::from_millis(500)).await;
-    assert!(alive(&mut kv, b"past").await, "a lease granted with a 1970 clock expired at once");
-    assert!(alive(&mut kv, b"future").await);
     assert!(alive(&mut kv, b"logged").await);
 
     // ... and gone soon after it: the sweeper ticks every 200 ms.

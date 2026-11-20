@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
 - **docs:** #195 (etcd robustness suite): owner chose (a). #160 (new stores start at revision 1, as etcd's; existing stores keep their numbering) goes first as its own release; #195 waits behind it. Work plan item 93.
 - **docs:** #193 closed as not wanted (owner's decision (a)): no OTLP trace export is built while the platform has no trace collector; when one exists it is filed as a `gap`. 00-design says there is no trace export without pointing at an open design.
 
