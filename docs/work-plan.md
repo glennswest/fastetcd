@@ -1587,3 +1587,39 @@ Tracked live in the Claude task system. Snapshot of the order:
       first write was revision 1; updated (8f3e82c). lease_clock_step
       warms the first write before its TTL-timed window.
     - [x] sc-build of main 210e4f3 (build, clippy -D warnings, tests --no-fail-fast; #204's timing test skipped, failing on main too) passed; lease_clock_step slack fixed (#205); release 1.41.0 (ad83a11); image requested (build 118908af2e0c); shipped with proof `log:this store starts at revision 1`.
+
+97. **etcd robustness suite adapter and run (#195, P3; owner's decision
+    (a), after #160).** Read from etcd v3.6.11 tests/robustness: the
+    harness execs `<bin-dir>/etcd` with etcd's flags, waits for `ready to
+    serve client requests`, reads `etcd --version` ("etcd Version:"),
+    checks grpc.health, and after the traffic reads every member's etcd
+    WAL from index 0 (`report.PersistedRequestsCluster`; a member whose
+    log is incomplete counts as a tolerated minority failure). Without a
+    gofail port only these faults are available: Kill (any size); for 3
+    members with the peer proxy, Blackhole/Delay/Drop peer network,
+    BlackholeUntilSnapshot, MemberReplace. Mixed-version and LazyFS
+    scenarios need binaries that are absent, so they are skipped.
+    - [ ] storage `raft_wal`: `keep_purged` (a purge drops nothing from
+      disk; kept segments are not counted as live, so the WAL byte bound
+      does not loop) and a read-only `read_history` (ignores purges,
+      applies overwrites and truncations, stops at a torn tail without
+      cutting it: the member is still running).
+    - [ ] server: `--wal-keep-purged`; `fastetcd persisted-requests`
+      (the history from index 0 as JSON lines in the suite's request
+      shape: puts, deletes, txns with writes, lease grants with the id
+      apply allocates, revokes, compactions; read-only txns skipped, as
+      etcd never logs them; fails if the history does not start at the
+      beginning); etcd's `--snapshot-catchup-entries` (alias of
+      `--max-in-snapshot-log-to-keep`) and
+      `--watch-progress-notify-interval` (was a fixed 10 s); the log line
+      `ready to serve client requests` once serving with a leader.
+    - [ ] tests/robustness: shim `etcd` (`--version`, drops
+      `--experimental-compaction-batch-limit` which has no fastetcd
+      equivalent, adds `--wal-keep-purged`, execs fastetcd), a patch to
+      the suite's report/wal.go (reads `persisted-requests` when
+      FASTETCD_BIN is set), run.sh (Go, etcd v3.6.11, patch, run
+      TestRobustnessExploratory).
+    - [ ] docs (02-testing 3b, 01-configuration flags), CHANGELOG.
+    - [ ] sc-build: build/clippy/tests; then sc-build tests/robustness/run.sh;
+      triage each failure (fastetcd bug → own issue; harness mismatch →
+      fix here).
