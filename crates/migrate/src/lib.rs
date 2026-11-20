@@ -319,6 +319,11 @@ pub async fn migrate_snapshot_with_mode(
 
     let (imported, revision_after) = match mode {
         MigrationMode::LatestOnly => {
+            // A new store starts at revision 1, as etcd's, so the
+            // imported keys are revision 2 (#160).
+            mvcc.apply_start_revision()
+                .await
+                .map_err(|e| anyhow::anyhow!("start revision: {e}"))?;
             let mutations: Vec<Mutation> = latest
                 .into_iter()
                 .map(|(key, (_, _, value, lease))| Mutation::Put {

@@ -63,6 +63,8 @@ pub struct ServerState {
     pub older_members: Arc<AtomicU64>,
     /// Every member reads nested txns (`version_gate`, fastetcd#56).
     pub nested_txn_gate: Arc<crate::version_gate::MembersAtLeast>,
+    /// Every member reads `StartRevision` (`start_revision`, fastetcd#160).
+    pub start_revision_gate: Arc<crate::version_gate::MembersAtLeast>,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -110,6 +112,9 @@ impl ServerState {
             max_request_bytes: None,
             nested_txn_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
                 crate::version_gate::NESTED_TXN_SINCE,
+            )),
+            start_revision_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
+                crate::start_revision::START_REVISION_SINCE,
             )),
             write_behind: None,
             read_index: None,
@@ -248,6 +253,11 @@ impl ServerState {
             if size > max {
                 return Err(Status::invalid_argument("etcdserver: request is too large"));
             }
+        }
+        // A store at revision 0 moves to 1 before its first write, as an
+        // empty etcd store is (#160).
+        if !matches!(entry, FastetcdLogEntry::StartRevision) {
+            crate::start_revision::before_proposal(self, &entry).await?;
         }
         let _pending = GaugeHold::new(&self.traffic.proposals_pending, 1);
         // On the leader, refuse a put naming a lease that does not exist

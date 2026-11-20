@@ -35,4 +35,5 @@ pub use store::{
     BulkKey, Compare, CompareOp, CompareTarget, LeaseGrantResult, LeaseRevokeResult,
     LeaseTtlResult, Mutation, MutationResult, MvccError, MvccResult, MvccStore, OpCounts, RangeOp,
     NestedTxn, RangeResult, Refusal, TxnOp, TxnOpResult, TxnResult, ApplyItem, ApplyOutcome,
+    START_REVISION,
 };

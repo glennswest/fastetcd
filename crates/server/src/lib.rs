@@ -41,6 +41,7 @@ pub mod recovery;
 pub mod runtime_probe;
 pub mod sizing;
 pub mod space;
+pub mod start_revision;
 pub mod startup;
 pub mod state;
 pub mod tls;

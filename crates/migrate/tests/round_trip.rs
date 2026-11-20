@@ -68,7 +68,9 @@ async fn migrates_latest_value_per_key_and_skips_tombstones() {
     assert_eq!(summary.scanned, 5);
     assert_eq!(summary.tombstones, 1);
     assert_eq!(summary.imported, 2); // alpha + charlie
-    assert!(summary.revision_after >= 1);
+    // A new store starts at revision 1, as etcd's: the import is
+    // revision 2 (#160).
+    assert_eq!(summary.revision_after, 2);
 
     // 3. Re-open the target MvccStore and verify contents.
     let engine: Arc<dyn fastetcd_storage::KvStore> =
@@ -80,6 +82,8 @@ async fn migrates_latest_value_per_key_and_skips_tombstones() {
     assert!(!snap.contains_key(b"bravo".as_slice()));
     assert_eq!(snap.get(b"alpha".as_slice()).unwrap(), &b"v1".to_vec()); // latest version
     assert_eq!(snap.get(b"charlie".as_slice()).unwrap(), &b"cv0".to_vec());
+    let r = mvcc.range(b"alpha", b"", 0, 0, false, false).await.unwrap();
+    assert_eq!((r.kvs[0].create_revision, r.kvs[0].mod_revision), (2, 2));
 }
 
 async fn engine_snapshot(mvcc: &MvccStore) -> std::collections::HashMap<Vec<u8>, Vec<u8>> {

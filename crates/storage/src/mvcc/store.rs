@@ -56,6 +56,12 @@ const TABLE_IDX: &str = "mvcc_idx";
 const TABLE_META: &str = "mvcc_meta";
 
 const META_KEY_CURRENT_REV: &[u8] = b"current_rev";
+
+/// The revision of an empty store once a `StartRevision` entry has
+/// applied, as an empty etcd store's (fastetcd#160): its first write is
+/// revision 2. A store at 0 has never applied one (made before 1.41, or
+/// before its cluster could decode the entry) and keeps 0-based numbering.
+pub const START_REVISION: i64 = 1;
 const META_KEY_COMPACT_REV: &[u8] = b"compact_rev";
 const META_KEY_NEXT_LEASE_ID: &[u8] = b"next_lease_id";
 /// Raft's `last_applied_log_id` / `last_membership`, stored as opaque
@@ -759,6 +765,34 @@ impl MvccStore {
                 id
             }
         })
+    }
+
+    /// Apply a `StartRevision` log entry (fastetcd#160): a store with no
+    /// revision yet (revision 0) moves to [`START_REVISION`], as an
+    /// empty etcd store is, so its first write is revision 2. A store
+    /// that has any revision keeps its numbering. No event, no key.
+    /// Commits the staged raft metadata with it. Returns the current
+    /// revision.
+    pub async fn apply_start_revision(&self) -> MvccResult<i64> {
+        let mut state = self.inner.write_state.lock().await;
+        let mut batch = WriteBatch::new();
+        let moves = state.current_rev == 0;
+        if moves {
+            write_i64(&mut batch, META_KEY_CURRENT_REV, START_REVISION);
+        }
+        self.fold_raft_meta(&mut batch).await;
+        if batch.is_empty() {
+            return Ok(state.current_rev);
+        }
+        self.inner.engine.commit(batch, self.apply_write_options()).await?;
+        if moves {
+            self.inner.view.engine_commits.fetch_add(1, Ordering::AcqRel);
+            let before = state.revs();
+            let _index = self.inner.cache.index.write();
+            self.inner.view.publish(Revs { current: START_REVISION, ..before });
+            state.current_rev = START_REVISION;
+        }
+        Ok(state.current_rev)
     }
 
     /// The batch progress as last committed, if any.
@@ -3055,6 +3089,41 @@ mod tests {
         let (_d, s) = open_mvcc().await;
         assert_eq!(s.current_revision().await, 0);
         assert_eq!(s.compact_revision().await, 0);
+    }
+
+    /// fastetcd#160: `StartRevision` moves an empty store to revision 1,
+    /// as etcd's, so the first write is revision 2; it persists; and a
+    /// store that has a revision keeps its numbering.
+    #[tokio::test]
+    async fn start_revision_moves_only_a_store_at_zero() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mvcc.redb");
+        {
+            let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+            assert_eq!(s.apply_start_revision().await.unwrap(), START_REVISION);
+            assert_eq!(s.current_revision().await, 1);
+            // Readable at revision 1, empty, as an empty etcd store.
+            let r = s.range(b"a", b"", 0, 1, false, false).await.unwrap();
+            assert!(r.kvs.is_empty());
+            // Applied again (another proposer's, or a replay): unchanged.
+            assert_eq!(s.apply_start_revision().await.unwrap(), 1);
+            let (rev, _) = s.apply(&[put(b"a", b"1")]).await.unwrap();
+            assert_eq!(rev, 2);
+            let r = s.range(b"a", b"", 0, 0, false, false).await.unwrap();
+            assert_eq!((r.kvs[0].create_revision, r.kvs[0].mod_revision), (2, 2));
+            assert_eq!(s.apply_start_revision().await.unwrap(), 2);
+        }
+        // Reopened: the numbering stayed.
+        let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        assert_eq!(s.current_revision().await, 2);
+
+        // A store with 0-based history (made before 1.41) keeps it.
+        let (_d, old) = open_mvcc().await;
+        let (rev, _) = old.apply(&[put(b"a", b"1")]).await.unwrap();
+        assert_eq!(rev, 1);
+        assert_eq!(old.apply_start_revision().await.unwrap(), 1);
+        let (rev, _) = old.apply(&[put(b"b", b"1")]).await.unwrap();
+        assert_eq!(rev, 2);
     }
 
     #[tokio::test]

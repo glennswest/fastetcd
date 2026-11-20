@@ -1432,6 +1432,7 @@ async fn main() -> anyhow::Result<()> {
         .with_max_request_bytes(args.max_request_bytes),
     );
     fastetcd_server::cluster_id::follow(server_state.clone(), cluster_id_source);
+    fastetcd_server::start_revision::follow(server_state.clone());
 
     // Periodic backups to a separate volume (fastetcd#37).
     if let Some(dir) = &args.backup_dir {

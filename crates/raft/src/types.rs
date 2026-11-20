@@ -176,6 +176,14 @@ pub enum FastetcdLogEntry {
     /// its own id once the cluster has none and every member answers as
     /// 1.33 or later (an older member cannot decode it). Appended last.
     ClusterId(u64),
+
+    /// A store with no revision yet moves to revision 1, as an empty
+    /// etcd store is (fastetcd#160); one that has a revision keeps its
+    /// numbering, so applying it again, or after a write, changes
+    /// nothing. Proposed before the first write on a store at revision
+    /// 0, once no member is older than 1.41 (an older one cannot decode
+    /// it). Appended last.
+    StartRevision,
 }
 
 /// Response shape from a state machine `apply()` call. Wire RPC

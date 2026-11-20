@@ -1184,6 +1184,10 @@ async fn apply_request(
             let rev = mvcc.current_revision().await;
             Ok(FastetcdLogResponse::Noop { revision: rev })
         }
+        FastetcdLogEntry::StartRevision => {
+            let revision = mvcc.apply_start_revision().await?;
+            Ok(FastetcdLogResponse::Noop { revision })
+        }
         FastetcdLogEntry::Auth(op) => {
             let (revision, result) = mvcc.apply_auth(op).await?;
             Ok(FastetcdLogResponse::Auth { revision, log_index, result })
