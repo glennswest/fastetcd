@@ -14,20 +14,43 @@
 #   has no batch to limit.
 # - `--wal-keep-purged` is added, so `fastetcd persisted-requests` (read
 #   by the suite's patched report/wal.go) sees each member's whole log.
+# - No metrics listener unless `--listen-metrics-urls` is given, as on
+#   etcd (fastetcd's default, 127.0.0.1:2381, would be one port for
+#   every member of the cluster).
 # Every other flag goes to fastetcd as given; one it does not take stops
 # the member, which the suite reports.
+#
+# The harness shows only the first lines of a member that fails to
+# start, so each member's whole output is also appended to
+# `<bin-dir>/../logs/<name>.log`, which run.sh prints the end of.
 set -euo pipefail
-fastetcd="$(dirname "$0")/fastetcd"
+bin="$(dirname "$0")"
+fastetcd="$bin/fastetcd"
 if [ "${1:-}" = "--version" ]; then
     echo "etcd Version: 3.6.11"
     echo "Implementation: $("$fastetcd" --version)"
     exit 0
 fi
 args=()
+name=member
+metrics=0
 for a in "$@"; do
     case "$a" in
         --experimental-compaction-batch-limit=* | --compaction-batch-limit=*) ;;
+        --listen-metrics-urls=*)
+            metrics=1
+            args+=("--listen-metrics-url=${a#--listen-metrics-urls=*://}")
+            ;;
+        --name=*)
+            name=${a#--name=}
+            args+=("$a")
+            ;;
         *) args+=("$a") ;;
     esac
 done
+[ "$metrics" = 1 ] || args+=("--listen-metrics-url=")
+mkdir -p "$bin/../logs"
+# tee runs beside fastetcd and ends when its output closes; the pid the
+# harness signals is fastetcd's own (exec).
+exec > >(tee -a "$bin/../logs/$name.log") 2>&1
 exec "$fastetcd" --wal-keep-purged "${args[@]}"

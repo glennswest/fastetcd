@@ -42,6 +42,12 @@ rc=0
 # The log is long (every member's output); the end of each failing
 # scenario and the result of each are what to read.
 grep -nE -B2 -A12 '^\s+[a-z_]+\.go:[0-9]+: ' "$WORK/go-test.log" | grep -vE '^\S*-\s*$' | tail -400 || true
+echo "==== member logs (last 15 lines each)"
+for log in "$WORK"/logs/*.log; do
+    [ -e "$log" ] || continue
+    echo "-- ${log##*/}"
+    tail -15 "$log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-400
+done
 echo "==== results"
 grep -E '^\s*--- (PASS|FAIL|SKIP)' "$WORK/go-test.log" || true
 echo "robustness: go test exited $rc"
