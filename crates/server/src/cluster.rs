@@ -379,11 +379,14 @@ async fn apply_membership(
         let mut p = peers.write().await;
         for (id, m) in now {
             if *id != self_id && p.get(id) != Some(&m.addr) {
+                tracing::info!(member = format!("{id:x}"), addr = %m.addr, "peer route from the raft membership");
                 p.insert(*id, m.addr.clone());
             }
         }
         for id in &gone {
-            p.remove(id);
+            if p.remove(id).is_some() {
+                tracing::info!(member = format!("{id:x}"), "member left the raft membership: route dropped");
+            }
         }
     }
     let mut dir = directory.write().await;

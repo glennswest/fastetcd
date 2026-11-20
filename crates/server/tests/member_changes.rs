@@ -144,7 +144,10 @@ async fn until_every_list(members: &[&Member], what: &str, pred: impl Fn(&[pb::M
             if pred(&list(m).await) {
                 break;
             }
-            assert!(Instant::now() < deadline, "{}'s MemberList never showed {what}: {:?}", m.name, list(m).await);
+            if Instant::now() >= deadline {
+                let logs: Vec<String> = members.iter().map(|x| format!("--- {}:\n{}", x.name, x.log_tail())).collect();
+                panic!("{}'s MemberList never showed {what}: {:?}\n{}", m.name, list(m).await, logs.join("\n"));
+            }
             sleep(Duration::from_millis(200)).await;
         }
     }
