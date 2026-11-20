@@ -1634,5 +1634,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       #223 (spurious watch gap warning since #160), 3-member write
       latency past the suite's timeout (evidence on #204). Each filed
       and proposed (P1, P1, P3).
-    - [ ] sc-build (build, clippy, tests) of wip/195; merge to main;
-      release 1.42.0; image; shipped (`log:ready to serve client requests`).
+    - [x] sc-build of wip/195 6fd8b4e (build, clippy -D warnings, tests
+      --no-fail-fast; #204's timing test skipped) passed, 72 suites;
+      merged to main; release 1.42.0; image; shipped
+      (`log:ready to serve client requests`).

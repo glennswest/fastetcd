@@ -10,10 +10,12 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.41.0`** — a new store starts at revision 1, as etcd's, so its first
-write is revision 2 (#160; a replicated `StartRevision` entry; 1.41
-downgrade floor). 1.40.1: semver pre-release ordering (#203).
-1.40: runtime schedule-delay metric (#194).
+**`1.42.0`** — etcd's robustness suite runs against fastetcd (#195):
+`--wal-keep-purged`, `fastetcd persisted-requests`, etcd's
+`--snapshot-catchup-entries` and `--watch-progress-notify-interval`,
+the `ready to serve client requests` line, host names in listen URLs,
+repeated flags take the last value. 1.41: new stores start at
+revision 1 (#160).
 
 ## Work plan and history
 

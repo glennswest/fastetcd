@@ -3,10 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-20
-- **fix:** Listen URLs may name a host, as etcd's do (#195): `--listen-client-urls http://localhost:2379` (and the peer and metrics listeners) failed with "invalid socket address syntax"; the host is now resolved, an IPv4 address first.
-- **fix:** A flag given twice takes its last value, as etcd's Go flags do (#195); clap refused it ("cannot be used multiple times"), and etcd's e2e harness passes `--initial-cluster-token` and `--snapshot-count` twice.
 - **docs:** etcd's robustness suite runs against fastetcd (#195): no scenario passes yet; it found #220 (a key's Version too low after compaction), #222 (clientv3 loops on a watch at a compacted revision), #223 (spurious watch gap warning on a new store), and 3-member write latency past its timeout (#204). `tests/robustness/replay.py` checks a failed scenario's histories; `run.sh` returns reports, go test's log and member logs as an artifact. 02-testing 3b.
-- **feat:** etcd's robustness suite runs against fastetcd (#195): `sc-build 'tests/robustness/run.sh'` fetches etcd v3.6.11 and Go, applies `tests/robustness/fastetcd-v3.6.11.patch` and runs `TestRobustnessExploratory` with a shim named `etcd` (02-testing 3b). For it: `--wal-keep-purged` (purged WAL segments stay on disk, not counted as live; raft still snapshots and purges); `fastetcd persisted-requests` (the raft log from its first entry as JSON lines in the suite's request shapes, read from a running member, with the lease ids apply allocates; read-only txns left out as etcd never logs them); etcd's `--snapshot-catchup-entries` (alias of `--max-in-snapshot-log-to-keep`) and `--watch-progress-notify-interval` (was a fixed 10 s; still the default); the log line `ready to serve client requests` once a member serves with a leader. Docs: 01-configuration, 02-testing.
 - **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
 - **docs:** #195 (etcd robustness suite): owner chose (a). #160 (new stores start at revision 1, as etcd's; existing stores keep their numbering) goes first as its own release; #195 waits behind it. Work plan item 93.
 - **docs:** #193 closed as not wanted (owner's decision (a)): no OTLP trace export is built while the platform has no trace collector; when one exists it is filed as a `gap`. 00-design says there is no trace export without pointing at an open design.
@@ -38,6 +35,15 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.42.0] — 2026-11-20
+
+### Added
+- **feat:** etcd's robustness suite runs against fastetcd (#195): `sc-build 'tests/robustness/run.sh'` fetches etcd v3.6.11 and Go, applies `tests/robustness/fastetcd-v3.6.11.patch` and runs `TestRobustnessExploratory` with a shim named `etcd` (02-testing 3b). For it: `--wal-keep-purged` (purged WAL segments stay on disk, not counted as live; raft still snapshots and purges); `fastetcd persisted-requests` (the raft log from its first entry as JSON lines in the suite's request shapes, read from a running member, with the lease ids apply allocates; read-only txns left out as etcd never logs them); etcd's `--snapshot-catchup-entries` (alias of `--max-in-snapshot-log-to-keep`) and `--watch-progress-notify-interval` (was a fixed 10 s; still the default); the log line `ready to serve client requests` once a member serves with a leader. Docs: 01-configuration, 02-testing.
+
+### Fixed
+- **fix:** Listen URLs may name a host, as etcd's do (#195): `--listen-client-urls http://localhost:2379` (and the peer and metrics listeners) failed with "invalid socket address syntax"; the host is now resolved, an IPv4 address first.
+- **fix:** A flag given twice takes its last value, as etcd's Go flags do (#195); clap refused it ("cannot be used multiple times"), and etcd's e2e harness passes `--initial-cluster-token` and `--snapshot-count` twice.
 
 ## [v1.41.0] — 2026-11-20
 
