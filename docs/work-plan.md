@@ -1586,4 +1586,4 @@ Tracked live in the Claude task system. Snapshot of the order:
       Diagnostic run on wip/160 (f1f9ecb): 9 server tests assumed the
       first write was revision 1; updated (8f3e82c). lease_clock_step
       warms the first write before its TTL-timed window.
-    - [x] sc-build of ee2621c (build, clippy -D warnings, tests --no-fail-fast; only #204's timing test fails, as on main) passed; release 1.41.0; image requested; shipped.
+    - [x] sc-build of main 210e4f3 (build, clippy -D warnings, tests --no-fail-fast; #204's timing test skipped, failing on main too) passed; lease_clock_step slack fixed (#205); release 1.41.0 (ad83a11); image requested (build 118908af2e0c); shipped with proof `log:this store starts at revision 1`.
