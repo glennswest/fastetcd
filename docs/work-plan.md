@@ -1638,3 +1638,31 @@ Tracked live in the Claude task system. Snapshot of the order:
       --no-fail-fast; #204's timing test skipped) passed, 72 suites;
       merged to main; release 1.42.0; image; shipped
       (`log:ready to serve client requests`).
+
+98. **Member changes that are not replicated (#208, P1, review
+    findings 0f514801e95b and fd7f6fcec07f).** MemberUpdate changed only
+    the answering member's peer map and directory (no raft membership
+    change, no forwarding, cached peer channels kept the old address,
+    lost on restart). MemberRemove of a learner only dropped local
+    entries (it proposed a change only for a voter), so the learner
+    stayed in raft membership and version gates kept asking it.
+    - [ ] raft: `MembershipChange::RemoveNode` and `SetNodeAddr`
+      (appended), applied on the leader (`RemoveVoters` without retain
+      for a voter, `RemoveNodes` for a learner; `SetNodes` for an
+      address); forwarded from a follower as the others are. An older
+      leader cannot decode them and the change fails with its error.
+    - [ ] Peer routes and the member directory follow the committed
+      membership on every member (a task on raft metrics): addresses
+      from `BasicNode`, learners from the voter set, members that left
+      dropped; so a change made through any member, and a restart with
+      an old `--initial-cluster`, see the same members.
+    - [ ] Cached peer channels (raft network, forwarder) redial when the
+      member's address changes.
+    - [ ] MemberRemove/MemberUpdate of an unknown id: `etcdserver: member
+      not found` (NotFound); MemberUpdate to another member's URL:
+      `etcdserver: Peer URLs already exists` (FailedPrecondition).
+    - [ ] Test (real binaries, 3 members): remove a learner through a
+      follower: gone from every member's MemberList; update a member's
+      peer URL through a follower, restart it on the new port: writes
+      reach it; restart another member (its --initial-cluster still old):
+      still reaches it. Docs (03-deploy membership), CHANGELOG.
