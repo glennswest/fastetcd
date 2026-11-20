@@ -29,6 +29,13 @@ fn small() -> WalLogOptions {
 }
 
 async fn open_dir(dir: &std::path::Path) -> (Arc<dyn KvStore>, WalLogStore, FastetcdStateMachine) {
+    open_dir_with(dir, small()).await
+}
+
+async fn open_dir_with(
+    dir: &std::path::Path,
+    opts: WalLogOptions,
+) -> (Arc<dyn KvStore>, WalLogStore, FastetcdStateMachine) {
     // A restart in the same process: the previous node's tasks (a
     // snapshot build openraft started, on a loaded build box) may hold
     // the file for a while after shutdown. A real leak still fails.
@@ -48,7 +55,7 @@ async fn open_dir(dir: &std::path::Path) -> (Arc<dyn KvStore>, WalLogStore, Fast
     let engine: Arc<dyn KvStore> = Arc::new(WriteBehind::new(engine, 64 * 1024));
     let mvcc = MvccStore::open(engine.clone()).await.unwrap();
     let sm = FastetcdStateMachine::open(mvcc, dir.join("snapshots")).await.unwrap();
-    let log = WalLogStore::open(&wal_dir(dir), engine.clone(), small()).await.unwrap();
+    let log = WalLogStore::open(&wal_dir(dir), engine.clone(), opts).await.unwrap();
     (engine, log, sm)
 }
 
@@ -303,6 +310,99 @@ async fn a_node_purges_wal_segments_and_restarts_with_everything() {
     let out = sm.mvcc().range(b"k", b"l", 0, 0, false, false).await.unwrap();
     assert_eq!(out.kvs.len(), N + 1, "every write is there after the restart");
     raft.shutdown().await.unwrap();
+}
+
+/// With `--wal-keep-purged` the node snapshots and purges as usual, and
+/// its whole log can still be read, while it runs (fastetcd#195).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_log_is_read_whole_after_purges() {
+    const N: usize = 300;
+    let dir = tempfile::tempdir().unwrap();
+    let (_engine, mut log, sm) =
+        open_dir_with(dir.path(), WalLogOptions { keep_purged: true, ..small() }).await;
+    sm.mvcc().defer_apply_sync();
+    let stats = log.stats();
+    let checkpointer = spawn_checkpointer(
+        log.clone(),
+        sm.applied_index(),
+        CheckpointConfig { interval: Duration::from_millis(20), entries: 25 },
+    );
+    let raft = Raft::<TypeConfig>::new(1, config(), NopNetwork, log.clone(), sm.clone())
+        .await
+        .unwrap();
+    raft.initialize(BTreeSet::from([1])).await.unwrap();
+    wait_leader(&raft).await;
+    for i in 0..N {
+        raft.client_write(put(i)).await.unwrap();
+    }
+    // Snapshots every 50 entries purge the log and drop (here: keep)
+    // the segments behind them.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let segs = stats.segments.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let files = std::fs::read_dir(wal_dir(dir.path()))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".wal"))
+            .count();
+        if files > segs && log.pending_purge().is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no purge covered a segment ({segs} live, {files} files)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let purged = log.get_log_state().await.unwrap().last_purged_log_id;
+    assert!(purged.is_some_and(|p| p.index > 0), "the log was purged: {purged:?}");
+
+    // Read while the node runs: every entry from the first.
+    let history = fastetcd_raft::wal_log_store::read_history(dir.path()).unwrap();
+    assert!(history[0].log_id.index <= 1, "starts at {}", history[0].log_id.index);
+    let puts = history
+        .iter()
+        .filter(|e| matches!(&e.payload, openraft::EntryPayload::Normal(FastetcdLogEntry::Apply { .. })))
+        .count();
+    assert_eq!(puts, N, "every write is in the history");
+    raft.shutdown().await.unwrap();
+    checkpointer.abort();
+    let _ = checkpointer.await;
+
+    // Without keep_purged the same read refuses: the log is incomplete.
+    let other = tempfile::tempdir().unwrap();
+    {
+        let (_engine, log, sm) = open_dir(other.path()).await;
+        let checkpointer = spawn_checkpointer(
+            log.clone(),
+            sm.applied_index(),
+            CheckpointConfig { interval: Duration::from_millis(20), entries: 25 },
+        );
+        let raft = Raft::<TypeConfig>::new(1, config(), NopNetwork, log.clone(), sm.clone())
+            .await
+            .unwrap();
+        raft.initialize(BTreeSet::from([1])).await.unwrap();
+        wait_leader(&raft).await;
+        for i in 0..N {
+            raft.client_write(put(i)).await.unwrap();
+        }
+        // Read until a dropped segment shows (a read racing the drop of
+        // a file it listed fails too, with another error: read again).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            match fastetcd_raft::wal_log_store::read_history(other.path()) {
+                Err(e) if e.to_string().contains("not at the beginning") => break,
+                r => assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the history never showed a dropped segment: {:?}",
+                    r.map(|h| h.len())
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        raft.shutdown().await.unwrap();
+        checkpointer.abort();
+        let _ = checkpointer.await;
+    }
 }
 
 // ---- a slow disk (fastetcd#95) -------------------------------------------

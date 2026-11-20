@@ -78,6 +78,37 @@ pub fn wal_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("wal")
 }
 
+/// Every raft log entry this member has written, from the first, read
+/// from `data_dir`'s WAL without changing it (it may be running). The
+/// whole log is there only if the member ran with `--wal-keep-purged`
+/// from its start and never installed a snapshot; otherwise this fails,
+/// naming the first index it found (fastetcd#195: etcd's robustness
+/// suite reads each member's whole WAL the same way, and counts a
+/// member whose log does not start at the beginning as unreadable).
+pub fn read_history(data_dir: &Path) -> anyhow::Result<Vec<Entry<TypeConfig>>> {
+    let history = fastetcd_storage::raft_wal::read_history(&wal_dir(data_dir))?;
+    let mut entries = Vec::with_capacity(history.entries.len());
+    let mut expect: Option<u64> = None;
+    for (index, bytes) in &history.entries {
+        match expect {
+            None if *index > 1 => anyhow::bail!(
+                "the raft log in {} starts at index {index}, not at the beginning: the member \
+                 installed a snapshot, or purged its log without --wal-keep-purged",
+                data_dir.display()
+            ),
+            Some(e) if *index != e => {
+                anyhow::bail!("the raft log in {} has a gap before index {index}", data_dir.display())
+            }
+            _ => {}
+        }
+        expect = Some(index + 1);
+        let entry: Entry<TypeConfig> = bincode::deserialize(bytes)
+            .map_err(|e| anyhow::anyhow!("raft log entry {index}: {e}"))?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WalLogOptions {
     /// Preallocated size of each segment.
@@ -93,6 +124,10 @@ pub struct WalLogOptions {
     /// 0.9 sends a leader's heartbeats from RaftCore, which waits for the
     /// fsync of every append.
     pub election_timeout: Duration,
+    /// Keep the segments a purge covers on disk
+    /// ([`WalOptions::keep_purged`], `--wal-keep-purged`), so
+    /// [`read_history`] reads the whole log.
+    pub keep_purged: bool,
 }
 
 impl Default for WalLogOptions {
@@ -102,6 +137,7 @@ impl Default for WalLogOptions {
             cache_bytes: 64 * 1024 * 1024,
             sync_delay: Duration::ZERO,
             election_timeout: Duration::ZERO,
+            keep_purged: false,
         }
     }
 }
@@ -515,7 +551,7 @@ impl WalLogStore {
         opts: WalLogOptions,
     ) -> anyhow::Result<Self> {
         let segment_bytes = opts.segment_bytes;
-        let wal_opts = WalOptions { segment_bytes };
+        let wal_opts = WalOptions { segment_bytes, keep_purged: opts.keep_purged };
         if !has_segments(dir) {
             let copied = migrate(dir, &engine, wal_opts).await?;
             if copied > 0 {

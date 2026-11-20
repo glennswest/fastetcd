@@ -299,12 +299,30 @@ struct Args {
     /// Already-snapshotted writes (proposals, #80) to retain in the log
     /// after a purge: a catch-up buffer for followers just behind the
     /// snapshot.
+    /// etcd's `--snapshot-catchup-entries` (and its
+    /// `--experimental-snapshot-catchup-entries`) is the same setting
+    /// and sets this (#195).
     #[arg(
         long,
         env = "FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP",
-        default_value_t = 1000
+        default_value_t = 1000,
+        aliases = ["snapshot-catchup-entries", "experimental-snapshot-catchup-entries"]
     )]
     max_in_snapshot_log_to_keep: u64,
+
+    /// How often a watch stream with a `progress_notify` watcher gets a
+    /// progress notification, as a Go duration (`100ms`, `10s`, `10m0s`).
+    /// etcd's `--watch-progress-notify-interval` (or
+    /// `--experimental-watch-progress-notify-interval`); fastetcd's
+    /// default is 10 s, etcd's 10 m (#195).
+    #[arg(
+        long,
+        env = "FASTETCD_WATCH_PROGRESS_NOTIFY_INTERVAL",
+        default_value = "10s",
+        value_parser = fastetcd_server::watch::parse_go_duration,
+        alias = "experimental-watch-progress-notify-interval"
+    )]
+    watch_progress_notify_interval: std::time::Duration,
 
     /// Also take a raft snapshot (and purge the log) once the last one is
     /// this many seconds old and any write has been applied since, so a
@@ -495,6 +513,15 @@ struct Args {
     #[arg(long, env = "FASTETCD_WAL_CACHE_BYTES", default_value_t = 64 * 1024 * 1024)]
     wal_cache_bytes: u64,
 
+    /// Keep the WAL segments a purge covers on disk instead of deleting
+    /// them, as etcd keeps its WAL files, so `fastetcd persisted-requests`
+    /// can read the whole raft log (#195: etcd's robustness suite). Raft
+    /// still snapshots and purges as usual, and the WAL byte bound counts
+    /// only live segments; the kept ones grow without bound. For testing
+    /// and debugging, not production. fastetcd's own.
+    #[arg(long, env = "FASTETCD_WAL_KEEP_PURGED", default_value_t = false)]
+    wal_keep_purged: bool,
+
     /// The data file is made durable (one redb commit) at most this many
     /// milliseconds after an entry is applied. A crash loses at most
     /// this much applied state from the data file, and the WAL replays
@@ -645,6 +672,13 @@ enum Command {
         #[arg(long, default_value_t = false)]
         repair: bool,
     },
+    /// Print the client requests in this member's raft log, from its
+    /// first entry, one JSON object per line, for etcd's robustness
+    /// suite (#195; the format is in `persisted_requests.rs`). Reads
+    /// the WAL without changing it, so it also runs on a running
+    /// member. Fails unless the member ran with `--wal-keep-purged` from
+    /// its start and never installed a snapshot.
+    PersistedRequests,
 }
 
 /// Pick the first comma-separated URL from a list. Returns the
@@ -803,6 +837,9 @@ async fn run_subcommand(
             admin::cmd_restore(&args.data_dir, backup, *force).await
         }
         Command::Defrag => admin::cmd_defrag(&args.data_dir).await,
+        Command::PersistedRequests => {
+            fastetcd_server::persisted_requests::cmd_persisted_requests(&args.data_dir)
+        }
         Command::Sizing {
             nodes,
             pods_per_node,
@@ -1123,6 +1160,7 @@ async fn main() -> anyhow::Result<()> {
             segment_bytes: args.wal_segment_bytes,
             cache_bytes: args.wal_cache_bytes as usize,
             election_timeout: std::time::Duration::from_millis(args.election_timeout),
+            keep_purged: args.wal_keep_purged,
             ..Default::default()
         },
     )
@@ -1542,7 +1580,8 @@ async fn main() -> anyhow::Result<()> {
         directory.clone(),
     );
     let maintenance = MaintenanceService::new(server_state.clone());
-    let watch = WatchService::new(server_state.clone());
+    let watch = WatchService::new(server_state.clone())
+        .with_progress_notify_interval(args.watch_progress_notify_interval);
     let lease = LeaseService::new(server_state.clone());
     // etcd's Lock and Election services (#64).
     let lock = fastetcd_server::concurrency::LockService::new(server_state.clone());
@@ -1727,6 +1766,8 @@ async fn main() -> anyhow::Result<()> {
         })
     };
     startup.listening();
+    // etcd's line, which tools that start etcd wait for (#195).
+    fastetcd_server::startup::log_ready_to_serve(raft.clone());
 
     // SIGTERM is how a kubelet, systemd or podman stops a member; SIGINT
     // a terminal. Either stops cleanly (#161).

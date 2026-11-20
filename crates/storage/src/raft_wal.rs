@@ -81,11 +81,18 @@ pub struct WalOptions {
     /// Size each new segment is preallocated to; a segment past it is
     /// closed before the next write.
     pub segment_bytes: u64,
+    /// A purge deletes no segment: the ones it would delete stay on
+    /// disk, no longer counted as live ([`Wal::segment_count`]), so
+    /// [`read_history`] still finds every entry ever written, as etcd's
+    /// WAL files keep theirs (`--wal-keep-purged`, for etcd's
+    /// robustness suite, fastetcd#195). The disk use grows without
+    /// bound.
+    pub keep_purged: bool,
 }
 
 impl Default for WalOptions {
     fn default() -> Self {
-        Self { segment_bytes: DEFAULT_SEGMENT_BYTES }
+        Self { segment_bytes: DEFAULT_SEGMENT_BYTES, keep_purged: false }
     }
 }
 
@@ -353,6 +360,64 @@ impl WalReader {
     }
 }
 
+/// Every entry the segments in a WAL directory hold, purged or not:
+/// what [`read_history`] found.
+#[derive(Debug, Default)]
+pub struct History {
+    /// Each index's latest entry after overwrites and truncations.
+    pub entries: BTreeMap<u64, Vec<u8>>,
+    /// The last segment ends in a record that does not parse: a write in
+    /// progress (or a crash's torn tail). Reading stopped there.
+    pub torn_tail: bool,
+}
+
+/// Read every entry in `dir`'s segments without changing anything: a
+/// purge removes nothing here (with [`WalOptions::keep_purged`] its
+/// segments are still on disk), while an overwrite or a truncation
+/// does, as in [`Wal::open`]. Safe while a member writes the log: a
+/// record not fully written yet ends the read, and nothing is cut. For
+/// `fastetcd persisted-requests` (fastetcd#195), as etcd's robustness
+/// suite reads etcd's WAL.
+pub fn read_history(dir: &Path) -> io::Result<History> {
+    let seqs = list_segments(dir)?;
+    let mut history = History::default();
+    for (n, &seq) in seqs.iter().enumerate() {
+        let last = n + 1 == seqs.len();
+        let path = segment_path(dir, seq);
+        let buf = std::fs::read(&path)?;
+        let mut at = 0usize;
+        loop {
+            match parse(&buf, at) {
+                Parsed::Record { kind, index, payload, next } => {
+                    match kind {
+                        KIND_ENTRY => {
+                            let _ = history.entries.split_off(&index);
+                            history.entries.insert(index, payload.to_vec());
+                        }
+                        KIND_TRUNCATE => {
+                            let _ = history.entries.split_off(&index);
+                        }
+                        _ => {}
+                    }
+                    at = next;
+                }
+                Parsed::End => break,
+                Parsed::Bad(_) if last => {
+                    history.torn_tail = true;
+                    break;
+                }
+                Parsed::Bad(why) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("WAL segment {} is damaged at offset {at} ({why})", path.display()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(history)
+}
+
 struct Segment {
     seq: u64,
     /// Highest entry index written to it, if any.
@@ -377,12 +442,14 @@ pub struct Wal {
     /// fdatasync of it is a filesystem journal commit (#85), so the log
     /// moves to the spare as soon as that is ready (#164).
     preallocated_only: bool,
+    /// Segments a purge covered but [`WalOptions::keep_purged`] kept.
+    kept: usize,
 }
 
 impl Wal {
     /// Open (or create) the log in `dir` and replay it.
     pub fn open(dir: &Path, opts: WalOptions) -> io::Result<(Wal, Replay)> {
-        let opts = WalOptions { segment_bytes: opts.segment_bytes.max(4096) };
+        let opts = WalOptions { segment_bytes: opts.segment_bytes.max(4096), ..opts };
         std::fs::create_dir_all(dir)?;
         let seqs = list_segments(dir)?;
         let reader = Arc::new(WalReader::new(dir.to_path_buf()));
@@ -404,6 +471,7 @@ impl Wal {
                 reader,
                 spare: spawn_spare(dir, opts.segment_bytes),
                 preallocated_only: true,
+                kept: 0,
             };
             return Ok((wal, replay));
         }
@@ -482,7 +550,7 @@ impl Wal {
             .read(true)
             .write(true)
             .open(segment_path(dir, last_seq))?;
-        let wal = Wal {
+        let mut wal = Wal {
             dir: dir.to_path_buf(),
             opts,
             segments,
@@ -492,7 +560,15 @@ impl Wal {
             reader,
             spare: spawn_spare(dir, opts.segment_bytes),
             preallocated_only: false,
+            kept: 0,
         };
+        // Kept segments a purge already covered are not live: count
+        // them as kept again, as the purge did before the restart.
+        if opts.keep_purged {
+            if let Some((purged, _)) = replay.meta.get(&KIND_PURGE) {
+                wal.drop_segments_upto(*purged)?;
+            }
+        }
         Ok((wal, replay))
     }
 
@@ -576,8 +652,10 @@ impl Wal {
     }
 
     /// Delete the oldest segments while every entry in them is at
-    /// `<= index` (never the last one). The caller first makes a
-    /// [`KIND_PURGE`] at `>= index` durable. Returns how many went.
+    /// `<= index` (never the last one); with
+    /// [`WalOptions::keep_purged`] they stay on disk and only stop being
+    /// live. The caller first makes a [`KIND_PURGE`] at `>= index`
+    /// durable. Returns how many went.
     pub fn drop_segments_upto(&mut self, index: u64) -> io::Result<usize> {
         let mut dropped = 0;
         while self.segments.len() > 1
@@ -585,18 +663,27 @@ impl Wal {
         {
             let seg = self.segments.remove(0);
             self.reader.forget(seg.seq);
-            std::fs::remove_file(segment_path(&self.dir, seg.seq))?;
+            if self.opts.keep_purged {
+                self.kept += 1;
+            } else {
+                std::fs::remove_file(segment_path(&self.dir, seg.seq))?;
+            }
             dropped += 1;
         }
-        if dropped > 0 {
+        if dropped > 0 && !self.opts.keep_purged {
             sync_dir(&self.dir)?;
         }
         Ok(dropped)
     }
 
-    /// Number of segment files.
+    /// Number of live segment files (not those kept after a purge).
     pub fn segment_count(&self) -> usize {
         self.segments.len()
+    }
+
+    /// Segments a purge covered that [`WalOptions::keep_purged`] kept.
+    pub fn kept_segment_count(&self) -> usize {
+        self.kept
     }
 }
 
@@ -615,7 +702,7 @@ mod tests {
     use super::*;
 
     fn opts() -> WalOptions {
-        WalOptions { segment_bytes: 4096 }
+        WalOptions { segment_bytes: 4096, ..Default::default() }
     }
 
     fn entries(r: &Replay, reader: &WalReader) -> Vec<(u64, Vec<u8>)> {
@@ -701,7 +788,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tear_at, torn_segment);
         {
-            let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20 }).unwrap();
+            let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20, ..Default::default() }).unwrap();
             wal.append(&[(KIND_ENTRY, 0, b"zero")]).unwrap();
             let locs = wal
                 .append(&[(KIND_ENTRY, 1, b"one-one-one"), (KIND_ENTRY, 2, b"two")])
@@ -718,7 +805,7 @@ mod tests {
         f.write_all_at(b"XX", tear_at).unwrap();
         drop(f);
         {
-            let (mut wal, r) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20 }).unwrap();
+            let (mut wal, r) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20, ..Default::default() }).unwrap();
             assert!(r.torn_tail);
             assert_eq!(r.entries.keys().copied().collect::<Vec<_>>(), vec![0]);
             // A shorter new record at the cut, then reopen: the old
@@ -726,10 +813,72 @@ mod tests {
             wal.append(&[(KIND_ENTRY, 1, b"n")]).unwrap();
             wal.sync().unwrap();
         }
-        let (wal, r) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20 }).unwrap();
+        let (wal, r) = Wal::open(dir.path(), WalOptions { segment_bytes: 1 << 20, ..Default::default() }).unwrap();
         assert!(!r.torn_tail);
         let got = entries(&r, &wal.reader());
         assert_eq!(got, vec![(0, b"zero".to_vec()), (1, b"n".to_vec())]);
+    }
+
+    #[test]
+    fn kept_purged_segments_stay_readable_and_are_not_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = WalOptions { segment_bytes: 4096, keep_purged: true };
+        let files = |d: &Path| list_segments(d).unwrap().len();
+        let live;
+        {
+            let (mut wal, _) = Wal::open(dir.path(), keep).unwrap();
+            for i in 0..200u64 {
+                wal.append(&[(KIND_ENTRY, i, &[i as u8; 64])]).unwrap();
+            }
+            wal.append(&[(KIND_PURGE, 149, b"p149")]).unwrap();
+            wal.sync().unwrap();
+            let before = wal.segment_count();
+            let dropped = wal.drop_segments_upto(149).unwrap();
+            assert!(dropped > 0);
+            live = wal.segment_count();
+            assert_eq!(live, before - dropped, "kept segments are not live");
+            assert_eq!(wal.kept_segment_count(), dropped);
+            assert_eq!(files(dir.path()), before, "a kept segment is not deleted");
+        }
+        // The server's view is the purged log, as without keep_purged ...
+        let (wal, r) = Wal::open(dir.path(), keep).unwrap();
+        assert_eq!(*r.entries.keys().next().unwrap(), 150);
+        assert_eq!(wal.segment_count(), live, "after a restart the kept ones are still not live");
+        // ... and the history still has every entry.
+        let h = read_history(dir.path()).unwrap();
+        assert_eq!(h.entries.keys().copied().collect::<Vec<_>>(), (0..200).collect::<Vec<_>>());
+        assert_eq!(h.entries[&7], vec![7u8; 64]);
+        assert!(!h.torn_tail);
+    }
+
+    #[test]
+    fn history_applies_truncations_and_leaves_a_torn_tail_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = WalOptions { segment_bytes: 1 << 20, ..Default::default() };
+        let (tear_at, seg);
+        {
+            let (mut wal, _) = Wal::open(dir.path(), o).unwrap();
+            for i in 0..10u64 {
+                wal.append(&[(KIND_ENTRY, i, b"a")]).unwrap();
+            }
+            wal.append(&[(KIND_TRUNCATE, 7, b"")]).unwrap();
+            wal.append(&[(KIND_ENTRY, 5, b"b")]).unwrap();
+            let locs = wal.append(&[(KIND_ENTRY, 6, b"being-written")]).unwrap();
+            wal.sync().unwrap();
+            tear_at = locs[0].offset + HEADER_LEN + 2;
+            seg = locs[0].segment;
+        }
+        // Record 6 half written, as a running member's last append can be.
+        let path = segment_path(dir.path(), seg);
+        let f = OpenOptions::new().write(true).open(&path).unwrap();
+        f.write_all_at(b"XX", tear_at).unwrap();
+        drop(f);
+        let before = std::fs::read(&path).unwrap();
+        let h = read_history(dir.path()).unwrap();
+        assert!(h.torn_tail);
+        assert_eq!(h.entries.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(h.entries[&5], b"b");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "reading the history changes nothing");
     }
 
     /// Whether `path` holds written data at all, as `lseek(SEEK_DATA)`
@@ -759,7 +908,7 @@ mod tests {
         let tells = !has_written_data(&segment_path(calibrate.path(), 7))
             && has_written_data(&calibrate.path().join(SPARE));
 
-        let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: SEGMENT }).unwrap();
+        let (mut wal, _) = Wal::open(dir.path(), WalOptions { segment_bytes: SEGMENT, ..Default::default() }).unwrap();
         assert!(wal.preallocated_only, "segment 0 should be the preallocated one");
         if tells {
             assert!(
@@ -779,7 +928,7 @@ mod tests {
     #[test]
     fn the_log_moves_to_the_zero_filled_spare_once_it_is_ready() {
         let dir = tempfile::tempdir().unwrap();
-        let o = WalOptions { segment_bytes: 1 << 20 };
+        let o = WalOptions { segment_bytes: 1 << 20, ..Default::default() };
         {
             let (mut wal, _) = Wal::open(dir.path(), o).unwrap();
             wal.append(&[(KIND_VOTE, 0, b"vote"), (KIND_ENTRY, 1, b"one")]).unwrap();

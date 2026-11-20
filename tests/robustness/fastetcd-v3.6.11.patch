@@ -1,0 +1,242 @@
+diff --git a/tests/robustness/report/fastetcd.go b/tests/robustness/report/fastetcd.go
+new file mode 100644
+index 0000000..262619b
+--- /dev/null
++++ b/tests/robustness/report/fastetcd.go
+@@ -0,0 +1,222 @@
++// Copyright 2026 The fastetcd Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package report
++
++// Persisted requests of a fastetcd member (github.com/glennswest/fastetcd,
++// fastetcd#195). fastetcd's raft log is not an etcd WAL: when a `fastetcd`
++// binary sits next to the `etcd` one (fastetcd's shim), each member's
++// requests come from `fastetcd persisted-requests`, converted as
++// parseEntryNormal converts an etcd raft request.
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++
++	"go.etcd.io/etcd/tests/v3/framework/e2e"
++	"go.etcd.io/etcd/tests/v3/robustness/model"
++)
++
++func fastetcdBinary() string {
++	p := filepath.Join(filepath.Dir(e2e.BinPath.Etcd), "fastetcd")
++	if _, err := os.Stat(p); err != nil {
++		return ""
++	}
++	return p
++}
++
++type fastetcdPut struct {
++	Key   []byte `json:"key"`
++	Value []byte `json:"value"`
++	Lease int64  `json:"lease"`
++}
++
++type fastetcdDelete struct {
++	Key      []byte `json:"key"`
++	RangeEnd []byte `json:"range_end"`
++}
++
++type fastetcdRange struct {
++	Key      []byte `json:"key"`
++	RangeEnd []byte `json:"range_end"`
++	Limit    int64  `json:"limit"`
++}
++
++type fastetcdCompare struct {
++	Key    []byte          `json:"key"`
++	Target string          `json:"target"`
++	Result string          `json:"result"`
++	Value  json.RawMessage `json:"value"`
++}
++
++type fastetcdOp struct {
++	Range  *fastetcdRange  `json:"range"`
++	Put    *fastetcdPut    `json:"put"`
++	Delete *fastetcdDelete `json:"delete"`
++	Txn    *fastetcdTxn    `json:"txn"`
++}
++
++type fastetcdTxn struct {
++	Compare []fastetcdCompare `json:"compare"`
++	Success []fastetcdOp      `json:"success"`
++	Failure []fastetcdOp      `json:"failure"`
++}
++
++type fastetcdID struct {
++	ID int64 `json:"id"`
++}
++
++type fastetcdRequest struct {
++	Put         *fastetcdPut    `json:"put"`
++	Delete      *fastetcdDelete `json:"delete"`
++	Txn         *fastetcdTxn    `json:"txn"`
++	LeaseGrant  *fastetcdID     `json:"lease_grant"`
++	LeaseRevoke *fastetcdID     `json:"lease_revoke"`
++	Compact     *struct {
++		Revision int64 `json:"revision"`
++	} `json:"compact"`
++}
++
++func requestsPersistedByFastetcd(bin, dataDir string) ([]model.EtcdRequest, error) {
++	cmd := exec.Command(bin, "--data-dir", dataDir, "persisted-requests")
++	var stdout, stderr bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = &stderr
++	if err := cmd.Run(); err != nil {
++		return nil, fmt.Errorf("fastetcd persisted-requests %s: %w: %s", dataDir, err, stderr.String())
++	}
++	dec := json.NewDecoder(&stdout)
++	requests := []model.EtcdRequest{}
++	for dec.More() {
++		var r fastetcdRequest
++		if err := dec.Decode(&r); err != nil {
++			return nil, fmt.Errorf("fastetcd persisted-requests %s: %w", dataDir, err)
++		}
++		request, err := r.toModel()
++		if err != nil {
++			return nil, err
++		}
++		requests = append(requests, request)
++	}
++	return requests, nil
++}
++
++func (r fastetcdRequest) toModel() (model.EtcdRequest, error) {
++	switch {
++	case r.Put != nil:
++		return model.EtcdRequest{
++			Type: model.Txn,
++			Txn: &model.TxnRequest{
++				OperationsOnSuccess: []model.EtcdOperation{{
++					Type: model.PutOperation,
++					Put: model.PutOptions{
++						Key:     string(r.Put.Key),
++						Value:   model.ToValueOrHash(string(r.Put.Value)),
++						LeaseID: r.Put.Lease,
++					},
++				}},
++			},
++		}, nil
++	case r.Delete != nil:
++		return model.EtcdRequest{
++			Type: model.Txn,
++			Txn: &model.TxnRequest{
++				OperationsOnSuccess: []model.EtcdOperation{{
++					Type:   model.DeleteOperation,
++					Delete: model.DeleteOptions{Key: string(r.Delete.Key)},
++				}},
++			},
++		}, nil
++	case r.LeaseGrant != nil:
++		return model.EtcdRequest{Type: model.LeaseGrant, LeaseGrant: &model.LeaseGrantRequest{LeaseID: r.LeaseGrant.ID}}, nil
++	case r.LeaseRevoke != nil:
++		return model.EtcdRequest{Type: model.LeaseRevoke, LeaseRevoke: &model.LeaseRevokeRequest{LeaseID: r.LeaseRevoke.ID}}, nil
++	case r.Compact != nil:
++		return model.EtcdRequest{Type: model.Compact, Compact: &model.CompactRequest{Revision: r.Compact.Revision}}, nil
++	case r.Txn != nil:
++		txn := model.TxnRequest{
++			Conditions:          []model.EtcdCondition{},
++			OperationsOnSuccess: []model.EtcdOperation{},
++			OperationsOnFailure: []model.EtcdOperation{},
++		}
++		for _, c := range r.Txn.Compare {
++			var v int64
++			if c.Target != "value" {
++				if err := json.Unmarshal(c.Value, &v); err != nil {
++					return model.EtcdRequest{}, fmt.Errorf("fastetcd compare value %s: %w", c.Value, err)
++				}
++			}
++			switch {
++			case c.Result == "equal" && c.Target == "version":
++				txn.Conditions = append(txn.Conditions, model.EtcdCondition{Key: string(c.Key), ExpectedVersion: v})
++			case c.Result == "equal" && c.Target == "mod":
++				txn.Conditions = append(txn.Conditions, model.EtcdCondition{Key: string(c.Key), ExpectedRevision: v})
++			default:
++				return model.EtcdRequest{}, fmt.Errorf("unsupported condition: %+v", c)
++			}
++		}
++		for _, op := range r.Txn.Success {
++			o, err := op.toModel()
++			if err != nil {
++				return model.EtcdRequest{}, err
++			}
++			txn.OperationsOnSuccess = append(txn.OperationsOnSuccess, o)
++		}
++		for _, op := range r.Txn.Failure {
++			o, err := op.toModel()
++			if err != nil {
++				return model.EtcdRequest{}, err
++			}
++			txn.OperationsOnFailure = append(txn.OperationsOnFailure, o)
++		}
++		return model.EtcdRequest{Type: model.Txn, Txn: &txn}, nil
++	default:
++		return model.EtcdRequest{}, fmt.Errorf("unhandled fastetcd request: %+v", r)
++	}
++}
++
++// toModel converts as toEtcdOperation does (a put inside a txn carries
++// no lease there either).
++func (op fastetcdOp) toModel() (model.EtcdOperation, error) {
++	switch {
++	case op.Range != nil:
++		return model.EtcdOperation{
++			Type: model.RangeOperation,
++			Range: model.RangeOptions{
++				Start: string(op.Range.Key),
++				End:   string(op.Range.RangeEnd),
++				Limit: op.Range.Limit,
++			},
++		}, nil
++	case op.Put != nil:
++		return model.EtcdOperation{
++			Type: model.PutOperation,
++			Put: model.PutOptions{
++				Key:   string(op.Put.Key),
++				Value: model.ToValueOrHash(string(op.Put.Value)),
++			},
++		}, nil
++	case op.Delete != nil:
++		return model.EtcdOperation{
++			Type:   model.DeleteOperation,
++			Delete: model.DeleteOptions{Key: string(op.Delete.Key)},
++		}, nil
++	default:
++		return model.EtcdOperation{}, fmt.Errorf("unknown op type %+v", op)
++	}
++}
+diff --git a/tests/robustness/report/wal.go b/tests/robustness/report/wal.go
+index 077ddc8..3bce59b 100644
+--- a/tests/robustness/report/wal.go
++++ b/tests/robustness/report/wal.go
+@@ -83,6 +83,9 @@ func PersistedRequestsDirs(lg *zap.Logger, dataDirs []string) ([]model.EtcdReque
+ }
+ 
+ func requestsPersistedInWAL(lg *zap.Logger, dataDir string) ([]model.EtcdRequest, error) {
++	if fastetcd := fastetcdBinary(); fastetcd != "" {
++		return requestsPersistedByFastetcd(fastetcd, dataDir)
++	}
+ 	_, ents, err := ReadWAL(lg, dataDir)
+ 	if err != nil {
+ 		return nil, err

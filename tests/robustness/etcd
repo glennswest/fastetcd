@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# The `etcd` binary etcd's robustness suite starts, for fastetcd (#195).
+#
+# The suite (etcd v3.6.11 tests/robustness, through its e2e framework)
+# runs `<bin-dir>/etcd` with etcd's flags and waits for `ready to serve
+# client requests`, which fastetcd logs itself. fastetcd sits next to
+# this script (members inherit only ETCD_*, ETCDCTL_*, EXPECT_* and PATH
+# from the harness, so it is found by path, not by an env var).
+#
+# - `--version`: the etcd version the suite's code paths are chosen for
+#   (its 3.6 behaviour), then fastetcd's own.
+# - `--experimental-compaction-batch-limit` / `--compaction-batch-limit`
+#   are dropped: fastetcd compacts a revision range in one pass, so it
+#   has no batch to limit.
+# - `--wal-keep-purged` is added, so `fastetcd persisted-requests` (read
+#   by the suite's patched report/wal.go) sees each member's whole log.
+# Every other flag goes to fastetcd as given; one it does not take stops
+# the member, which the suite reports.
+set -euo pipefail
+fastetcd="$(dirname "$0")/fastetcd"
+if [ "${1:-}" = "--version" ]; then
+    echo "etcd Version: 3.6.11"
+    echo "Implementation: $("$fastetcd" --version)"
+    exit 0
+fi
+args=()
+for a in "$@"; do
+    case "$a" in
+        --experimental-compaction-batch-limit=* | --compaction-batch-limit=*) ;;
+        *) args+=("$a") ;;
+    esac
+done
+exec "$fastetcd" --wal-keep-purged "${args[@]}"

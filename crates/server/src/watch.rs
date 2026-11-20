@@ -50,12 +50,61 @@ use crate::traffic::GaugeHold;
 #[derive(Clone)]
 pub struct WatchService {
     state: Arc<ServerState>,
+    progress_notify_interval: Duration,
 }
+
+/// How often a `progress_notify` watcher gets a progress notification
+/// unless `--watch-progress-notify-interval` says otherwise.
+pub const DEFAULT_PROGRESS_NOTIFY_INTERVAL: Duration = Duration::from_secs(10);
 
 impl WatchService {
     pub fn new(state: Arc<ServerState>) -> Self {
-        Self { state }
+        Self { state, progress_notify_interval: DEFAULT_PROGRESS_NOTIFY_INTERVAL }
     }
+
+    /// Send progress notifications every `interval` (etcd's
+    /// `--watch-progress-notify-interval`, #195).
+    pub fn with_progress_notify_interval(mut self, interval: Duration) -> Self {
+        self.progress_notify_interval = interval;
+        self
+    }
+}
+
+/// Parse a Go `time.Duration` string, as etcd's flags take one: a
+/// sequence of decimal numbers with units `ns`, `us` (or `µs`), `ms`,
+/// `s`, `m`, `h` (`100ms`, `1.5s`, `10m0s`). Zero and negative
+/// durations are refused: an interval must be positive.
+pub fn parse_go_duration(v: &str) -> Result<Duration, String> {
+    let bad = || format!("{v:?} is not a duration such as 100ms, 10s or 10m0s");
+    let mut rest = v.trim();
+    if rest.is_empty() {
+        return Err(bad());
+    }
+    let mut total = 0f64;
+    while !rest.is_empty() {
+        let num_len = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).ok_or_else(bad)?;
+        if num_len == 0 {
+            return Err(bad());
+        }
+        let n: f64 = rest[..num_len].parse().map_err(|_| bad())?;
+        rest = &rest[num_len..];
+        let unit_len = rest.find(|c: char| c.is_ascii_digit() || c == '.').unwrap_or(rest.len());
+        let secs = match &rest[..unit_len] {
+            "ns" => 1e-9,
+            "us" | "µs" | "μs" => 1e-6,
+            "ms" => 1e-3,
+            "s" => 1.0,
+            "m" => 60.0,
+            "h" => 3600.0,
+            _ => return Err(bad()),
+        };
+        total += n * secs;
+        rest = &rest[unit_len..];
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return Err(format!("{v:?}: the interval must be positive"));
+    }
+    Ok(Duration::from_secs_f64(total))
 }
 
 #[tonic::async_trait]
@@ -103,7 +152,8 @@ impl Watch for WatchService {
             let state = state.clone();
             let stream_state = stream_state.clone();
             let tx = tx.clone();
-            tokio::spawn(progress_notify_ticker(state, stream_state, tx));
+            let interval = self.progress_notify_interval;
+            tokio::spawn(progress_notify_ticker(state, stream_state, tx, interval));
         }
 
         // Inbound handler runs in this task.
@@ -795,8 +845,9 @@ async fn progress_notify_ticker(
     state: Arc<ServerState>,
     stream_state: Arc<Mutex<WatchStreamState>>,
     tx: mpsc::Sender<Result<pb::WatchResponse, Status>>,
+    interval: Duration,
 ) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(10));
+    let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the immediate first tick.
     ticker.tick().await;
@@ -833,6 +884,20 @@ async fn progress_notify_ticker(
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn go_durations_parse_as_etcds_flags_take_them() {
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(parse_go_duration("100ms"), Ok(ms(100)));
+        assert_eq!(parse_go_duration("10s"), Ok(ms(10_000)));
+        assert_eq!(parse_go_duration("10m0s"), Ok(ms(600_000)));
+        assert_eq!(parse_go_duration("1.5s"), Ok(ms(1500)));
+        assert_eq!(parse_go_duration("1h2m"), Ok(ms(3_720_000)));
+        assert_eq!(parse_go_duration("250us"), Ok(Duration::from_micros(250)));
+        for bad in ["", "10", "s", "10x", "-1s", "0s", "1..2s"] {
+            assert!(parse_go_duration(bad).is_err(), "{bad:?} parsed");
+        }
+    }
 
     fn event(i: usize, value_len: usize) -> mvccpb::Event {
         mvccpb::Event {

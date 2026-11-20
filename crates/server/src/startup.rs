@@ -302,6 +302,26 @@ pub fn log_raft_ready(raft: Raft<TypeConfig>, start: Instant) {
     });
 }
 
+/// Log etcd's `ready to serve client requests` once this member serves
+/// clients (call it once the client listener is up) and knows a leader,
+/// as etcd does after it has joined: tools that start etcd and wait for
+/// the line (etcd's e2e and robustness harnesses, #195) can start
+/// fastetcd. Gives up quietly if raft stops first.
+pub fn log_ready_to_serve(raft: Raft<TypeConfig>) {
+    tokio::spawn(async move {
+        let mut metrics = raft.metrics();
+        loop {
+            if metrics.borrow_and_update().current_leader.is_some() {
+                tracing::info!("ready to serve client requests");
+                return;
+            }
+            if metrics.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
