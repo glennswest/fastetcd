@@ -1599,12 +1599,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     members with the peer proxy, Blackhole/Delay/Drop peer network,
     BlackholeUntilSnapshot, MemberReplace. Mixed-version and LazyFS
     scenarios need binaries that are absent, so they are skipped.
-    - [ ] storage `raft_wal`: `keep_purged` (a purge drops nothing from
+    - [x] storage `raft_wal`: `keep_purged` (a purge drops nothing from
       disk; kept segments are not counted as live, so the WAL byte bound
       does not loop) and a read-only `read_history` (ignores purges,
       applies overwrites and truncations, stops at a torn tail without
       cutting it: the member is still running).
-    - [ ] server: `--wal-keep-purged`; `fastetcd persisted-requests`
+    - [x] server: `--wal-keep-purged`; `fastetcd persisted-requests`
       (the history from index 0 as JSON lines in the suite's request
       shape: puts, deletes, txns with writes, lease grants with the id
       apply allocates, revokes, compactions; read-only txns skipped, as
@@ -1613,13 +1613,26 @@ Tracked live in the Claude task system. Snapshot of the order:
       `--max-in-snapshot-log-to-keep`) and
       `--watch-progress-notify-interval` (was a fixed 10 s); the log line
       `ready to serve client requests` once serving with a leader.
-    - [ ] tests/robustness: shim `etcd` (`--version`, drops
+    - [x] tests/robustness: shim `etcd` (`--version`, drops
       `--experimental-compaction-batch-limit` which has no fastetcd
       equivalent, adds `--wal-keep-purged`, execs fastetcd), a patch to
       the suite's report/wal.go (reads `persisted-requests` when
       FASTETCD_BIN is set), run.sh (Go, etcd v3.6.11, patch, run
       TestRobustnessExploratory).
-    - [ ] docs (02-testing 3b, 01-configuration flags), CHANGELOG.
-    - [ ] sc-build: build/clippy/tests; then sc-build tests/robustness/run.sh;
-      triage each failure (fastetcd bug → own issue; harness mismatch →
-      fix here).
+    - [x] docs (02-testing 3b, 01-configuration flags), CHANGELOG.
+    - [x] Runs (SC_BUILD_EXPECT_FAIL) and harness fixes: clap refused a
+      repeated flag (now last wins, as etcd); listen URLs naming
+      `localhost` failed (now resolved); default metrics port shared by
+      3 members (shim turns it off); scenarios skipped without gofail
+      (patch runs them without it; run.sh fails if all skip); reports
+      lost to a cross-filesystem rename (RESULTS_DIR on the data dirs'
+      filesystem); reports + go test + member logs come back as a
+      base64 artifact; tests/robustness/replay.py checks histories.
+    - [x] Triage: #220 (Version too low after compaction: the only
+      mismatch in all 1-member scenarios), #222 (clientv3 loops on a
+      watch at a compacted revision: the 3-member hang after a kill),
+      #223 (spurious watch gap warning since #160), 3-member write
+      latency past the suite's timeout (evidence on #204). Each filed
+      and proposed (P1, P1, P3).
+    - [ ] sc-build (build, clippy, tests) of wip/195; merge to main;
+      release 1.42.0; image; shipped (`log:ready to serve client requests`).
