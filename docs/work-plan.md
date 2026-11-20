@@ -1569,17 +1569,21 @@ Tracked live in the Claude task system. Snapshot of the order:
 
 96. **New stores start at revision 1, as etcd's (#160, P3; owner's
     decision (a) on #195).** Existing revisions never move.
-    - [ ] storage: `MvccStore::apply_start_revision`: at revision 0 the
+    - [x] storage: `MvccStore::apply_start_revision`: at revision 0 the
       store moves to 1 (persisted, no event); otherwise nothing.
-    - [ ] raft: `FastetcdLogEntry::StartRevision` (appended last, so old
+    - [x] raft: `FastetcdLogEntry::StartRevision` (appended last, so old
       tags keep their place); applied as above, answers as a Noop.
-    - [ ] server: before a revision-creating proposal on a store at 0,
+    - [x] server: before a revision-creating proposal on a store at 0,
       propose `StartRevision` first and wait for it (any member; a
       follower forwards it). Proposed only if no reachable member is
       older than 1.41 (it could not decode it); an older member keeps
       the cluster's 0-based numbering. A leader also proposes it on an
       empty store, so an empty cluster reports revision 1, as etcd.
-    - [ ] migrate (latest-only): the import starts at revision 1, first
+    - [x] migrate (latest-only): the import starts at revision 1, first
       key at 2. `--preserve-revisions` keeps etcd's own.
-    - [ ] tests (storage, server, migrate), docs (00-design, README
+    - [x] tests (storage, server, migrate), docs (00-design, README
       differences, 03-deploy upgrade note), CHANGELOG, 1.41.0.
+      Diagnostic run on wip/160 (f1f9ecb): 9 server tests assumed the
+      first write was revision 1; updated (8f3e82c). lease_clock_step
+      warms the first write before its TTL-timed window.
+    - [ ] sc-build of main, release 1.41.0, image, shipped.
