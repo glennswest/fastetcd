@@ -42,7 +42,10 @@ use fastetcd_storage::mvcc::MvccStore;
 /// for `--enable-grpc-gateway`. Their env vars take true/false, 1/0,
 /// yes/no, on/off.
 #[derive(Debug, Parser)]
-#[command(name = "fastetcd", version, about)]
+// A flag given twice takes its last value, as etcd's Go flags do: etcd's
+// own e2e and robustness harnesses pass `--initial-cluster-token` and
+// `--snapshot-count` twice (#195).
+#[command(name = "fastetcd", version, about, args_override_self = true)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -1870,6 +1873,17 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("fastetcd").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_repeated_flag_takes_its_last_value_as_etcds_do() {
+        let a = parse(&["--snapshot-count=100", "--snapshot-count=1000", "--initial-cluster-token=a", "--initial-cluster-token=new"])
+            .unwrap();
+        assert_eq!(a.snapshot_count, 1000);
+        assert_eq!(a.initial_cluster_token.as_deref(), Some("new"));
+        let a = parse(&["--snapshot-catchup-entries=100", "--experimental-watch-progress-notify-interval=100ms"]).unwrap();
+        assert_eq!(a.max_in_snapshot_log_to_keep, 100);
+        assert_eq!(a.watch_progress_notify_interval, std::time::Duration::from_millis(100));
     }
 
     #[test]
