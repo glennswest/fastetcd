@@ -233,11 +233,11 @@ async fn a_peer_url_updated_through_a_follower_is_where_every_member_dials() {
     c.member_update(pb::MemberUpdateRequest { id: ids[target], peer_ur_ls: vec![new_url.clone()] })
         .await
         .expect("MemberUpdate through a follower");
-    let all: Vec<&Member> = members.iter().collect();
-    until_every_list(&all, "the new URL", |l| {
-        l.iter().any(|m| m.id == ids[target] && m.peer_ur_ls == vec![new_url.clone()])
-    })
-    .await;
+    // The leader and the follower have it. The target itself may not
+    // yet: from the change on, the leader sends it entries at the new
+    // address, where it does not listen until it moves (as on etcd).
+    let has_new = |l: &[pb::Member]| l.iter().any(|m| m.id == ids[target] && m.peer_ur_ls == vec![new_url.clone()]);
+    until_every_list(&[&members[leader], &members[follower]], "the new URL", has_new).await;
 
     // The target now listens only on its new port (its --initial-cluster
     // still names the old one): the leader must dial the new address.
@@ -246,15 +246,13 @@ async fn a_peer_url_updated_through_a_follower_is_where_every_member_dials() {
     members[target].start(&initial).await;
     put(&members[leader], "after-update").await;
     until_local(&members[target], "after-update").await;
+    until_every_list(&[&members[target]], "its own new URL", has_new).await;
 
     // A restart of the follower, with the old URL in --initial-cluster,
     // routes from the membership too: made leader, it reaches the target.
     members[follower].kill().await;
     members[follower].start(&initial).await;
-    until_every_list(&[&members[follower]], "the new URL after restart", |l| {
-        l.iter().any(|m| m.id == ids[target] && m.peer_ur_ls == vec![new_url.clone()])
-    })
-    .await;
+    until_every_list(&[&members[follower]], "the new URL after restart", has_new).await;
     let deadline = Instant::now() + WAIT;
     loop {
         let (_, now_leader) = ids_and_leader(&members).await;
