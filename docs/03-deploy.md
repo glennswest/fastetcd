@@ -747,8 +747,9 @@ etcd's `Downgrade` RPC answers in those terms (#192; root while auth is
 on; gateway `/v3/maintenance/downgrade`):
 
 - **`etcdctl downgrade validate <version>`** takes a **fastetcd**
-  version (`1.33`, `1.33.0` or `v1.33.0`) and says whether this cluster
-  may go back to it. An etcd version (`3.5`) and a version not older
+  version (`1.33`, `1.33.0` or `v1.33.0`; a pre-release such as
+  `1.33.0-rc1` is older than its release, in semver order, so the 1.33
+  floor refuses it, #203) and says whether this cluster may go back to it. An etcd version (`3.5`) and a version not older
   than the answering member's are `InvalidArgument`. Otherwise every
   floor above the target that applies refuses it, `FailedPrecondition`
   naming each and the lowest version allowed; a pass answers with the

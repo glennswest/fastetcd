@@ -21,6 +21,7 @@ use fastetcd_proto::etcdserverpb as pb;
 use tonic::Status;
 
 use crate::state::ServerState;
+use crate::version_gate::{parse_version, Version};
 
 /// This binary's fastetcd version.
 pub const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,29 +96,22 @@ fn show((a, b, c): (u64, u64, u64)) -> String {
 }
 
 /// A target version: `X.Y` (as `X.Y.0`) or `X.Y.Z`, with an optional
-/// leading `v` and an optional pre-release suffix on the patch.
-pub fn parse_target(v: &str) -> Option<(u64, u64, u64)> {
+/// leading `v` and an optional pre-release (and build) suffix on the
+/// patch. A pre-release keeps its place in semver order: `1.33.0-rc1` is
+/// older than `1.33.0` (#203).
+pub fn parse_target(v: &str) -> Option<Version> {
     let v = v.trim();
     let v = v.strip_prefix('v').unwrap_or(v);
-    let core = v.split(['-', '+']).next()?;
-    let parts: Vec<&str> = core.split('.').collect();
-    let num = |s: &str| -> Option<u64> {
-        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        s.parse().ok()
-    };
-    match parts.as_slice() {
-        [a, b] => Some((num(a)?, num(b)?, 0)),
-        [a, b, c] => Some((num(a)?, num(b)?, num(c)?)),
-        _ => None,
+    if !v.contains(['-', '+']) && v.split('.').count() == 2 {
+        return parse_version(&format!("{v}.0"));
     }
+    parse_version(v)
 }
 
 /// VALIDATE: may a cluster that has used `used`, answered by a member
 /// running `this`, go back to `target`? `Ok` carries `this`.
 pub fn validate(this: &str, target: &str, used: Used) -> Result<String, Status> {
-    let own = crate::version_gate::parse_version(this)
+    let own = parse_version(this)
         .ok_or_else(|| Status::internal(format!("this member's version {this:?} does not parse")))?;
     let Some(want) = parse_target(target) else {
         return Err(Status::invalid_argument(format!(
@@ -125,7 +119,7 @@ pub fn validate(this: &str, target: &str, used: Used) -> Result<String, Status> 
              or 1.33.0 (this member runs {this})"
         )));
     };
-    if want.0 == 3 {
+    if want.core.0 == 3 {
         return Err(Status::invalid_argument(format!(
             "invalid downgrade target version {target:?}: that is an etcd version, and fastetcd \
              has no etcd cluster version to lower; give the fastetcd version to go back to, such \
@@ -138,7 +132,8 @@ pub fn validate(this: &str, target: &str, used: Used) -> Result<String, Status> 
              {this}"
         )));
     }
-    let refusing: Vec<Floor> = floors(used).into_iter().filter(|f| want < f.since).collect();
+    let refusing: Vec<Floor> =
+        floors(used).into_iter().filter(|f| want < Version::release(f.since)).collect();
     let Some(lowest) = refusing.iter().map(|f| f.since).max() else {
         return Ok(this.to_string());
     };
@@ -147,7 +142,7 @@ pub fn validate(this: &str, target: &str, used: Used) -> Result<String, Status> 
     Err(Status::failed_precondition(format!(
         "cannot downgrade this cluster to fastetcd {}: {}. The lowest version it may go back to \
          is {} (docs/03-deploy.md, Downgrades)",
-        show(want),
+        want,
         reasons.join("; "),
         show(lowest)
     )))
@@ -171,12 +166,13 @@ mod tests {
 
     #[test]
     fn targets_parse() {
-        assert_eq!(parse_target("1.33"), Some((1, 33, 0)));
-        assert_eq!(parse_target("1.33.2"), Some((1, 33, 2)));
-        assert_eq!(parse_target("v1.33.2"), Some((1, 33, 2)));
-        assert_eq!(parse_target(" 1.33.2-rc1 "), Some((1, 33, 2)));
-        assert_eq!(parse_target("3.5"), Some((3, 5, 0)));
-        for bad in ["", "1", "1.x", "1.2.3.4", "junk", "1..2", "-1.2"] {
+        let rel = |c| Some(Version::release(c));
+        assert_eq!(parse_target("1.33"), rel((1, 33, 0)));
+        assert_eq!(parse_target("1.33.2"), rel((1, 33, 2)));
+        assert_eq!(parse_target("v1.33.2"), rel((1, 33, 2)));
+        assert_eq!(parse_target(" 1.33.2-rc1 ").map(|v| v.to_string()), Some("1.33.2-rc1".into()));
+        assert_eq!(parse_target("3.5"), rel((3, 5, 0)));
+        for bad in ["", "1", "1.x", "1.2.3.4", "junk", "1..2", "-1.2", "1.33-rc1", "1.33.0-"] {
             assert_eq!(parse_target(bad), None, "{bad:?}");
         }
     }
@@ -200,6 +196,29 @@ mod tests {
         for f in ["1.10.0", "1.12.0", "1.22.0", "1.23.0", "1.33.0"] {
             assert!(err.message().contains(&format!("below {f}")), "{f}: {}", err.message());
         }
+    }
+
+    #[test]
+    fn a_prerelease_is_older_than_its_release() {
+        // 1.33.0-rc1 predates 1.33.0, so the 1.33.0 floor refuses it (#203).
+        let err = validate("1.39.0", "1.33.0-rc1", ALL).unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("to fastetcd 1.33.0-rc1"), "{}", err.message());
+        assert!(err.message().contains("below 1.33.0"), "{}", err.message());
+        assert!(err.message().contains("may go back to is 1.33.0"), "{}", err.message());
+        let err = validate("1.39.0", "v1.23.0-rc.2", Used::default()).unwrap_err();
+        assert!(err.message().contains("may go back to is 1.23.0"), "{}", err.message());
+        // A pre-release after a floor's release passes.
+        assert_eq!(validate("1.39.0", "1.33.1-rc1", ALL).unwrap(), "1.39.0");
+        // Against this member: its own release is newer than its pre-release,
+        // and its pre-release older than its release.
+        let err = validate("1.40.0-rc1", "1.40.0", ALL).unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert!(err.message().contains("not older"), "{}", err.message());
+        assert_eq!(validate("1.40.0", "1.40.0-rc1", ALL).unwrap(), "1.40.0");
+        assert_eq!(validate("1.40.0-rc.2", "1.40.0-rc.1", ALL).unwrap(), "1.40.0-rc.2");
+        let err = validate("1.40.0-rc.2", "1.40.0-rc.10", ALL).unwrap_err();
+        assert!(err.message().contains("not older"), "{}", err.message());
     }
 
     #[test]

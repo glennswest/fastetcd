@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### 2026-11-19
+- **fix:** Pre-release versions order per semver (#203). Downgrade VALIDATE cut a pre-release suffix off, so `1.33.0-rc1` passed the 1.33.0 floor as if it were 1.33.0, though a 1.33.0 pre-release need not read what 1.33.0 does; the member version gate (`MembersAtLeast`, #56/#92) did the same with a member's answered version. Both now compare with `version_gate::Version` (semver 2.0.0 §11: `X.Y.Z-pre` < `X.Y.Z`, numeric identifiers below alphanumeric, build metadata ignored), and VALIDATE's refusal names the pre-release target as given.
+- **fix:** `tests/watch_load.sh` exits non-zero when a benchmark run fails (#203). Each run's output went through `grep … || true`, so a failed `tests/read_latency.sh` still exited 0. Every run is still made; a failed one prints its whole output, and the script names the failed runs and exits 1.
 - **fix:** Downgrade ENABLE and CANCEL are no longer a stub (#201): they answered `Unimplemented` with a message saying why they were not done, and README listed them under "Not implemented". They now answer as any unknown action does (`InvalidArgument`, `unknown downgrade action N`); VALIDATE is unchanged. The gap is #202. README, 00-design, 03-deploy and the deck say only what is served.
 
 ### 2026-11-18

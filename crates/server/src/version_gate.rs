@@ -15,7 +15,7 @@
 //! older than 1.10 (#77, #134). Do not add one (03-deploy).
 
 use fastetcd_raft::version_gate::GateError;
-pub use fastetcd_raft::version_gate::{parse_version, MembersAtLeast};
+pub use fastetcd_raft::version_gate::{parse_version, MembersAtLeast, Version};
 use tonic::Status;
 
 use crate::state::ServerState;
