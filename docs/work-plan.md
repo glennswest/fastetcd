@@ -1511,7 +1511,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     collector on the platform: none in the component registry, and
     ironprom takes OTLP metrics only. Asked on #193: (a) close as not
     wanted until a collector exists (recommended) or (b) build
-    `--otlp-endpoint` anyway. Waiting on the owner (`wait-owner`).
+    `--otlp-endpoint` anyway.
+    - [x] Owner/master, 2026-11-18: (a). Closed as not wanted; nothing
+      built. When the platform has a trace collector it is filed as a
+      `gap` and proposed. 00-design no longer points at #193.
 
 92. **Apply loop on a dedicated thread? Measure first (#194, P3).** The
     issue's rule: build it only if the shared runtime shows up in write

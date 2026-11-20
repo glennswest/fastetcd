@@ -148,7 +148,7 @@ member.
 ### Logging: `tracing`
 
 `tracing` to stderr, filtered by `RUST_LOG`, else `--log-level`
-(etcd's values, #54), else `info`. No trace export (OTLP is #193).
+(etcd's values, #54), else `info`. No trace export: the platform has no trace collector.
 
 ## Layout
 

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-20
+- **docs:** #193 closed as not wanted (owner's decision (a)): no OTLP trace export is built while the platform has no trace collector; when one exists it is filed as a `gap`. 00-design says there is no trace export without pointing at an open design.
+
 ### 2026-11-18
 - **docs:** #195 (etcd robustness suite) waits on the owner: the suite's model starts an empty store at revision 1 and fastetcd's at 0 (#160, undecided), so every scenario would fail at its first put; it also reads each member's etcd WAL for persisted requests (adapter planned: a WAL-dump subcommand, a harness patch, a flag shim). Work plan item 93.
 - **docs:** #193 (OTLP trace export): there is no trace collector on the platform (the registry has none; ironprom takes OTLP metrics only). Asked the owner whether to close it as not wanted (recommended) or build `--otlp-endpoint` anyway; work plan item 91.
