@@ -1601,7 +1601,7 @@ async fn main() -> anyhow::Result<()> {
     // Answers other members' ConfirmLeader, serves forwarded reads behind
     // the same read barrier and batches forwarded writes (#75).
     let mut peer_service =
-        RaftPeerService::new(raft, peer_mvcc.clone()).with_log_progress(log_progress);
+        RaftPeerService::new(raft.clone(), peer_mvcc.clone()).with_log_progress(log_progress);
     if let Some(r) = peer_read_index {
         peer_service = peer_service.with_read_index(r);
     }
