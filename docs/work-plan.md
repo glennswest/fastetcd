@@ -1542,6 +1542,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     faults without gofail (kill, blackhole, member replace). Asked on
     #195: (a) fix #160 for new stores (recommended), (b) offset revisions
     in the harness, (c) document only and close.
+    - [x] Master, 2026-11-20: (a). #160 proposed as its own item (new
+      stores at revision 1, existing stores keep theirs; its own
+      release); #195 moved back in line `--after fastetcd#160`. Nothing
+      built for #195 yet: the adapter above is its plan.
 
 94. **Downgrade ENABLE/CANCEL stub (#201, P0, nightly stub sweep).**
     README listed Downgrade ENABLE/CANCEL under a stub marker, and the

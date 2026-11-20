@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-20
+- **docs:** #195 (etcd robustness suite): owner chose (a). #160 (new stores start at revision 1, as etcd's; existing stores keep their numbering) goes first as its own release; #195 waits behind it. Work plan item 93.
 - **docs:** #193 closed as not wanted (owner's decision (a)): no OTLP trace export is built while the platform has no trace collector; when one exists it is filed as a `gap`. 00-design says there is no trace export without pointing at an open design.
 
 ### 2026-11-18
