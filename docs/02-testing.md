@@ -205,16 +205,45 @@ go.etcd.io/etcd/etcdctl/v3@latest`).
 
 ### 3b. etcd robustness suite
 
-[etcd-io/etcd/tests/robustness/](https://github.com/etcd-io/etcd/tree/main/tests/robustness)
+[etcd-io/etcd/tests/robustness/](https://github.com/etcd-io/etcd/tree/v3.6.11/tests/robustness)
 is black-box correctness testing maintained by the etcd team:
-randomized client workloads, fault injection (kill / partition /
-restart), and a linearizability checker
-([Porcupine](https://github.com/anishathalye/porcupine)). It expects
-to start and supervise an etcd-compatible server process. Adapting
-it to fastetcd is a follow-up effort and the single highest-ROI
-correctness investment beyond the rings above.
+randomized client workloads, fault injection, and a linearizability
+checker ([Porcupine](https://github.com/anishathalye/porcupine)) for
+the KV API plus a check of every watch event against the history.
 
-fastetcd does not run it; the adapter and its outline are #195.
+    sc-build 'tests/robustness/run.sh [go test -run pattern]'
+
+`tests/robustness/run.sh` fetches etcd v3.6.11 and its Go, applies
+`tests/robustness/fastetcd-v3.6.11.patch`, builds this tree's fastetcd
+and runs `go test ./robustness -run TestRobustnessExploratory` with
+`--bin-dir` pointing at fastetcd and a shim named `etcd` (#195):
+
+- **The shim** (`tests/robustness/etcd`) answers `--version` with the
+  etcd version the suite's code paths are chosen for (3.6.11), drops
+  `--experimental-compaction-batch-limit` (fastetcd compacts in one
+  pass), adds `--wal-keep-purged` and execs fastetcd with every other
+  flag as given. fastetcd takes etcd's names for the flags the suite
+  sets: `--snapshot-catchup-entries`,
+  `--experimental-watch-progress-notify-interval`, and logs etcd's
+  `ready to serve client requests`.
+- **Persisted requests.** After the traffic the suite reads every
+  member's etcd WAL from its first entry: the requests in it may have
+  been applied even where the client saw an error, and they are the
+  model it replays to check watches. The patch makes it run
+  `fastetcd persisted-requests` for each member instead (the raft log as
+  JSON lines in the suite's request shapes, read from a running
+  member). `--wal-keep-purged` keeps the WAL segments a purge covers on
+  disk, as etcd keeps its WAL files, so snapshots and purges still
+  happen. A member that installed a snapshot has no whole log and is
+  counted as unreadable, as the suite does with an etcd member whose WAL
+  does not start at the beginning (it tolerates a minority).
+- **Faults.** Without a gofail build only the faults that need none are
+  picked: killing a member (any cluster size), and for 3 members behind
+  the suite's peer proxy, blackholing, delaying or dropping peer
+  traffic, blackholing until the leader has compacted past the member,
+  and replacing a member (remove, wipe, add back). Mixed-version and
+  LazyFS scenarios need binaries that are not there, so they do not
+  run.
 
 ### 3c. Jepsen for etcd
 
@@ -235,7 +264,7 @@ production-credible.
 |---|---|
 | Every push | Ring 1 + Ring 2 (`sc-build`) |
 | Pre-release | Ring 1 + Ring 2, `cargo build --locked`, Ring 3a where `etcdctl` is available |
-| API contract change | Also Ring 3b-3d, when set up (not yet) |
+| API contract change | Also Ring 3b (`tests/robustness/run.sh`); 3c-3d when set up (not yet) |
 
 Test containers per the stormcos test standard (short, medium, long
 suites run as Jobs on the test machines) are not built yet: #36.

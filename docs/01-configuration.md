@@ -71,9 +71,15 @@ Details: [03-deploy § TLS](03-deploy.md#tls).
 | `--replication-timeout` | `--election-timeout` | `FASTETCD_REPLICATION_TIMEOUT` | — | Milliseconds the leader waits for one AppendEntries to be sent, appended and fsynced by a follower before sending it again (#167; etcd has no such limit). A follower whose fsync takes longer never catches up while writes continue: set it above the followers' slowest ordinary fsync. At least `--heartbeat-interval`. |
 | `--election-timeout` | `1000` | `FASTETCD_ELECTION_TIMEOUT` | `ETCD_ELECTION_TIMEOUT` | Milliseconds a follower waits for the leader before calling an election (each member picks from [t, 2t)). A leader sends no heartbeat during a WAL fsync, so on a disk that stalls set it above the longest stall (#103; [03-deploy](03-deploy.md#timeouts-and-slow-disks)). At least 2x the heartbeat (etcd asks 5x), at most 50 000. |
 | `--snapshot-count` | `5000` | `FASTETCD_SNAPSHOT_COUNT` | `ETCD_SNAPSHOT_COUNT` | Snapshot (then purge the log) every N applied writes, as etcd counts them. A log entry can be a batch of writes (#75, #94); since 1.18 each counts (#80; 1.10–1.17 counted entries). |
-| `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted writes kept in the log after a purge, for followers just behind (since 1.18 counted in writes, #80). |
+| `--max-in-snapshot-log-to-keep` | `1000` | `FASTETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `ETCD_MAX_IN_SNAPSHOT_LOG_TO_KEEP` | Snapshotted writes kept in the log after a purge, for followers just behind (since 1.18 counted in writes, #80). etcd's `--snapshot-catchup-entries` and `--experimental-snapshot-catchup-entries` are the same setting and set it (#195). |
 | `--snapshot-interval-secs` | `1800` | `FASTETCD_SNAPSHOT_INTERVAL_SECS` | | Also snapshot (then purge) once the last snapshot is this old and a write was applied since, so a quiet member's log and WAL are purged (#177). `0` = by `--snapshot-count` only. fastetcd's own. |
 | `--max-snapshots` | `1` | `FASTETCD_MAX_SNAPSHOTS` | `ETCD_MAX_SNAPSHOTS` | Snapshots kept on disk (each a full copy), rolled off before a new one is written. |
+
+## Watch
+
+| Flag | Default | Env | etcd env | Meaning |
+|---|---|---|---|---|
+| `--watch-progress-notify-interval` | `10s` | `FASTETCD_WATCH_PROGRESS_NOTIFY_INTERVAL` | | How often a watch stream with a `progress_notify` watcher gets a progress notification, as a Go duration (`100ms`, `10s`, `10m0s`). etcd's flag (also `--experimental-watch-progress-notify-interval`); etcd's default is 10 m (#195). |
 
 ## Memory (RAM cache)
 
@@ -99,6 +105,7 @@ made durable in the background ([03-deploy](03-deploy.md#storage-engine), #85).
 | `--wal-checkpoint-interval-ms` | `100` | `FASTETCD_WAL_CHECKPOINT_INTERVAL_MS` | | Longest time between an apply and the durable commit of the data file that covers it, on a disk where a checkpoint is quick. After a checkpoint that took `d`, the next waits at least `4·d`, so on a slow disk checkpoints use at most a fifth of its time (#95). |
 | `--wal-checkpoint-entries` | `10000` | `FASTETCD_WAL_CHECKPOINT_ENTRIES` | | ...or checkpoint as soon as this many raft entries were applied since the last one. |
 | `--write-behind-bytes` | `67108864` (64 MiB) | `FASTETCD_WRITE_BEHIND_BYTES` | | Applied writes held in RAM until a checkpoint writes them into the data file. Past it, an apply writes them out first. |
+| `--wal-keep-purged` | `false` | `FASTETCD_WAL_KEEP_PURGED` | | Keep the WAL segments a purge covers on disk instead of deleting them, as etcd keeps its WAL files, so `fastetcd persisted-requests` can read the whole raft log (#195). Raft still snapshots and purges; `--wal-max-bytes` counts only live segments, and the kept ones grow without bound. For testing and debugging, not production. fastetcd's own. |
 
 ## Compaction and disk space
 
@@ -172,6 +179,7 @@ exclusively and refuses if it is in use.
 | `fastetcd fsck [--repair]` | Check structure, format version, raft membership and MVCC counters; `--repair` fixes the raft/format metadata. |
 | `fastetcd defrag` | Return freed pages to the filesystem; works on a full volume with no quorum. |
 | `fastetcd sizing --nodes N [--pods-per-node P]` | Volume size for a cluster shape, with the arithmetic. Needs no data dir. |
+| `fastetcd persisted-requests` | The client requests in the member's raft log, from its first entry, one JSON object per line, for etcd's robustness suite (#195; format in `crates/server/src/persisted_requests.rs`). Reads the WAL without changing it, so unlike the others it also runs on a running member. Fails unless the member ran with `--wal-keep-purged` from its start and never installed a snapshot. |
 
 ## Other binaries
 
