@@ -51,4 +51,10 @@ done
 echo "==== results"
 grep -E '^\s*--- (PASS|FAIL|SKIP)' "$WORK/go-test.log" || true
 echo "robustness: go test exited $rc"
+# A scenario the harness skips (e.g. a member without what it needs) is
+# not a pass: at least one must have run.
+if ! grep -qE '^\s+--- (PASS|FAIL): [^ ]+/' "$WORK/go-test.log"; then
+    echo "robustness: no scenario ran (all skipped)"
+    exit 1
+fi
 exit $rc
