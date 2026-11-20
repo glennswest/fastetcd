@@ -3,8 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-20
-- **feat:** A new store starts at revision 1, as an empty etcd store does, so its first write is revision 2 (#160; owner's decision (a) on #195). A replicated `StartRevision` log entry (appended last) moves a store with no revision yet to 1. Applied on a store that has a revision it changes nothing, so an upgraded store's revisions never move. The member serving the first write on a store at 0 proposes it and waits for it, and a leader of an empty store proposes it by itself, so an empty cluster reports revision 1. It is not proposed while a member answers with a version older than 1.41, which could not decode it: that store keeps 0-based numbering. A member that does not answer is not waited for. `fastetcd-migrate` without `--preserve-revisions` imports at revision 2. Once the log holds the entry, Downgrade VALIDATE refuses anything below 1.41 (a new floor). Docs: 03-deploy § Revisions, the floor table, Migration; README differences; 00-design.
-- **BREAKING (revisions on new stores):** a client of a new 1.41 store sees every revision one higher than a pre-1.41 fastetcd store gave for the same history (etcd's numbering). Stores that already have revisions are unchanged.
 - **docs:** #195 (etcd robustness suite): owner chose (a). #160 (new stores start at revision 1, as etcd's; existing stores keep their numbering) goes first as its own release; #195 waits behind it. Work plan item 93.
 - **docs:** #193 closed as not wanted (owner's decision (a)): no OTLP trace export is built while the platform has no trace collector; when one exists it is filed as a `gap`. 00-design says there is no trace export without pointing at an open design.
 
@@ -35,6 +33,14 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.41.0] — 2026-11-20
+
+### Added
+- **feat:** A new store starts at revision 1, as an empty etcd store does, so its first write is revision 2 (#160; owner's decision (a) on #195). A replicated `StartRevision` log entry (appended last) moves a store with no revision yet to 1. Applied on a store that has a revision it changes nothing, so an upgraded store's revisions never move. The member serving the first write on a store at 0 proposes it and waits for it, and a leader of an empty store proposes it by itself, so an empty cluster reports revision 1. It is not proposed while a member answers with a version older than 1.41, which could not decode it: that store keeps 0-based numbering. A member that does not answer is not waited for. `fastetcd-migrate` without `--preserve-revisions` imports at revision 2. Once the log holds the entry, Downgrade VALIDATE refuses anything below 1.41 (a new floor). Docs: 03-deploy § Revisions, the floor table, Migration; README differences; 00-design.
+
+### Breaking
+- **BREAKING (revisions on new stores):** a client of a new 1.41 store sees every revision one higher than a pre-1.41 fastetcd store gave for the same history (etcd's numbering). Stores that already have revisions are unchanged.
 
 ## [v1.40.1] — 2026-11-19
 

@@ -10,10 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.40.1`** — pre-release versions order per semver in Downgrade
-VALIDATE and the member version gate (#203); Downgrade ENABLE/CANCEL
-answer as unknown actions (#201). 1.40: runtime schedule-delay metric
-(#194). 1.39: Downgrade VALIDATE (#192).
+**`1.41.0`** — a new store starts at revision 1, as etcd's, so its first
+write is revision 2 (#160; a replicated `StartRevision` entry; 1.41
+downgrade floor). 1.40.1: semver pre-release ordering (#203).
+1.40: runtime schedule-delay metric (#194).
 
 ## Work plan and history
 
