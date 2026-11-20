@@ -1603,6 +1603,10 @@ async fn main() -> anyhow::Result<()> {
         peers.clone(),
         directory.clone(),
     );
+    // Peer routes and the member directory follow the raft membership
+    // (#208): a change made through another member, or one made before
+    // this start that `--initial-cluster` does not show.
+    fastetcd_server::cluster::follow_membership(raft.clone(), peers.clone(), directory.clone(), node_id);
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone())
         .with_progress_notify_interval(args.watch_progress_notify_interval);

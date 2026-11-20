@@ -52,8 +52,17 @@ pub enum MembershipChange {
     /// Add `node_id` as a learner reachable at `addr`.
     AddLearner { node_id: NodeId, addr: String },
     /// Replace the voter set wholesale. Used for promotion (MemberAdd
-    /// of a voter, MemberPromote) and removal (MemberRemove).
+    /// of a voter, MemberPromote).
     SetVoters { voters: Vec<NodeId> },
+    /// Take `node_id` out of the membership: a voter is removed and not
+    /// kept as a learner, a learner is removed (MemberRemove, #208). The
+    /// leader decides which from its own membership. Appended after the
+    /// variants above so their bincode tags keep their place; a leader
+    /// older than 1.42.1 cannot decode it and the change fails.
+    RemoveNode { node_id: NodeId },
+    /// Replace `node_id`'s address (its peer URL) in the membership
+    /// (MemberUpdate, #208). Same compatibility as `RemoveNode`.
+    SetNodeAddr { node_id: NodeId, addr: String },
 }
 
 /// A linearizable Range forwarded to the leader (#10). Carries the

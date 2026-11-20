@@ -183,7 +183,9 @@ pub struct GrpcNetwork {
     peers: PeerEndpoints,
     tls: PeerTls,
     dial: DialOptions,
-    client: tokio::sync::Mutex<Option<pb::raft_peer_client::RaftPeerClient<Channel>>>,
+    /// The dialed client and the URL it was dialed at: used only while
+    /// the member's URL in `peers` is still that one (#208).
+    client: tokio::sync::Mutex<Option<(String, pb::raft_peer_client::RaftPeerClient<Channel>)>>,
 }
 
 impl GrpcNetwork {
@@ -194,9 +196,6 @@ impl GrpcNetwork {
         RPCError<NodeId, openraft::BasicNode, RaftError<NodeId>>,
     > {
         let mut guard = self.client.lock().await;
-        if let Some(c) = guard.as_ref() {
-            return Ok(c.clone());
-        }
         let peers = self.peers.read().await;
         let url = peers.get(&self.target).cloned().ok_or_else(|| {
             RPCError::Network(NetworkError::new(&std::io::Error::new(
@@ -205,11 +204,16 @@ impl GrpcNetwork {
             )))
         })?;
         drop(peers);
+        if let Some((dialed, c)) = guard.as_ref() {
+            if *dialed == url {
+                return Ok(c.clone());
+            }
+        }
         let chan = dial_peer_with(&url, &self.tls, self.dial)
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
-        *guard = Some(cli.clone());
+        *guard = Some((url, cli.clone()));
         Ok(cli)
     }
 }
@@ -338,7 +342,9 @@ pub struct WriteForwarder {
     peers: PeerEndpoints,
     tls: PeerTls,
     dial: DialOptions,
-    clients: Arc<RwLock<HashMap<NodeId, pb::raft_peer_client::RaftPeerClient<Channel>>>>,
+    /// Each member's client and the URL it was dialed at, used only
+    /// while that is still the member's URL in `peers` (#208).
+    clients: Arc<RwLock<HashMap<NodeId, (String, pb::raft_peer_client::RaftPeerClient<Channel>)>>>,
 }
 
 impl WriteForwarder {
@@ -366,9 +372,6 @@ impl WriteForwarder {
         &self,
         target: NodeId,
     ) -> Result<pb::raft_peer_client::RaftPeerClient<Channel>, String> {
-        if let Some(c) = self.clients.read().await.get(&target) {
-            return Ok(c.clone());
-        }
         let url = self
             .peers
             .read()
@@ -376,9 +379,14 @@ impl WriteForwarder {
             .get(&target)
             .cloned()
             .ok_or_else(|| format!("no peer URL for node {target}"))?;
+        if let Some((dialed, c)) = self.clients.read().await.get(&target) {
+            if *dialed == url {
+                return Ok(c.clone());
+            }
+        }
         let chan = dial_peer_with(&url, &self.tls, self.dial).await.map_err(|e| e.to_string())?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
-        self.clients.write().await.insert(target, cli.clone());
+        self.clients.write().await.insert(target, (url, cli.clone()));
         Ok(cli)
     }
 
@@ -571,6 +579,43 @@ impl WriteForwarder {
             bincode::deserialize(&resp.data).map_err(|e| e.to_string())?;
         result
     }
+}
+
+/// Apply a membership change on this member, which must be the leader
+/// (else the error is openraft's `ForwardToLeader`). The one place each
+/// [`MembershipChange`](crate::types::MembershipChange) is turned into an
+/// openraft call, for a change made here and one forwarded here.
+pub async fn change_membership(
+    raft: &Raft<TypeConfig>,
+    change: &crate::types::MembershipChange,
+) -> Result<(), RaftError<NodeId, openraft::error::ClientWriteError<NodeId, openraft::BasicNode>>> {
+    use crate::types::MembershipChange;
+    use openraft::ChangeMembers;
+    use std::collections::{BTreeMap, BTreeSet};
+    match change {
+        MembershipChange::AddLearner { node_id, addr } => {
+            raft.add_learner(*node_id, openraft::BasicNode::new(addr), false).await?;
+        }
+        MembershipChange::SetVoters { voters } => {
+            raft.change_membership(voters.iter().copied().collect::<BTreeSet<_>>(), false).await?;
+        }
+        MembershipChange::RemoveNode { node_id } => {
+            let is_voter = raft.metrics().borrow().membership_config.membership().voter_ids().any(|v| v == *node_id);
+            let ids = BTreeSet::from([*node_id]);
+            let change = if is_voter {
+                ChangeMembers::RemoveVoters(ids)
+            } else {
+                ChangeMembers::RemoveNodes(ids)
+            };
+            // retain = false: a removed voter does not stay as a learner.
+            raft.change_membership(change, false).await?;
+        }
+        MembershipChange::SetNodeAddr { node_id, addr } => {
+            let nodes = BTreeMap::from([(*node_id, openraft::BasicNode::new(addr))]);
+            raft.change_membership(ChangeMembers::SetNodes(nodes), false).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Server-side handler for inbound peer RPCs. Holds a clone of the
@@ -846,20 +891,8 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // As in forward_write: a hop that itself needs forwarding means
         // leadership changed again, so stringify rather than propagate
         // ForwardToLeader and let the caller retry.
-        let result: Result<(), String> = match change {
-            crate::types::MembershipChange::AddLearner { node_id, addr } => self
-                .raft
-                .add_learner(node_id, openraft::BasicNode::new(&addr), false)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-            crate::types::MembershipChange::SetVoters { voters } => self
-                .raft
-                .change_membership(voters.into_iter().collect::<std::collections::BTreeSet<_>>(), false)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-        };
+        let result: Result<(), String> =
+            change_membership(&self.raft, &change).await.map_err(|e| e.to_string());
         let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;
         Ok(Response::new(pb::RaftPayload { data }))

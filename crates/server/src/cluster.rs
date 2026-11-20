@@ -1,9 +1,13 @@
 //! Implementation of the etcd `Cluster` gRPC service — multi-node.
 //!
-//! Backed by openraft's `add_learner` / `change_membership` APIs.
-//! Holds a shared `PeerEndpoints` map (the same one
-//! `GrpcNetworkFactory` dials through) so peers added at runtime are
-//! immediately reachable.
+//! Backed by openraft's `add_learner` / `change_membership` APIs: every
+//! change goes through raft (forwarded to the leader from a follower),
+//! so the committed membership is the record of who the members are and
+//! where they are. [`follow_membership`] keeps each member's peer routes
+//! (the `PeerEndpoints` map `GrpcNetworkFactory` and the forwarder dial
+//! through) and its member directory in step with it, so a change made
+//! through any member, or a restart with an old `--initial-cluster`,
+//! sees the same members at the same addresses (#208).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -11,7 +15,7 @@ use std::sync::Arc;
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::cluster_server::Cluster;
 use fastetcd_raft::network::PeerEndpoints;
-use fastetcd_raft::types::NodeId;
+use fastetcd_raft::types::{MembershipChange, NodeId, TypeConfig};
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 
@@ -214,13 +218,14 @@ impl Cluster for ClusterService {
                 "cannot MemberRemove self; use MoveLeader first or remove via another node",
             ));
         }
-        // Build the new voter set minus the target.
-        let mut voters = current_voter_set(&self.state.raft).await;
-        let was_present = voters.remove(&req.id);
-        if was_present {
-            self.state.propose_set_voters(voters).await?;
+        if !membership_nodes(&self.state.raft).contains_key(&req.id) {
+            return Err(member_not_found());
         }
-        // Drop peer + directory entries.
+        // A voter or a learner: either way out of the raft membership
+        // (a learner used to be dropped only from local maps, #208).
+        self.state.propose_membership(MembershipChange::RemoveNode { node_id: req.id }).await?;
+        // Drop peer + directory entries here at once; every member drops
+        // them as the change reaches it (follow_membership).
         {
             let mut peers = self.peers.write().await;
             peers.remove(&req.id);
@@ -250,7 +255,22 @@ impl Cluster for ClusterService {
             .first()
             .cloned()
             .ok_or_else(|| Status::invalid_argument("MemberUpdateRequest.peer_urls empty"))?;
-        // Update peer URL map.
+        let nodes = membership_nodes(&self.state.raft);
+        if !nodes.contains_key(&req.id) {
+            return Err(member_not_found());
+        }
+        if nodes.iter().any(|(id, addr)| *id != req.id && req.peer_ur_ls.contains(addr)) {
+            return Err(Status::failed_precondition("etcdserver: Peer URLs already exists"));
+        }
+        // The address is part of the raft membership: a change made only
+        // here was not seen by the leader, was lost on restart, and could
+        // leave the member unreachable (#208). Raft keeps one address
+        // per member, the first URL.
+        self.state
+            .propose_membership(MembershipChange::SetNodeAddr { node_id: req.id, addr: first_url.clone() })
+            .await?;
+        // Update peer URL map here at once; every member follows the
+        // committed membership (follow_membership).
         {
             let mut peers = self.peers.write().await;
             peers.insert(req.id, first_url.clone());
@@ -304,9 +324,155 @@ impl Cluster for ClusterService {
     }
 }
 
+/// etcd's `ErrGRPCMemberNotFound`.
+fn member_not_found() -> Status {
+    Status::not_found("etcdserver: member not found")
+}
+
+/// Every member of the raft membership (voters and learners) and its
+/// address, as this member knows it.
+fn membership_nodes(raft: &openraft::Raft<TypeConfig>) -> BTreeMap<NodeId, String> {
+    let m = raft.metrics().borrow().membership_config.clone();
+    m.membership().nodes().map(|(id, node)| (*id, node.addr.clone())).collect()
+}
+
+/// A member as the raft membership has it: its address and whether it
+/// votes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Membered {
+    addr: String,
+    voter: bool,
+}
+
+fn membership_of(raft: &openraft::Raft<TypeConfig>) -> BTreeMap<NodeId, Membered> {
+    let m = raft.metrics().borrow().membership_config.clone();
+    let voters: BTreeSet<NodeId> = m.voter_ids().collect();
+    m.membership()
+        .nodes()
+        .map(|(id, node)| (*id, Membered { addr: node.addr.clone(), voter: voters.contains(id) }))
+        .collect()
+}
+
+/// Bring `peers` and `directory` in line with `now` (the membership):
+/// every member's address and learner flag; members that are gone
+/// dropped. `before` is the membership last applied, or `None` the
+/// first time, when anything not in it goes (an `--initial-cluster`
+/// member removed before this start). Only members that left since
+/// `before` are dropped later: MemberAdd routes a member just before
+/// it joins the membership.
+async fn apply_membership(
+    peers: &PeerEndpoints,
+    directory: &MemberDirectory,
+    self_id: NodeId,
+    before: Option<&BTreeMap<NodeId, Membered>>,
+    now: &BTreeMap<NodeId, Membered>,
+) {
+    let gone: Vec<NodeId> = match before {
+        Some(b) => b.keys().filter(|id| !now.contains_key(id)).copied().collect(),
+        None => {
+            let mut ids: BTreeSet<NodeId> = peers.read().await.keys().copied().collect();
+            ids.extend(directory.read().await.keys().copied());
+            ids.into_iter().filter(|id| !now.contains_key(id)).collect()
+        }
+    };
+    {
+        let mut p = peers.write().await;
+        for (id, m) in now {
+            if *id != self_id && p.get(id) != Some(&m.addr) {
+                p.insert(*id, m.addr.clone());
+            }
+        }
+        for id in &gone {
+            p.remove(id);
+        }
+    }
+    let mut dir = directory.write().await;
+    for (id, m) in now {
+        let info = dir.entry(*id).or_default();
+        if info.peer_urls.first() != Some(&m.addr) {
+            info.peer_urls = vec![m.addr.clone()];
+        }
+        info.is_learner = !m.voter;
+    }
+    for id in &gone {
+        if *id != self_id {
+            dir.remove(id);
+        }
+    }
+}
+
+/// While running: keep this member's peer routes and member directory
+/// in line with the raft membership as it changes (#208). Nothing is
+/// done while the membership is empty (a new member not yet joined).
+pub fn follow_membership(
+    raft: openraft::Raft<TypeConfig>,
+    peers: PeerEndpoints,
+    directory: MemberDirectory,
+    self_id: NodeId,
+) {
+    tokio::spawn(async move {
+        let mut metrics = raft.metrics();
+        let mut applied: Option<BTreeMap<NodeId, Membered>> = None;
+        loop {
+            metrics.borrow_and_update();
+            let now = membership_of(&raft);
+            if !now.is_empty() && applied.as_ref() != Some(&now) {
+                apply_membership(&peers, &directory, self_id, applied.as_ref(), &now).await;
+                applied = Some(now);
+            }
+            if metrics.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
 async fn current_voter_set(
     raft: &openraft::Raft<fastetcd_raft::types::TypeConfig>,
 ) -> BTreeSet<NodeId> {
     let m = raft.metrics().borrow().membership_config.clone();
     m.voter_ids().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(addr: &str, voter: bool) -> Membered {
+        Membered { addr: addr.to_string(), voter }
+    }
+
+    #[tokio::test]
+    async fn routes_and_directory_follow_the_membership() {
+        let peers = fastetcd_raft::network::empty_peers();
+        let directory: MemberDirectory = Arc::new(RwLock::new(BTreeMap::new()));
+        // As seeded from --initial-cluster: 2 and 9, 9 removed before
+        // this start; self is 1.
+        peers.write().await.extend([(2, "http://old-2".to_string()), (9, "http://9".to_string())]);
+        ClusterService::seed_self(&directory, 1, "one".into(), vec!["http://1".into()], vec![]).await;
+        directory.write().await.insert(9, MemberInfo { name: "nine".into(), ..Default::default() });
+
+        let first = BTreeMap::from([(1, m("http://1", true)), (2, m("http://2", true)), (3, m("http://3", false))]);
+        apply_membership(&peers, &directory, 1, None, &first).await;
+        {
+            let p = peers.read().await;
+            assert_eq!(p.get(&2).map(String::as_str), Some("http://2"), "the address moves");
+            assert_eq!(p.get(&3).map(String::as_str), Some("http://3"));
+            assert!(!p.contains_key(&9) && !p.contains_key(&1), "gone, and never self");
+            let d = directory.read().await;
+            assert_eq!(d.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+            assert!(d[&3].is_learner && !d[&2].is_learner);
+            assert_eq!(d[&1].name, "one", "self keeps its own info");
+        }
+
+        // MemberAdd routes 7 before it is in the membership; a later
+        // change that removes 3 and promotes nothing must keep that.
+        peers.write().await.insert(7, "http://7".into());
+        let second = BTreeMap::from([(1, m("http://1", true)), (2, m("http://2", true))]);
+        apply_membership(&peers, &directory, 1, Some(&first), &second).await;
+        let p = peers.read().await;
+        assert!(!p.contains_key(&3), "a removed learner's route goes");
+        assert!(p.contains_key(&7), "a member being added keeps its route");
+        assert!(!directory.read().await.contains_key(&3));
+    }
 }

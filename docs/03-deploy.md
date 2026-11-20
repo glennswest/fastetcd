@@ -698,6 +698,19 @@ With `--initial-cluster-state=new` (the default) each node calls
 `raft.initialize` with the same member set; openraft elects a leader
 among them. After bootstrap, `MemberAdd` adds new nodes (start them
 with `--initial-cluster-state=existing`); `MemberRemove` removes them.
+Every member change goes through raft from any member (a follower
+forwards it to the leader), so the raft membership is the record of
+who the members are and where: each member's peer routes and its
+`MemberList` follow it, also after a restart whose `--initial-cluster`
+still names an old address (since 1.42.1, #208). `MemberRemove` takes
+a voter or a learner out of it; `MemberUpdate` moves a member's peer
+URL (raft keeps one per member, the first given), and the members dial
+the new one. An unknown id is `etcdserver: member not found`; a URL
+another member has is `etcdserver: Peer URLs already exists`. A leader
+older than 1.42.1 cannot decode a forwarded `MemberRemove` or
+`MemberUpdate`: during an upgrade, send them to an upgraded leader.
+Names and client URLs are still known only to the member that was told
+them (#187).
 On separate hosts, listen on a routable address and set
 `--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 

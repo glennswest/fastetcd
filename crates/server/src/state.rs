@@ -348,32 +348,15 @@ impl ServerState {
         }
     }
 
-    /// Add a learner, forwarding to the leader if this node isn't it.
+    /// Add `node_id` as a learner at `addr`, forwarding to the leader if
+    /// this node isn't it.
     pub async fn propose_add_learner(
         &self,
         node_id: fastetcd_raft::NodeId,
         addr: &str,
     ) -> Result<(), Status> {
-        match self
-            .raft
-            .add_learner(node_id, openraft::BasicNode::new(addr), false)
+        self.propose_membership(MembershipChange::AddLearner { node_id, addr: addr.to_string() })
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.forward_membership(
-                    &e,
-                    MembershipChange::AddLearner {
-                        node_id,
-                        addr: addr.to_string(),
-                    },
-                )
-                .await
-                .unwrap_or_else(|| {
-                    Err(Status::unavailable(format!("raft add_learner: {e}")))
-                })
-            }
-        }
     }
 
     /// Replace the voter set, forwarding to the leader if this node
@@ -382,20 +365,19 @@ impl ServerState {
         &self,
         voters: std::collections::BTreeSet<fastetcd_raft::NodeId>,
     ) -> Result<(), Status> {
-        match self.raft.change_membership(voters.clone(), false).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.forward_membership(
-                    &e,
-                    MembershipChange::SetVoters {
-                        voters: voters.into_iter().collect(),
-                    },
-                )
+        self.propose_membership(MembershipChange::SetVoters { voters: voters.into_iter().collect() })
+            .await
+    }
+
+    /// Apply `change` through raft (on the leader, or forwarded to it):
+    /// every member's committed membership then holds it (#7, #208).
+    pub async fn propose_membership(&self, change: MembershipChange) -> Result<(), Status> {
+        match fastetcd_raft::network::change_membership(&self.raft, &change).await {
+            Ok(()) => Ok(()),
+            Err(e) => self
+                .forward_membership(&e, change)
                 .await
-                .unwrap_or_else(|| {
-                    Err(Status::unavailable(format!("raft change_membership: {e}")))
-                })
-            }
+                .unwrap_or_else(|| Err(Status::unavailable(format!("raft membership change: {e}")))),
         }
     }
 
