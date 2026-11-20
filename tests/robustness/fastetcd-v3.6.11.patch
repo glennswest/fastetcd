@@ -1,9 +1,9 @@
 diff --git a/tests/robustness/report/fastetcd.go b/tests/robustness/report/fastetcd.go
 new file mode 100644
-index 0000000..262619b
+index 0000000..3dedaea
 --- /dev/null
 +++ b/tests/robustness/report/fastetcd.go
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,225 @@
 +// Copyright 2026 The fastetcd Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,7 +24,9 @@ index 0000000..262619b
 +// fastetcd#195). fastetcd's raft log is not an etcd WAL: when a `fastetcd`
 +// binary sits next to the `etcd` one (fastetcd's shim), each member's
 +// requests come from `fastetcd persisted-requests`, converted as
-+// parseEntryNormal converts an etcd raft request.
++// parseEntryNormal converts an etcd raft request. fastetcd has no gofail
++// failpoints, so its scenarios run without the gofail endpoint (the
++// faults that need none: kill, peer network, member replace).
 +
 +import (
 +	"bytes"
@@ -38,7 +40,8 @@ index 0000000..262619b
 +	"go.etcd.io/etcd/tests/v3/robustness/model"
 +)
 +
-+func fastetcdBinary() string {
++// FastetcdBinary is the fastetcd binary next to the `etcd` one, or "".
++func FastetcdBinary() string {
 +	p := filepath.Join(filepath.Dir(e2e.BinPath.Etcd), "fastetcd")
 +	if _, err := os.Stat(p); err != nil {
 +		return ""
@@ -227,16 +230,38 @@ index 0000000..262619b
 +	}
 +}
 diff --git a/tests/robustness/report/wal.go b/tests/robustness/report/wal.go
-index 077ddc8..3bce59b 100644
+index 077ddc8..e487108 100644
 --- a/tests/robustness/report/wal.go
 +++ b/tests/robustness/report/wal.go
 @@ -83,6 +83,9 @@ func PersistedRequestsDirs(lg *zap.Logger, dataDirs []string) ([]model.EtcdReque
  }
  
  func requestsPersistedInWAL(lg *zap.Logger, dataDir string) ([]model.EtcdRequest, error) {
-+	if fastetcd := fastetcdBinary(); fastetcd != "" {
++	if fastetcd := FastetcdBinary(); fastetcd != "" {
 +		return requestsPersistedByFastetcd(fastetcd, dataDir)
 +	}
  	_, ents, err := ReadWAL(lg, dataDir)
  	if err != nil {
  		return nil, err
+diff --git a/tests/robustness/scenarios/scenarios.go b/tests/robustness/scenarios/scenarios.go
+index ba33add..90a3760 100644
+--- a/tests/robustness/scenarios/scenarios.go
++++ b/tests/robustness/scenarios/scenarios.go
+@@ -29,6 +29,7 @@ import (
+ 	"go.etcd.io/etcd/tests/v3/robustness/failpoint"
+ 	"go.etcd.io/etcd/tests/v3/robustness/options"
+ 	"go.etcd.io/etcd/tests/v3/robustness/random"
++	"go.etcd.io/etcd/tests/v3/robustness/report"
+ 	"go.etcd.io/etcd/tests/v3/robustness/traffic"
+ )
+ 
+@@ -95,7 +96,8 @@ func Exploratory(_ *testing.T) []TestScenario {
+ 	baseOptions := []e2e.EPClusterOption{
+ 		options.WithSnapshotCount(50, 100, 1000),
+ 		options.WithSubsetOptions(randomizableOptions...),
+-		e2e.WithGoFailEnabled(true),
++		// fastetcd has no gofail endpoint: its members run without one.
++		e2e.WithGoFailEnabled(report.FastetcdBinary() == ""),
+ 		// Set low minimal compaction batch limit to allow for triggering multi batch compaction failpoints.
+ 		options.WithExperimentalCompactionBatchLimit(10, 100, 1000),
+ 		e2e.WithExperimentalWatchProcessNotifyInterval(100 * time.Millisecond),
