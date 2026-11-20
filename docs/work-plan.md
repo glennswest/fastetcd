@@ -1558,4 +1558,4 @@ Tracked live in the Claude task system. Snapshot of the order:
       in raft `version_gate::Version`; VALIDATE and the gate compare
       with it; tests.
     - [x] watch_load.sh exits non-zero when a run fails.
-    - [ ] 03-deploy, CHANGELOG; sc-build; release 1.40.1.
+    - [x] 03-deploy, CHANGELOG; sc-build 22b972b (test + clippy) passed; release 1.40.1.

@@ -2,11 +2,6 @@
 
 ## [Unreleased]
 
-### 2026-11-19
-- **fix:** Pre-release versions order per semver (#203). Downgrade VALIDATE cut a pre-release suffix off, so `1.33.0-rc1` passed the 1.33.0 floor as if it were 1.33.0, though a 1.33.0 pre-release need not read what 1.33.0 does; the member version gate (`MembersAtLeast`, #56/#92) did the same with a member's answered version. Both now compare with `version_gate::Version` (semver 2.0.0 §11: `X.Y.Z-pre` < `X.Y.Z`, numeric identifiers below alphanumeric, build metadata ignored), and VALIDATE's refusal names the pre-release target as given.
-- **fix:** `tests/watch_load.sh` exits non-zero when a benchmark run fails (#203). Each run's output went through `grep … || true`, so a failed `tests/read_latency.sh` still exited 0. Every run is still made; a failed one prints its whole output, and the script names the failed runs and exits 1.
-- **fix:** Downgrade ENABLE and CANCEL are no longer a stub (#201): they answered `Unimplemented` with a message saying why they were not done, and README listed them under "Not implemented". They now answer as any unknown action does (`InvalidArgument`, `unknown downgrade action N`); VALIDATE is unchanged. The gap is #202. README, 00-design, 03-deploy and the deck say only what is served.
-
 ### 2026-11-18
 - **docs:** #195 (etcd robustness suite) waits on the owner: the suite's model starts an empty store at revision 1 and fastetcd's at 0 (#160, undecided), so every scenario would fail at its first put; it also reads each member's etcd WAL for persisted requests (adapter planned: a WAL-dump subcommand, a harness patch, a flag shim). Work plan item 93.
 - **docs:** #193 (OTLP trace export): there is no trace collector on the platform (the registry has none; ironprom takes OTLP metrics only). Asked the owner whether to close it as not wanted (recommended) or build `--otlp-endpoint` anyway; work plan item 91.
@@ -34,6 +29,13 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.40.1] — 2026-11-19
+
+### Fixed
+- **fix:** Pre-release versions order per semver (#203). Downgrade VALIDATE cut a pre-release suffix off, so `1.33.0-rc1` passed the 1.33.0 floor as if it were 1.33.0, though a 1.33.0 pre-release need not read what 1.33.0 does; the member version gate (`MembersAtLeast`, #56/#92) did the same with a member's answered version. Both now compare with `version_gate::Version` (semver 2.0.0 §11: `X.Y.Z-pre` < `X.Y.Z`, numeric identifiers below alphanumeric, build metadata ignored), and VALIDATE's refusal names the pre-release target as given.
+- **fix:** `tests/watch_load.sh` exits non-zero when a benchmark run fails (#203). Each run's output went through `grep … || true`, so a failed `tests/read_latency.sh` still exited 0. Every run is still made; a failed one prints its whole output, and the script names the failed runs and exits 1.
+- **fix:** Downgrade ENABLE and CANCEL are no longer a stub (#201): they answered `Unimplemented` with a message saying why they were not done, and README listed them under "Not implemented". They now answer as any unknown action does (`InvalidArgument`, `unknown downgrade action N`); VALIDATE is unchanged. The gap is #202. README, 00-design, 03-deploy and the deck say only what is served.
 
 ## [v1.40.0] — 2026-11-18
 

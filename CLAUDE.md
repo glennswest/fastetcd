@@ -10,10 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.40.0`** — `fastetcd_runtime_schedule_delay_seconds`: how long a task
-woken on the shared runtime waits (#194; a dedicated apply thread was
-measured and not built, docs/benchmarks/apply-thread-194.md);
-`fastetcd-bench --watchers`. 1.39: Downgrade VALIDATE (#192).
+**`1.40.1`** — pre-release versions order per semver in Downgrade
+VALIDATE and the member version gate (#203); Downgrade ENABLE/CANCEL
+answer as unknown actions (#201). 1.40: runtime schedule-delay metric
+(#194). 1.39: Downgrade VALIDATE (#192).
 
 ## Work plan and history
 
