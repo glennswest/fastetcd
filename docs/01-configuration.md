@@ -5,6 +5,11 @@ Every setting of the `fastetcd` server, taken from the binary's own
 A variable named `ETCD_*` in the last column is also read, as a drop-in
 for an existing etcd configuration, when the `FASTETCD_*` one is unset.
 
+A flag given twice takes its last value, as etcd's Go flags do (#195;
+etcd's own test harnesses pass some twice). Listen URLs may name a host
+(`http://localhost:2379`): it is resolved, an IPv4 address first, as
+etcd's listener does.
+
 Boolean flags take values as etcd's do (#53): the flag alone is true,
 and `--flag=true` / `--flag=false` set it (also `=1` / `=0`;
 `--flag false` works as well). Their env vars take `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. So

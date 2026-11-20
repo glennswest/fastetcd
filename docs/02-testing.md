@@ -243,7 +243,36 @@ and runs `go test ./robustness -run TestRobustnessExploratory` with
   traffic, blackholing until the leader has compacted past the member,
   and replacing a member (remove, wipe, add back). Mixed-version and
   LazyFS scenarios need binaries that are not there, so they do not
-  run.
+  run. The patch also runs the exploratory scenarios without the gofail
+  endpoint (the suite skips a gofail scenario whose member does not
+  answer on it); `run.sh` fails when every scenario is skipped.
+- **Reading a failure.** The build VM does not outlive the job, so
+  `run.sh` prints the end of each member's log, and on failure the
+  suite's reports (each client's operations, `history.html`), go test's
+  log and every member's log as a base64 tar.gz between
+  `==== artifacts` and `==== end artifacts`. `tests/robustness/replay.py`
+  replays a report's client histories in revision order and names the
+  reads that disagree with the writes acknowledged before them.
+  `GO_TIMEOUT` bounds the run; a pattern runs a subset, e.g.
+  `run.sh 'TestRobustnessExploratory/.*/ClusterOfSize1'`.
+
+**First runs (2026-11-20, fastetcd 1.41.0 + `wip/195`, build VMs).**
+The suite starts fastetcd clusters of 1 and 3 members, drives the
+traffic and injects the faults; no scenario passes yet. What it found:
+
+- A key's `Version` is too low after any compaction (#220): every
+  1-member scenario fails linearization on it, and only on it (with
+  `Version` left out, `replay.py` finds no read that disagrees).
+- clientv3 loops forever on a watch at a compacted revision (#222):
+  after a member is killed and restarted, the suite's watch on it never
+  finishes (`TestRobustnessRegression/Issue13766`).
+- On a healthy 3-member cluster writes take 130–400 ms, past the suite's
+  200 ms request timeout, and it reaches under its 100 qps floor (#204).
+- A spurious watch "revision gap" warning on every new store (#223).
+
+Getting there needed fastetcd to take two more of etcd's conventions:
+host names in listen URLs (`localhost`), and a flag given twice taking
+its last value.
 
 ### 3c. Jepsen for etcd
 
