@@ -76,6 +76,10 @@ pub const META_KEY_RAFT_BATCH: &[u8] = b"raft_batch_progress";
 /// cleared (fastetcd#77): a member older than 1.10 cannot read this log,
 /// and nothing else recorded that the cluster had batched.
 pub const META_KEY_BATCHED: &[u8] = b"batched";
+/// Set (to `[1]`) by the first applied `StartRevision` log entry and
+/// never cleared (fastetcd#160): a member older than 1.41 cannot read
+/// this log. Carried by snapshots.
+pub const META_KEY_START_REVISION: &[u8] = b"start_revision";
 /// The cluster id, replicated (fastetcd#38): set once by the first
 /// `ClusterId` log entry applied, carried by snapshots with the rest of
 /// `mvcc_meta`. Big-endian u64.
@@ -419,6 +423,8 @@ struct Inner {
     pending_raft_meta: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
     /// [`META_KEY_BATCHED`], as the engine holds it (fastetcd#77).
     batched: AtomicBool,
+    /// [`META_KEY_START_REVISION`], as the engine holds it (fastetcd#160).
+    start_revision: AtomicBool,
     /// [`META_KEY_CLUSTER_ID`] as the engine holds it (0: not set yet),
     /// with a watch for the server to follow it (fastetcd#38).
     cluster_id: watch::Sender<u64>,
@@ -539,6 +545,7 @@ impl MvccStore {
         let compact = read_i64(&*snap, META_KEY_COMPACT_REV).await?.unwrap_or(0);
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
+        let start_revision = snap.get(TABLE_META, META_KEY_START_REVISION).await?.is_some();
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
 
@@ -570,6 +577,7 @@ impl MvccStore {
                 event_tx,
                 pending_raft_meta: Mutex::new(Vec::new()),
                 batched: AtomicBool::new(batched),
+                start_revision: AtomicBool::new(start_revision),
                 cluster_id: watch::channel(cluster_id).0,
                 auth: AuthMemory::default(),
                 lease_applied: std::sync::Mutex::default(),
@@ -717,6 +725,12 @@ impl MvccStore {
         pending.push((META_KEY_RAFT_BATCH.to_vec(), progress));
     }
 
+    /// Whether this store's log has held a `StartRevision` entry
+    /// (fastetcd#160).
+    pub fn has_start_revision(&self) -> bool {
+        self.inner.start_revision.load(Ordering::Relaxed)
+    }
+
     /// Whether this store's log has held a batched entry (fastetcd#77).
     pub fn has_batched(&self) -> bool {
         self.inner.batched.load(Ordering::Relaxed)
@@ -779,6 +793,10 @@ impl MvccStore {
         let moves = state.current_rev == 0;
         if moves {
             write_i64(&mut batch, META_KEY_CURRENT_REV, START_REVISION);
+        }
+        // The log has held one: a downgrade floor (fastetcd#160).
+        if !self.inner.start_revision.swap(true, Ordering::Relaxed) {
+            batch.put(TABLE_META, META_KEY_START_REVISION, &[1]);
         }
         self.fold_raft_meta(&mut batch).await;
         if batch.is_empty() {
@@ -974,10 +992,12 @@ impl MvccStore {
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         // A snapshot from a batched cluster carries the marker (#77).
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
+        let start_revision = snap.get(TABLE_META, META_KEY_START_REVISION).await?.is_some();
         // A snapshot from a cluster that has replicated its id carries it.
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
         self.inner.batched.fetch_or(batched, Ordering::Relaxed);
+        self.inner.start_revision.fetch_or(start_revision, Ordering::Relaxed);
         if cluster_id != 0 {
             self.inner.cluster_id.send_if_modified(|v| std::mem::replace(v, cluster_id) != cluster_id);
         }
@@ -3100,8 +3120,10 @@ mod tests {
         let path = dir.path().join("mvcc.redb");
         {
             let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+            assert!(!s.has_start_revision());
             assert_eq!(s.apply_start_revision().await.unwrap(), START_REVISION);
             assert_eq!(s.current_revision().await, 1);
+            assert!(s.has_start_revision());
             // Readable at revision 1, empty, as an empty etcd store.
             let r = s.range(b"a", b"", 0, 1, false, false).await.unwrap();
             assert!(r.kvs.is_empty());
@@ -3113,15 +3135,18 @@ mod tests {
             assert_eq!((r.kvs[0].create_revision, r.kvs[0].mod_revision), (2, 2));
             assert_eq!(s.apply_start_revision().await.unwrap(), 2);
         }
-        // Reopened: the numbering stayed.
+        // Reopened: the numbering and the marker stayed.
         let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
         assert_eq!(s.current_revision().await, 2);
+        assert!(s.has_start_revision());
 
         // A store with 0-based history (made before 1.41) keeps it.
         let (_d, old) = open_mvcc().await;
         let (rev, _) = old.apply(&[put(b"a", b"1")]).await.unwrap();
         assert_eq!(rev, 1);
         assert_eq!(old.apply_start_revision().await.unwrap(), 1);
+        // Its log has held the entry all the same (a downgrade floor).
+        assert!(old.has_start_revision());
         let (rev, _) = old.apply(&[put(b"b", b"1")]).await.unwrap();
         assert_eq!(rev, 2);
     }

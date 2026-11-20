@@ -763,14 +763,46 @@ on; gateway `/v3/maintenance/downgrade`):
   | 1.22 | always | a nested txn may have been applied: not recorded (#134, #56) |
   | 1.23 | always | keep-alives renewed in the leader's RAM (#92) |
   | 1.33 | once the cluster id is replicated (`fastetcd_cluster_id_replicated` = 1) | the cluster-id log entry (#38): its purge on every member is not tracked, so this floor stays |
+  | 1.41 | once the log has held a `StartRevision` entry (any cluster whose members all ran 1.41 while it had no revision yet, or wrote) | the start-revision log entry (#160) |
 
   So a cluster that has run 1.33 or later validates 1.33 and up, and
-  refuses anything older. It checks the data only: it does not ask the
+  refuses anything older; one whose log holds a `StartRevision` entry
+  validates nothing below 1.41. It checks the data only: it does not ask the
   members their versions, and changes nothing.
 - **`enable` and `cancel`** are not served: they answer as an unknown
   action does (`InvalidArgument` `unknown downgrade action N`; the gap
   is #202). Validate, then restart one member at a time onto the older
   binary.
+
+**Revisions: a new store starts at 1, as etcd's (1.41, #160).** An
+empty etcd store is at revision 1, so its first write is revision 2.
+Before 1.41 an empty fastetcd store was at 0 and its first write was
+revision 1. From 1.41 a store with no revision yet moves to revision 1
+through a replicated `StartRevision` log entry, so every member, and
+every replay of the log, moves at the same point:
+
+- Before a write (put, delete, txn, lease revoke) on a store at
+  revision 0, the member serving it proposes `StartRevision` and waits
+  for it; a leader of an empty store also proposes it by itself within
+  seconds. So an empty 1.41 cluster reports revision 1 and its first
+  write is revision 2.
+- **A store that has a revision keeps its numbering.** An upgraded
+  store's revisions never move: the entry changes nothing on a store
+  that has written, and its next write is the next revision as before.
+  An existing store that never wrote moves to 1 (it has no revision to
+  keep).
+- A member older than 1.41 cannot decode the entry. While a member
+  answers with an older version, the entry is not proposed and the
+  write goes ahead at revision 1, as before: that store keeps 0-based
+  numbering for good. A member that does not answer is not waited for
+  (a new cluster's first write does not wait for its last member to
+  come up); if it is older than 1.41 it stops at the entry until it is
+  upgraded. Once the log holds the entry, do not add a member older than
+  1.41 (`MemberAdd` does not check it, as for the cluster id: #134), and
+  do not downgrade below 1.41 (the floor above).
+- `fastetcd-migrate` without `--preserve-revisions` starts the import
+  the same way: the imported keys are revision 2, as a fresh etcd's
+  first write. `--preserve-revisions` keeps etcd's own revisions.
 
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which
@@ -1217,5 +1249,6 @@ fastetcd-migrate --from etcd-snap.db --to /var/lib/fastetcd \
 ```
 
 Without `--preserve-revisions`, only the latest live value per key
-is imported. Use the flag if you have clients that rely on
+is imported, all at revision 2 (a new store starts at revision 1, as
+etcd's, #160). Use the flag if you have clients that rely on
 historical reads or watch reconnections from past revisions.

@@ -212,8 +212,13 @@ async fn status_members_alarms_and_the_keyspace_over_json() {
     // Downgrade (#192): VALIDATE a fastetcd version; refusals carry the
     // gRPC code (9 FailedPrecondition, 3 InvalidArgument). ENABLE and
     // CANCEL are not served: an unknown action (#201).
-    let v = env.ok("/v3/maintenance/downgrade", json!({"action": "VALIDATE", "version": "1.33"}), None).await;
-    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"), "{v}");
+    // This store has written, so its log holds a StartRevision entry and
+    // 1.41 is its floor (#160): 1.33 is refused, naming it.
+    let (_, err) = env
+        .post("/v3/maintenance/downgrade", json!({"action": "VALIDATE", "version": "1.33"}), None)
+        .await;
+    assert_eq!(err["code"], 9, "{err}");
+    assert!(err.to_string().contains("below 1.41.0"), "{err}");
     for (body, code) in [
         (json!({"action": "VALIDATE", "version": "1.22"}), 9),
         (json!({"action": "VALIDATE", "version": "3.5"}), 3),

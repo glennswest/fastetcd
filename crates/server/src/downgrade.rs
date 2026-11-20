@@ -42,12 +42,18 @@ pub struct Used {
     pub batched: bool,
     /// The cluster id is replicated (`fastetcd_cluster_id_replicated`).
     pub cluster_id_replicated: bool,
+    /// The log has held a `StartRevision` entry (fastetcd#160).
+    pub start_revision: bool,
 }
 
 impl Used {
     pub fn of(state: &ServerState) -> Self {
         let mvcc = state.sm.mvcc();
-        Self { batched: mvcc.has_batched(), cluster_id_replicated: mvcc.cluster_id().is_some() }
+        Self {
+            batched: mvcc.has_batched(),
+            cluster_id_replicated: mvcc.cluster_id().is_some(),
+            start_revision: mvcc.has_start_revision(),
+        }
     }
 }
 
@@ -86,6 +92,13 @@ pub fn floors(used: Used) -> Vec<Floor> {
             why: "the cluster id is replicated in a log entry an older member cannot decode, and \
                   fastetcd does not track when a snapshot and a log purge have passed it on every \
                   member (#38)",
+        });
+    }
+    if used.start_revision {
+        out.push(Floor {
+            since: (1, 41, 0),
+            why: "this cluster's log has held a StartRevision entry (its store starts at revision \
+                  1, as etcd's), which an older member cannot decode (#160)",
         });
     }
     out
@@ -162,7 +175,8 @@ mod tests {
     use super::*;
     use tonic::Code;
 
-    const ALL: Used = Used { batched: true, cluster_id_replicated: true };
+    /// Every floor below 1.41 (these tests answer as 1.39).
+    const ALL: Used = Used { batched: true, cluster_id_replicated: true, start_revision: false };
 
     #[test]
     fn targets_parse() {
@@ -232,6 +246,19 @@ mod tests {
         assert!(!err.message().contains("below 1.10.0"), "{}", err.message());
         let err = validate("1.39.0", "1.9.0", Used { batched: true, ..Used::default() }).unwrap_err();
         assert!(err.message().contains("below 1.10.0"), "{}", err.message());
+    }
+
+    /// fastetcd#160: once the log has held a StartRevision entry, 1.41
+    /// is the floor; before, 1.40 passes.
+    #[test]
+    fn a_start_revision_entry_sets_a_1_41_floor() {
+        assert_eq!(validate("1.41.0", "1.40.1", ALL).unwrap(), "1.41.0");
+        let used = Used { start_revision: true, ..ALL };
+        let err = validate("1.41.0", "1.40.1", used).unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("below 1.41.0"), "{}", err.message());
+        assert!(err.message().contains("StartRevision"), "{}", err.message());
+        assert!(err.message().contains("may go back to is 1.41.0"), "{}", err.message());
     }
 
     #[test]

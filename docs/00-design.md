@@ -27,7 +27,10 @@ on the apply path, without requiring any client to change.
    not a separate code path.
 3. **MVCC semantics match etcd**: monotonic global revisions, key history
    queryable at past revisions, watchers see every revision between
-   their start point and current head (modulo compaction).
+   their start point and current head (modulo compaction). A new store
+   starts at revision 1, as etcd's (first write 2), through a replicated
+   `StartRevision` log entry; a store with revisions from before 1.41
+   keeps its 0-based numbering (#160).
 4. **Linearizable reads by default** via read-index; serializable reads
    opt-in per request (`Range.serializable = true`).
 5. **All mutations go through Raft.** Lease grants, lease revocations on

@@ -175,6 +175,11 @@ not served — etcd 3.6 removed it too.
 
 Differences from etcd:
 
+- A store made by 1.41 or later starts at revision 1, as etcd's, so
+  its first write is revision 2. A store that had revisions before 1.41
+  keeps its numbering, one lower than etcd's for the same history (its
+  first write was revision 1), and so does a cluster that wrote while a
+  member older than 1.41 answered (#160; 03-deploy § Revisions).
 - `--auto-compaction-retention` counts revisions; etcd's default mode
   counts hours (#21).
 - The v3 JSON gateway serves no WebSocket upgrades (#66, deferred): its
