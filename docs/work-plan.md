@@ -1941,5 +1941,11 @@ Tracked live in the Claude task system. Snapshot of the order:
       member with a one-byte quota (alarm raised, filesystem with room):
       the background check refuses, `reclaim` rewrites, the file
       shrinks, the keys kept.
-    - [ ] sc-build; negative control (reclaim calling `rewrite_if_due`).
+    - [x] sc-build of 2bb0ba6: `background_rewrite` (4), `space_alarm`
+      (4), `space` unit tests (10), clippy `-D warnings` clean; workspace
+      `--no-fail-fast` 544 pass, 0 fail. Negative control (reclaim
+      calling `rewrite_if_due`): the member test fails, no rewrite. In
+      this harness the in-place defragment alone shrank the file (101 ->
+      17 MB), so the rewrite counter is what tells them apart; the
+      finding's numbers are the unit test's.
 
