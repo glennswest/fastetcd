@@ -48,6 +48,10 @@ use crate::version_gate::MembersAtLeast;
 
 /// The first version whose leader honours RAM deadlines.
 pub const RAM_RENEW_SINCE: (u64, u64, u64) = (1, 23, 0);
+/// etcd's largest lease TTL (`lease.MaxLeaseTTL`, 9e9 s, about 285
+/// years): a LeaseGrant asking for more is refused before it is
+/// proposed (`etcdserver: too large lease TTL`, fastetcd#218).
+pub const MAX_LEASE_TTL_SECS: i64 = 9_000_000_000;
 /// How often a closed gate asks the members again.
 const PROBE_EVERY: Duration = Duration::from_secs(5);
 
@@ -102,8 +106,20 @@ pub struct Lessor {
     inner: Arc<Shared>,
 }
 
-fn ttl(secs: i64) -> Duration {
-    Duration::from_secs(secs.max(0) as u64)
+/// `base` plus a TTL of `secs`, never panicking (fastetcd#218). Grants
+/// above `MAX_LEASE_TTL_SECS` are refused, but an older member may have
+/// persisted one (up to `i64::MAX` s): such a lease's deadline is
+/// `MAX_LEASE_TTL_SECS` from `base`, as if granted at etcd's maximum,
+/// so it outlives any process and never expires. Should even that
+/// overflow `Instant` (not on Linux), the largest TTL that fits is used.
+fn deadline(base: Instant, secs: i64) -> Instant {
+    let mut d = Duration::from_secs(secs.clamp(0, MAX_LEASE_TTL_SECS) as u64);
+    loop {
+        if let Some(at) = base.checked_add(d) {
+            return at;
+        }
+        d /= 2;
+    }
 }
 
 /// Only for TimeToLive off the leader, whose answer comes from the
@@ -214,7 +230,7 @@ impl Lessor {
         let now = Instant::now();
         let mut ram = s.ram.lock().unwrap();
         if ram.term != term {
-            ram.deadlines = records.iter().map(|r| (r.id, now + ttl(r.ttl_secs))).collect();
+            ram.deadlines = records.iter().map(|r| (r.id, deadline(now, r.ttl_secs))).collect();
             ram.term = term;
             s.stats.promotions.fetch_add(1, Ordering::Relaxed);
             tracing::info!(
@@ -233,9 +249,9 @@ impl Lessor {
     /// the current term; a lease with no RAM deadline yet (granted since)
     /// gets its TTL from that apply, or from now.
     fn effective_deadline(&self, id: LeaseId, ttl_secs: i64, now: Instant) -> Instant {
-        let applied = self.inner.mvcc.lease_applied_at(id).map(|at| at + ttl(ttl_secs));
+        let applied = self.inner.mvcc.lease_applied_at(id).map(|at| deadline(at, ttl_secs));
         let mut ram = self.inner.ram.lock().unwrap();
-        let held = *ram.deadlines.entry(id).or_insert(applied.unwrap_or(now + ttl(ttl_secs)));
+        let held = *ram.deadlines.entry(id).or_insert(applied.unwrap_or_else(|| deadline(now, ttl_secs)));
         applied.map_or(held, |a| held.max(a))
     }
 
@@ -268,7 +284,7 @@ impl Lessor {
         if self.effective_deadline(id, t.granted_ttl_secs, now) <= now {
             return Renewal::NotFound;
         }
-        s.ram.lock().unwrap().deadlines.insert(id, now + ttl(t.granted_ttl_secs));
+        s.ram.lock().unwrap().deadlines.insert(id, deadline(now, t.granted_ttl_secs));
         s.stats.renewed_in_ram.fetch_add(1, Ordering::Relaxed);
         Renewal::Renewed(LeaseTtlResult {
             id,
@@ -314,5 +330,23 @@ impl Lessor {
             .filter(|r| self.effective_deadline(r.id, r.ttl_secs, now) <= now)
             .map(|r| r.id)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deadline_never_overflows_and_caps_at_etcds_maximum() {
+        let now = Instant::now();
+        let max = now + Duration::from_secs(MAX_LEASE_TTL_SECS as u64);
+        assert_eq!(deadline(now, 5), now + Duration::from_secs(5));
+        assert_eq!(deadline(now, MAX_LEASE_TTL_SECS), max);
+        // Persisted by a member that accepted any TTL (fastetcd#218).
+        assert_eq!(deadline(now, MAX_LEASE_TTL_SECS + 1), max);
+        assert_eq!(deadline(now, i64::MAX), max);
+        assert_eq!(deadline(now, -1), now);
+        assert!(remaining_secs(deadline(now, i64::MAX), now) >= MAX_LEASE_TTL_SECS - 1);
     }
 }

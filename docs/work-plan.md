@@ -1853,3 +1853,22 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [ ] Test (fault injection on the directory sync): the rewrite and
       the next commit fail, the one after succeeds; reopened from the
       data path, the store holds every acknowledged write.
+
+110. **A large lease TTL panicked the lease expiry worker (#218, finding
+    d103e96b1b1d).** LeaseGrant took any positive TTL; the leader's
+    lessor added it to an `Instant` unchecked (promote, effective
+    deadline, renew), so `i64::MAX` s panicked the sweeper task for good
+    (no lease expired again) and, in promote, poisoned the RAM-deadline
+    mutex. The lease is persisted, so every new leader repeated it.
+    - [x] LeaseGrant above etcd's `MaxLeaseTTL` (9e9 s) is refused
+      before proposing: `OutOfRange`, `etcdserver: too large lease TTL`
+      (etcd's `ErrGRPCLeaseTTLTooLarge`). Apply is unchanged (a
+      mixed-version cluster applies the same).
+    - [x] Lessor deadlines use checked arithmetic; a persisted TTL above
+      the maximum is held at the maximum (never expires in practice).
+    - [x] Tests: `lessor` unit test (`deadline` at i64::MAX, cap,
+      negative); `lease_ttl_max.rs` (refusal and the maximum accepted;
+      promotion, TimeToLive, renew and expiry with an i64::MAX lease
+      logged directly; the sweeper keeps expiring 2 s leases beside it).
+    - [ ] sc-build workspace green.
+

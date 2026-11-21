@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use fastetcd_proto::etcdserverpb as pb;
 use fastetcd_proto::etcdserverpb::lease_server::Lease;
-use fastetcd_raft::lessor::Renewal;
+use fastetcd_raft::lessor::{Renewal, MAX_LEASE_TTL_SECS};
 use fastetcd_raft::network::TtlForwardError;
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use fastetcd_storage::mvcc::Refusal;
@@ -115,6 +115,12 @@ impl Lease for LeaseService {
         // refusing it; the state machine refuses one that reaches it
         // (#49), so it is raised here, before proposing.
         let ttl_secs = if req.ttl <= 0 { MIN_LEASE_TTL_SECS } else { req.ttl };
+        // etcd refuses a TTL above its maximum before proposing
+        // (`ErrGRPCLeaseTTLTooLarge`); a monotonic deadline that far out
+        // would not fit (fastetcd#218).
+        if ttl_secs > MAX_LEASE_TTL_SECS {
+            return Err(Status::out_of_range("etcdserver: too large lease TTL"));
+        }
         let resp = self
             .propose(FastetcdLogEntry::LeaseGrant {
                 id: req.id,
