@@ -437,3 +437,71 @@ async fn an_installed_snapshot_carries_the_leases_and_their_keys() {
     let FastetcdLogResponse::LeaseGrant(g) = &out[0] else { panic!("{out:?}") };
     assert!(g.id > 100 && g.id != 999, "allocated {}", g.id);
 }
+
+fn put_bytes(index: u64, key: &[u8]) -> Entry<TypeConfig> {
+    Entry {
+        log_id: log_id(1, index),
+        payload: EntryPayload::Normal(FastetcdLogEntry::Apply {
+            mutations: vec![Mutation::Put {
+                key: key.to_vec(),
+                value: b"v".to_vec(),
+                lease: 0,
+                prev_kv: false,
+                ignore_value: false,
+                ignore_lease: false,
+            }],
+        }),
+    }
+}
+
+/// fastetcd#213 (finding 8494731e320d): an install clears every key of
+/// the tables it replaces. It deleted `[b"", [0xFF; 64])`, so this
+/// member's index of a key of 64 0xFF bytes, and of a longer one with
+/// that prefix, survived an install of a snapshot without them, while
+/// their records (length-prefixed keys) went: the index named records
+/// that were gone.
+#[tokio::test]
+async fn an_install_clears_keys_at_and_above_64_ff_bytes() {
+    let dir = tempdir().unwrap();
+    let ff = vec![0xFFu8; 64];
+    let mut longer = ff.clone();
+    longer.extend_from_slice(b"x");
+
+    // This member has both keys; the leader, which deleted and compacted
+    // them away, has neither.
+    let (mut member, member_mvcc) = open_sm(&dir.path().join("member.redb")).await;
+    member.apply(vec![put_bytes(1, &ff), put_bytes(2, &longer)]).await.unwrap();
+    assert_eq!(member_mvcc.range(&ff, b"", 0, 0, false, false).await.unwrap().kvs.len(), 1);
+
+    let (mut leader, leader_mvcc) = open_sm(&dir.path().join("leader.redb")).await;
+    leader.apply(vec![put_bytes(1, &ff), put_bytes(2, &longer)]).await.unwrap();
+    let del = |index, key: &[u8]| Entry {
+        log_id: log_id(1, index),
+        payload: EntryPayload::Normal(FastetcdLogEntry::Apply {
+            mutations: vec![Mutation::DeleteRange { key: key.to_vec(), range_end: Vec::new(), prev_kv: false }],
+        }),
+    };
+    leader.apply(vec![del(3, &ff), del(4, &longer), put_entry(5, "other", "v")]).await.unwrap();
+    let compact = Entry {
+        log_id: log_id(1, 6),
+        payload: EntryPayload::Normal(FastetcdLogEntry::Compact { rev: leader_mvcc.current_revision().await }),
+    };
+    leader.apply(vec![compact]).await.unwrap();
+    let snapshot = leader.get_snapshot_builder().await.build_snapshot().await.unwrap();
+
+    member.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+    for (what, key) in [("64 0xFF bytes", &ff), ("64 0xFF bytes and more", &longer)] {
+        let got = member_mvcc
+            .range(key, b"", 0, 0, false, false)
+            .await
+            .unwrap_or_else(|e| panic!("{what}: a read after the install: {e}"));
+        assert!(got.kvs.is_empty(), "{what}: still there after the install");
+    }
+    assert_eq!(visible_keys(&member_mvcc).await, 1, "only `other`");
+
+    // The key can be written again, as a new key.
+    member.apply(vec![put_bytes(7, &ff)]).await.unwrap();
+    let got = member_mvcc.range(&ff, b"", 0, 0, false, false).await.unwrap();
+    assert_eq!(got.kvs.len(), 1);
+    assert_eq!(got.kvs[0].version, 1, "a new generation, not the old one's");
+}

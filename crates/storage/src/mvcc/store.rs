@@ -4532,7 +4532,7 @@ mod tests {
         let snap = src.engine().snapshot().await.unwrap();
         let mut batch = WriteBatch::new();
         for t in [TABLE_KV, TABLE_IDX, TABLE_META] {
-            batch.delete_range(t, b"", &[0xFFu8; 64]);
+            batch.clear_table(t);
             for (k, v) in snap
                 .range(t, Bound::Unbounded, Bound::Unbounded, 0)
                 .await

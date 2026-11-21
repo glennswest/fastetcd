@@ -1766,3 +1766,17 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] sc-build workspace (9a424ab, passed, no warnings); negative
       control: the four tests on the fix reverted (wip/212-negative,
       3d157a4) all fail. Release 1.43.1.
+
+105. **A snapshot install kept keys at or above 64 0xFF bytes (#213,
+    finding 8494731e320d).** It cleared each table with
+    `DeleteRange [b"", [0xFF; 64])`, which is not the end of the byte
+    keyspace: an index entry of a key of 64 0xFF bytes (or longer with
+    that prefix) absent from the snapshot survived, its records gone.
+    - [x] `BatchOp::ClearTable` / `WriteBatch::clear_table`: redb
+      `retain(false)`; write-behind layers hold it as an unbounded range
+      delete (`(start, None)`), and flush it as one.
+    - [x] The install's table clears and `AuthTables::replace_into` use it.
+    - [x] Tests: `snapshot_install::an_install_clears_keys_at_and_above_64_ff_bytes`;
+      conformance `clear_table_removes_every_key` (redb, write-behind;
+      commit durable and not, commit_stream).
+    - [ ] sc-build; negative control (install test on the old bound).

@@ -646,7 +646,10 @@ fn stream_body(
     let last_membership: StoredMembership<NodeId, openraft::BasicNode> =
         bincode::deserialize_from(&mut *r).map_err(bincode_io)?;
     for table in BODY_TABLES {
-        send(BatchOp::DeleteRange { table: table.to_string(), start: Vec::new(), end: vec![0xFF; 64] })?;
+        // The whole table (#213): a range ending at 64 0xFF bytes kept a
+        // key at or above it, a user key of 64 0xFF bytes for one, whose
+        // index then named records the install had removed.
+        send(BatchOp::ClearTable { table: table.to_string() })?;
     }
     for table in BODY_TABLES {
         let n: u64 = bincode::deserialize_from(&mut *r).map_err(bincode_io)?;

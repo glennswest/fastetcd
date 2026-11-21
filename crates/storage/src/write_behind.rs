@@ -66,14 +66,24 @@ struct Layer {
 #[derive(Default, Debug)]
 struct TableLayer {
     entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    range_dels: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `[start, end)`; an end of `None` is the end of the table (a
+    /// `ClearTable`, fastetcd#213).
+    range_dels: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+/// Whether `key` is in `[s, e)`, `e = None` being unbounded.
+fn in_del(key: &[u8], s: &[u8], e: &Option<Vec<u8>>) -> bool {
+    key >= s && e.as_ref().is_none_or(|e| key < e.as_slice())
+}
+
+/// The bounds of `[s, e)` for a `BTreeMap::range`.
+fn del_bounds<'a>(s: &'a [u8], e: &'a Option<Vec<u8>>) -> (Bound<&'a [u8]>, Bound<&'a [u8]>) {
+    (Bound::Included(s), e.as_ref().map_or(Bound::Unbounded, |e| Bound::Excluded(e.as_slice())))
 }
 
 impl TableLayer {
     fn covered(&self, key: &[u8]) -> bool {
-        self.range_dels
-            .iter()
-            .any(|(s, e)| key >= s.as_slice() && key < e.as_slice())
+        self.range_dels.iter().any(|(s, e)| in_del(key, s, e))
     }
 }
 
@@ -109,8 +119,16 @@ impl Layer {
                         for k in keys {
                             t.entries.remove(&k);
                         }
-                        t.range_dels.push((start.clone(), end.clone()));
+                        t.range_dels.push((start.clone(), Some(end.clone())));
                     }
+                }
+                BatchOp::ClearTable { table } => {
+                    layer.bytes += table.len() + 64;
+                    let t = layer.tables.entry(table.clone()).or_default();
+                    // Everything before it in this batch is gone too.
+                    t.entries.clear();
+                    t.range_dels.clear();
+                    t.range_dels.push((Vec::new(), None));
                 }
             }
         }
@@ -121,7 +139,10 @@ impl Layer {
     fn to_ops(&self, batch: &mut WriteBatch) {
         for (table, t) in &self.tables {
             for (s, e) in &t.range_dels {
-                batch.delete_range(table, s, e);
+                match e {
+                    Some(e) => batch.delete_range(table, s, e),
+                    None => batch.clear_table(table),
+                };
             }
             for (k, v) in &t.entries {
                 match v {
@@ -370,7 +391,7 @@ struct TableView {
     entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// Range deletes: an engine key under one, and not in `entries`, is
     /// gone.
-    dels: Vec<(Vec<u8>, Vec<u8>)>,
+    dels: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 impl TableView {
@@ -379,7 +400,7 @@ impl TableView {
             || self
                 .dels
                 .iter()
-                .any(|(s, e)| key >= s.as_slice() && key < e.as_slice())
+                .any(|(s, e)| in_del(key, s, e))
     }
 }
 
@@ -395,7 +416,7 @@ impl OverlaySnapshot {
             for (s, e) in &t.range_dels {
                 let gone: Vec<Vec<u8>> = v
                     .entries
-                    .range::<[u8], _>((Bound::Included(s.as_slice()), Bound::Excluded(e.as_slice())))
+                    .range::<[u8], _>(del_bounds(s, e))
                     .map(|(k, _)| k.clone())
                     .collect();
                 for k in gone {

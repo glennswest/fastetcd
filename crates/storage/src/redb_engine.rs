@@ -118,6 +118,7 @@ fn op_bytes(op: &BatchOp) -> usize {
         BatchOp::Put { table, key, value } => table.len() + key.len() + value.len(),
         BatchOp::Delete { table, key } => table.len() + key.len(),
         BatchOp::DeleteRange { table, start, end } => table.len() + start.len() + end.len(),
+        BatchOp::ClearTable { table } => table.len(),
     }
 }
 
@@ -408,7 +409,10 @@ impl RedbEngine {
 fn apply_op(txn: &redb::WriteTransaction, op: &BatchOp) -> StorageResult<()> {
     let mut t = txn
         .open_table(RedbEngine::table_def(match op {
-            BatchOp::Put { table, .. } | BatchOp::Delete { table, .. } | BatchOp::DeleteRange { table, .. } => table,
+            BatchOp::Put { table, .. }
+            | BatchOp::Delete { table, .. }
+            | BatchOp::DeleteRange { table, .. }
+            | BatchOp::ClearTable { table } => table,
         }))
         .map_err(StorageError::io)?;
     match op {
@@ -423,6 +427,9 @@ fn apply_op(txn: &redb::WriteTransaction, op: &BatchOp) -> StorageResult<()> {
             // clears whole tables, fastetcd#62).
             t.retain_in(start.as_slice()..end.as_slice(), |_, _| false)
                 .map_err(StorageError::io)?;
+        }
+        BatchOp::ClearTable { .. } => {
+            t.retain(|_, _| false).map_err(StorageError::io)?;
         }
     }
     Ok(())

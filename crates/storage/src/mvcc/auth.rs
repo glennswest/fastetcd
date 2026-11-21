@@ -173,7 +173,7 @@ impl AuthTables {
     /// Replace the three tables with these contents, in `batch`.
     pub fn replace_into(&self, batch: &mut WriteBatch) {
         for t in [TABLE_AUTH_USERS, TABLE_AUTH_ROLES, TABLE_AUTH_STATE] {
-            batch.delete_range(t, b"", &[0xFFu8; 64]);
+            batch.clear_table(t);
         }
         for (k, v) in &self.users {
             batch.put(TABLE_AUTH_USERS, k, v);

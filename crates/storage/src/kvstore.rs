@@ -115,6 +115,10 @@ pub enum BatchOp {
         start: Vec<u8>,
         end: Vec<u8>,
     },
+    /// Delete every key in `table`, whatever its bytes (fastetcd#213: a
+    /// `DeleteRange` needs an end, and no byte string is above every
+    /// key).
+    ClearTable { table: String },
 }
 
 /// Engine-agnostic write batch. Built imperatively, then passed to
@@ -160,6 +164,12 @@ impl WriteBatch {
             start: start.to_vec(),
             end: end.to_vec(),
         });
+        self
+    }
+
+    /// Delete every key in `table` (fastetcd#213).
+    pub fn clear_table(&mut self, table: &str) -> &mut Self {
+        self.ops.push(BatchOp::ClearTable { table: table.to_string() });
         self
     }
 
@@ -396,6 +406,48 @@ pub mod conformance {
         delete_range_is_atomic(store).await;
         snapshot_is_consistent_under_writes(store).await;
         count_matches_range_len(store).await;
+        clear_table_removes_every_key(store).await;
+    }
+
+    /// fastetcd#213: `ClearTable` removes every key, including those at
+    /// or above any finite bound (64 0xFF bytes, longer ones with that
+    /// prefix); a put before it in the batch goes, one after it stays.
+    /// Through `commit`, durable and not, and `commit_stream`.
+    pub async fn clear_table_removes_every_key<S: KvStore>(store: &S) {
+        let ff = vec![0xFFu8; 64];
+        let mut longer = ff.clone();
+        longer.push(b'x');
+        let keys: Vec<Vec<u8>> = vec![Vec::new(), b"a".to_vec(), ff.clone(), longer.clone(), vec![0xFF; 300]];
+        for (round, sync) in [(0, true), (1, false), (2, true)] {
+            let table = format!("clear{round}");
+            let mut batch = WriteBatch::new();
+            for k in &keys {
+                batch.put(&table, k, b"v");
+            }
+            store.commit(batch, WriteOptions { sync }).await.unwrap();
+            let mut batch = WriteBatch::new();
+            batch.put(&table, &ff, b"before");
+            batch.clear_table(&table);
+            batch.put(&table, b"after", b"v");
+            if round < 2 {
+                store.commit(batch, WriteOptions { sync }).await.unwrap();
+            } else {
+                let (tx, rx) = std::sync::mpsc::sync_channel(16);
+                for op in batch.ops() {
+                    tx.send(Ok(op.clone())).unwrap();
+                }
+                drop(tx);
+                store.commit_stream(rx, WriteOptions { sync }).await.unwrap();
+            }
+            let snap = store.snapshot().await.unwrap();
+            let out = snap.range(&table, Bound::Unbounded, Bound::Unbounded, 0).await.unwrap();
+            let left: Vec<&[u8]> = out.iter().map(|(k, _)| k.as_slice()).collect();
+            assert_eq!(left, [b"after".as_ref()], "round {round}");
+            for k in &keys {
+                assert_eq!(snap.get(&table, k).await.unwrap(), None, "round {round}: {} bytes", k.len());
+            }
+            assert_eq!(snap.count(&table, Bound::Unbounded, Bound::Unbounded).await.unwrap(), 1, "round {round}");
+        }
     }
 
     pub async fn put_get_delete<S: KvStore>(store: &S) {
