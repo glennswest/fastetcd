@@ -1862,7 +1862,7 @@ Tracked live in the Claude task system. Snapshot of the order:
       clean, workspace `--no-fail-fast` 676 pass, 0 fail (the first
       attempt's 1 failure, `move_leader_hands_leadership_to_the_target`,
       is multinode timing, seen in #218's runs too). Negative control
-      (old order: sync, then switch; 15f31a5-style throwaway branch):
+      (old order: sync, then switch, on a throwaway branch):
       the write after the failed sync is accepted, onto the unlinked
       file.
 
