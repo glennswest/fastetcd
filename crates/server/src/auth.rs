@@ -414,7 +414,7 @@ impl Auth for AuthService {
         })?;
         Ok(Response::new(pb::AuthRoleGetResponse {
             header: Some(self.header().await),
-            perm: role.permissions.iter().map(perm_to_pb).collect(),
+            perm: role.effective().iter().map(perm_to_pb).collect(),
         }))
     }
 

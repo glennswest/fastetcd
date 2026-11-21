@@ -209,3 +209,60 @@ async fn read_perm_does_not_allow_write() {
         .expect_err("read-only role should not write");
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
+
+/// fastetcd#214 (finding d7b5308df357): granting READ on a range a role
+/// holds READWRITE on replaces it, as in etcd, so writes are refused at
+/// once. The grant was added beside the old one, and the READWRITE still
+/// allowed them.
+#[tokio::test]
+async fn a_read_grant_over_readwrite_takes_write_away() {
+    let h = start_test_server_full().await;
+    let mut auth = setup(&h.endpoint).await;
+    auth.role_add(pb::AuthRoleAddRequest { name: "app".into() }).await.unwrap();
+    let grant = |perm_type: i32| pb::AuthRoleGrantPermissionRequest {
+        name: "app".into(),
+        perm: Some(fastetcd_proto::authpb::Permission { perm_type, key: b"app/".to_vec(), range_end: b"app0".to_vec() }),
+    };
+    auth.role_grant_permission(grant(2)).await.unwrap(); // READWRITE
+    auth.user_add(pb::AuthUserAddRequest { name: "alice".into(), password: "pw".into(), ..Default::default() })
+        .await
+        .unwrap();
+    auth.user_grant_role(pb::AuthUserGrantRoleRequest { user: "alice".into(), role: "app".into() }).await.unwrap();
+    auth.auth_enable(pb::AuthEnableRequest {}).await.unwrap();
+    let root = authenticate(&h.endpoint, "root", "rootpw").await;
+    let alice = authenticate(&h.endpoint, "alice", "pw").await;
+    let mut kv = KvClient::connect(h.endpoint.clone()).await.unwrap();
+    let put = || pb::PutRequest { key: b"app/k".to_vec(), value: b"v".to_vec(), ..Default::default() };
+    kv.put(with_token(put(), &alice)).await.expect("READWRITE writes");
+
+    auth.role_grant_permission(with_token(grant(0), &root)).await.expect("READ over READWRITE"); // READ
+    let err = kv.put(with_token(put(), &alice)).await.expect_err("a put after the downgrade");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    let err = kv
+        .delete_range(with_token(pb::DeleteRangeRequest { key: b"app/k".to_vec(), ..Default::default() }, &alice))
+        .await
+        .expect_err("a delete after the downgrade");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    let r = kv
+        .range(with_token(pb::RangeRequest { key: b"app/k".to_vec(), ..Default::default() }, &alice))
+        .await
+        .expect("READ still reads")
+        .into_inner();
+    assert_eq!(r.kvs.len(), 1);
+    let role = auth
+        .role_get(with_token(pb::AuthRoleGetRequest { role: "app".into() }, &root))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(role.perm.len(), 1, "{:?}", role.perm);
+    assert_eq!(role.perm[0].perm_type, 0);
+
+    // And back up: WRITE alone now, so a read is refused and a put allowed.
+    auth.role_grant_permission(with_token(grant(1), &root)).await.unwrap(); // WRITE
+    kv.put(with_token(put(), &alice)).await.expect("WRITE writes");
+    let err = kv
+        .range(with_token(pb::RangeRequest { key: b"app/k".to_vec(), ..Default::default() }, &alice))
+        .await
+        .expect_err("WRITE does not read");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}

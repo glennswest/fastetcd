@@ -342,7 +342,12 @@ checks pass silently and nothing changes.
 ### What a role's permissions cover
 
 With auth enabled, a non-root user's roles are checked on every KV
-operation, the same way etcd checks them:
+operation, the same way etcd checks them. A role holds one permission per
+key and range end: `role grant-permission` on a key and range end the
+role already has replaces its type, as in etcd, so granting `read` over
+`readwrite` takes write away at once (1.43.3, #214; before, the two were
+both kept and the `readwrite` still allowed writes; a role stored that
+way is read as its last grant):
 
 | Operation | Needs |
 |---|---|

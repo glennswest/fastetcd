@@ -34,6 +34,46 @@ pub struct StoredRole {
     pub permissions: Vec<StoredPermission>,
 }
 
+impl StoredRole {
+    /// RoleGrantPermission (fastetcd#214): a grant for a key and
+    /// range_end the role already has replaces that permission's type,
+    /// as etcd's `RoleGrantPermission` does; any duplicates of it go
+    /// too. Otherwise the grant is added. It used to be always added, so
+    /// a READ over a READWRITE left write access in place.
+    pub fn grant(&mut self, perm: StoredPermission) {
+        let same = |p: &StoredPermission| p.key == perm.key && p.range_end == perm.range_end;
+        match self.permissions.iter().position(same) {
+            Some(i) => {
+                self.permissions[i] = perm.clone();
+                let mut seen = false;
+                self.permissions.retain(|p| {
+                    if !same(p) {
+                        return true;
+                    }
+                    let keep = !seen;
+                    seen = true;
+                    keep
+                });
+            }
+            None => self.permissions.push(perm),
+        }
+    }
+
+    /// The permissions in effect: for a key and range_end granted more
+    /// than once (a role stored before #214), the last grant, in the
+    /// place of the first. What authorization and RoleGet go by.
+    pub fn effective(&self) -> Vec<StoredPermission> {
+        let mut out: Vec<StoredPermission> = Vec::with_capacity(self.permissions.len());
+        for p in &self.permissions {
+            match out.iter_mut().find(|q| q.key == p.key && q.range_end == p.range_end) {
+                Some(q) => *q = p.clone(),
+                None => out.push(p.clone()),
+            }
+        }
+        out
+    }
+}
+
 /// Single permission grant — matches etcd's `authpb::Permission`
 /// shape (READ / WRITE / READWRITE × key range).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -517,7 +557,7 @@ pub async fn plan(
             let Some(mut r) = get_role(snap, name).await? else {
                 return Ok(Err(role_not_found(name)));
             };
-            r.permissions.push(perm.clone());
+            r.grant(perm.clone());
             put_role(batch, &r)?;
         }
         AuthOp::RoleRevokePermission { name, key, range_end } => {
@@ -707,5 +747,63 @@ mod tests {
             b.auth_tables().await.unwrap().digest()
         );
         assert!(a.auth_tables().await.unwrap().is_empty());
+    }
+
+    fn perm(t: PermType, key: &[u8], end: &[u8]) -> StoredPermission {
+        StoredPermission { perm_type: t, key: key.to_vec(), range_end: end.to_vec() }
+    }
+
+    fn types(ps: &[StoredPermission]) -> Vec<(PermType, Vec<u8>, Vec<u8>)> {
+        ps.iter().map(|p| (p.perm_type, p.key.clone(), p.range_end.clone())).collect()
+    }
+
+    /// fastetcd#214 (finding d7b5308df357): a grant for a key and
+    /// range_end the role has replaces that permission, as etcd's does;
+    /// another range is added.
+    #[tokio::test]
+    async fn a_grant_on_the_same_range_replaces_its_type() {
+        let (_d, s) = open().await;
+        ok(&s, AuthOp::RoleAdd { name: "app".into() }).await;
+        let grant = |t, key: &[u8], end: &[u8]| AuthOp::RoleGrantPermission { name: "app".into(), perm: perm(t, key, end) };
+        ok(&s, grant(PermType::ReadWrite, b"config/", b"config0")).await;
+        ok(&s, grant(PermType::Read, b"other", b"")).await;
+        ok(&s, grant(PermType::Read, b"config/", b"config0")).await;
+        let snap = s.engine().snapshot().await.unwrap();
+        let role = get_role(&*snap, "app").await.unwrap().unwrap();
+        assert_eq!(
+            types(&role.permissions),
+            vec![
+                (PermType::Read, b"config/".to_vec(), b"config0".to_vec()),
+                (PermType::Read, b"other".to_vec(), Vec::new()),
+            ]
+        );
+        // The same key with another range_end is another permission.
+        ok(&s, grant(PermType::Write, b"config/", b"")).await;
+        let snap = s.engine().snapshot().await.unwrap();
+        assert_eq!(get_role(&*snap, "app").await.unwrap().unwrap().permissions.len(), 3);
+    }
+
+    /// A role stored before #214 with a range granted twice: in effect is
+    /// the last grant, and the next grant of that range collapses them.
+    #[test]
+    fn stored_duplicates_take_the_last_grant_and_collapse_on_the_next() {
+        let mut role = StoredRole {
+            name: "app".into(),
+            permissions: vec![
+                perm(PermType::ReadWrite, b"a", b"b"),
+                perm(PermType::Read, b"x", b""),
+                perm(PermType::Read, b"a", b"b"),
+            ],
+        };
+        assert_eq!(
+            types(&role.effective()),
+            vec![(PermType::Read, b"a".to_vec(), b"b".to_vec()), (PermType::Read, b"x".to_vec(), Vec::new())]
+        );
+        role.grant(perm(PermType::Write, b"a", b"b"));
+        assert_eq!(
+            types(&role.permissions),
+            vec![(PermType::Write, b"a".to_vec(), b"b".to_vec()), (PermType::Read, b"x".to_vec(), Vec::new())]
+        );
+        assert_eq!(types(&role.effective()), types(&role.permissions));
     }
 }

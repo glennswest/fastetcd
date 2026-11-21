@@ -115,7 +115,8 @@ pub async fn authorize_all(
         };
         let role: StoredRole = bincode::deserialize(&role_bytes)
             .map_err(|e| Status::internal(format!("authz: decode role: {e}")))?;
-        perms.extend(role.permissions);
+        // The last grant of a key/range wins (#214).
+        perms.extend(role.effective());
     }
 
     for a in accesses {
