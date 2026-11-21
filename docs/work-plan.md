@@ -1747,3 +1747,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       membership, redial and MemberUpdate's NotFound are done here; left
       for #208: `RemoveNode` (learner removal, fd7f6fcec07f), NotFound on
       MemberRemove, `Peer URLs already exists` on MemberUpdate.
+
+104. **Two store findings (#212).**
+    - [ ] 839965788fbf: LeaseGrant of an id that exists replaced its
+      record (TTL, deadline) with no check of its keys. Refuse it at
+      apply, `Refusal::LeaseExists` (appended; etcd's `etcdserver: lease
+      already exists`, FailedPrecondition), and in the leader's precheck;
+      an auto-allocated id skips any lease that exists.
+    - [ ] 9078e0ee4fdf: `range_events_until` checked the compact
+      revision before taking its engine snapshot, so a compaction in
+      between let a replay succeed with a deleted key's history gone.
+      Take the snapshot and revisions as one `read_view`, and refuse a
+      compacted start in that view.
+    - [ ] Tests: duplicate grant with another TTL (refused, record kept,
+      by a user without access to the lease's keys through gRPC);
+      a replay held inside its snapshot while a compaction removes a
+      deleted key returns Compacted.
