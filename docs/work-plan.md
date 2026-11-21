@@ -1681,3 +1681,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       `--wal-max-bytes` still bounds it; test.
     - [x] `fastetcd_runtime_schedule_delay_max_seconds` cannot move back:
       a new maximum is stored and published under a lock; concurrent test.
+
+100. **Forced migration keeps the old raft state (#209, finding
+    365ef68c637f).** `fastetcd-migrate --force` removed only
+    `fastetcd.redb`; `wal/` and `snapshots/` of the old store stayed.
+    - [x] Import into `fastetcd.redb.migrating`; when whole, move the old
+      data file, `wal/` and `snapshots/` aside as `*.replaced-<secs>`
+      and rename the import into place (`install` in migrate's lib).
+    - [x] Test: `round_trip::a_forced_migration_moves_the_old_raft_state_aside`
+      (refusals leave the dir untouched; old key gone after).
+    - [x] e2e: `tests/migrate_e2e.sh` runs the member with
+      `--snapshot-count 20`, writes, compacts, snapshots, stops,
+      migrates `--force`, restarts twice.
+    - [ ] sc-build: workspace + `tests/migrate_e2e.sh`.

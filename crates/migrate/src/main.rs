@@ -15,7 +15,9 @@ struct Args {
     #[arg(long)]
     to: PathBuf,
 
-    /// Overwrite an existing target.
+    /// Replace an existing target. Its data file, raft WAL and
+    /// snapshots are moved aside as `<name>.replaced-<unix secs>` once
+    /// the import is whole.
     #[arg(long, default_value_t = false)]
     force: bool,
 
@@ -56,6 +58,9 @@ async fn main() -> anyhow::Result<()> {
         to = %args.to.display(),
         "migration complete"
     );
+    for p in &summary.replaced {
+        tracing::info!(kept = %p.display(), "the previous store's file moved aside");
+    }
     if summary.keys_lease_dropped > 0 {
         tracing::warn!(
             keys = summary.keys_lease_dropped,

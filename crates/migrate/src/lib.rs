@@ -52,6 +52,9 @@ pub struct MigrationSummary {
     pub roles: usize,
     /// Whether auth is on in the target (it was on in etcd).
     pub auth_enabled: bool,
+    /// What a forced migration moved aside (`*.replaced-<unix secs>`):
+    /// the previous data file, raft WAL and snapshots (#209).
+    pub replaced: Vec<std::path::PathBuf>,
 }
 
 /// etcd's `leasepb.Lease` (server/lease/leasepb/lease.proto).
@@ -155,8 +158,9 @@ pub enum MigrationMode {
 
 /// Migrate an etcd BoltDB snapshot at `from` into a fastetcd data
 /// directory at `to`. The target directory must be empty unless
-/// `force` is true. Existing target redb files are removed when
-/// `force` is set.
+/// `force` is true. With `force`, the previous store (data file, raft
+/// WAL, snapshots) is moved aside as `*.replaced-<unix secs>` once the
+/// import is whole (#209).
 pub async fn migrate_snapshot(
     from: &Path,
     to: &Path,
@@ -290,12 +294,15 @@ pub async fn migrate_snapshot_with_mode(
         }
     }
     std::fs::create_dir_all(to)?;
-    let target_path = to.join("fastetcd.redb");
-    if force && target_path.exists() {
-        std::fs::remove_file(&target_path)?;
+    let target_path = to.join(DATA_FILE);
+    // Imported beside the target and moved into place only once it is
+    // whole: a failed import leaves the directory as it was (#209).
+    let staging = to.join(format!("{DATA_FILE}.migrating"));
+    if staging.exists() {
+        std::fs::remove_file(&staging)?; // a previous run that failed
     }
 
-    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&target_path)?);
+    let engine: Arc<dyn fastetcd_storage::KvStore> = Arc::new(RedbEngine::open(&staging)?);
     let mvcc = MvccStore::open(engine).await?;
 
     // The leases first, so each key is attached to its lease as written.
@@ -387,6 +394,9 @@ pub async fn migrate_snapshot_with_mode(
         }
     };
     let auth_enabled = import_auth(&mvcc, &auth).await?;
+    drop(mvcc);
+    drop(engine);
+    let replaced = install(to, &staging, &target_path)?;
     Ok(MigrationSummary {
         scanned,
         tombstones,
@@ -397,7 +407,38 @@ pub async fn migrate_snapshot_with_mode(
         users: auth.users.len(),
         roles: auth.roles.len(),
         auth_enabled,
+        replaced,
     })
+}
+
+/// The server's data file in a data directory.
+const DATA_FILE: &str = "fastetcd.redb";
+
+/// Move the imported `staging` file to `target`. What a forced migration
+/// replaces is moved aside, not deleted, as `<name>.replaced-<unix secs>`:
+/// the old data file, and the raft WAL and snapshots that belong to it.
+/// Left in place, the next start would take the old WAL's vote, entries
+/// and purge state for the new store's, replaying old writes over the
+/// imported keys or finding a log purged past it (#209); without them it
+/// builds a new WAL from the imported store. Returns what was moved.
+fn install(to: &Path, staging: &Path, target: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut moved = Vec::new();
+    for name in [DATA_FILE, "wal", "snapshots"] {
+        let old = to.join(name);
+        if old.exists() {
+            let aside = to.join(format!("{name}.replaced-{secs}"));
+            std::fs::rename(&old, &aside)
+                .map_err(|e| anyhow::anyhow!("move {old:?} aside to {aside:?}: {e}"))?;
+            moved.push(aside);
+        }
+    }
+    std::fs::rename(staging, target)
+        .map_err(|e| anyhow::anyhow!("move {staging:?} to {target:?}: {e}"))?;
+    std::fs::File::open(to)?.sync_all()?;
+    Ok(moved)
 }
 
 /// Apply etcd's roles, users and enabled flag as the server's own auth

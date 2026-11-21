@@ -1252,3 +1252,10 @@ Without `--preserve-revisions`, only the latest live value per key
 is imported, all at revision 2 (a new store starts at revision 1, as
 etcd's, #160). Use the flag if you have clients that rely on
 historical reads or watch reconnections from past revisions.
+
+Over an existing member's data dir, stop the member and pass
+`--force`: the import is written beside it and moved into place only
+when whole, and the old `fastetcd.redb`, `wal/` and `snapshots/` are
+kept as `*.replaced-<unix secs>` (#209). A failed import leaves the
+directory as it was. Delete the `*.replaced-*` entries once the
+member runs on the imported data.

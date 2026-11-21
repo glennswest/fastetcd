@@ -208,7 +208,11 @@ Commands: `put <key> <value>`, `get <key>
 [--force] [--preserve-revisions]`** — import an etcd v3 BoltDB
 snapshot: keys (without `--preserve-revisions` only the latest value
 of each), leases with their keys, and users, roles and the auth flag;
-users keep their etcd passwords (#60).
+users keep their etcd passwords (#60). The target must be empty
+unless `--force`; with it, once the import is whole, the previous
+data file, raft WAL and snapshots are moved aside as
+`<name>.replaced-<unix secs>` (#209), so the member starts with a new
+raft log built from the imported store. Run it with the member stopped.
 
 **`fastetcd-bench`** — load generator. `--endpoint`, `--mode put |
 get-lin | get-ser | read-under-load | durability-write | durability-check

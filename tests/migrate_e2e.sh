@@ -100,4 +100,35 @@ check "the short lease expired, and its key with it, after the move" "" \
     "$(f --user root:rootpw get /session/short --print-value-only)"
 echo "   (expired $(( $(date +%s) - STARTED )) s after fastetcd started)"
 check "the long lease's key is still there" "l" "$(f --user root:rootpw get /session/long --print-value-only)"
+
+# ---- --force over a member that ran, compacted and snapshotted (#209) --------
+# The member's own writes live in its raft WAL and snapshots too: a forced
+# migration must not leave them to be replayed over the imported store.
+start_fastetcd() {
+    "$T/fastetcd" --data-dir "$WORK/fastetcd" --listen-client-urls "$FEP" \
+        --listen-peer-urls "http://127.0.0.1:$(port)" --listen-metrics-url "" "$@" >>"$WORK/fastetcd.log" 2>&1 &
+    FPID=$!
+    wait_up "$FEP"
+}
+stop_fastetcd() { kill "$FPID"; wait "$FPID" 2>/dev/null || true; }
+r() { f --user root:rootpw "$@"; }
+stop_fastetcd
+start_fastetcd --snapshot-count 20 --snapshot-catchup-entries 5
+for i in $(seq 100); do r put "/stale/$i" old >/dev/null; done
+REV=$(r get /plain -w json | python3 -c 'import json,sys; print(json.load(sys.stdin)["header"]["revision"])')
+r compact "$REV" >/dev/null
+for _ in $(seq 100); do [ -n "$(ls -A "$WORK/fastetcd/snapshots" 2>/dev/null)" ] && break; sleep 0.2; done
+check "the member took a raft snapshot" "yes" "$([ -n "$(ls -A "$WORK/fastetcd/snapshots" 2>/dev/null)" ] && echo yes || echo no)"
+stop_fastetcd
+"$T/fastetcd-migrate" --from "$WORK/snap.db" --to "$WORK/fastetcd" --force
+check "the old WAL and snapshots are moved aside" "wal.replaced snapshots.replaced fastetcd.redb.replaced" \
+    "$(cd "$WORK/fastetcd" && for n in wal snapshots fastetcd.redb; do ls -d "$n".replaced-* >/dev/null 2>&1 && printf '%s ' "$n.replaced"; done | sed 's/ $//')"
+start_fastetcd
+check "the member's own keys did not come back" "0" "$(r get /stale/ --prefix --keys-only | grep -c '^/stale/' || true)"
+check "the imported keys are there" "p" "$(r get /plain --print-value-only)"
+r put /after new >/dev/null
+stop_fastetcd
+start_fastetcd
+check "a write after the forced migration survives a restart" "new" "$(r get /after --print-value-only)"
+check "and the member's own keys stay gone" "0" "$(r get /stale/ --prefix --keys-only | grep -c '^/stale/' || true)"
 exit "$FAILED"

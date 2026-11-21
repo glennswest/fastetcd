@@ -384,3 +384,64 @@ async fn an_etcdctl_snapshot_with_its_trailing_sha256_migrates_and_a_bad_one_is_
     let err = migrate_snapshot(&saved, &dir.path().join("data2"), false).await.unwrap_err();
     assert!(err.to_string().contains("sha256"), "{err:#}");
 }
+
+/// A forced migration over a member's data dir moves the member's whole
+/// store aside (data file, raft WAL, snapshots), not just its data file:
+/// the old WAL would otherwise be replayed over the imported store
+/// (fastetcd#209). A failed import leaves the directory untouched.
+#[tokio::test]
+async fn a_forced_migration_moves_the_old_raft_state_aside() {
+    use fastetcd_storage::mvcc::Mutation;
+    let dir = tempdir().unwrap();
+    let snap = dir.path().join("snapshot.db");
+    build_snapshot_with_leases_and_auth(&snap);
+    let to = dir.path().join("data");
+    migrate_snapshot(&snap, &to, false).await.unwrap();
+    // The member ran: a key of its own, a WAL and a snapshot.
+    {
+        let (_engine, mvcc) = open_store(&to).await;
+        let put = Mutation::Put {
+            key: b"/stale".to_vec(),
+            value: b"old".to_vec(),
+            lease: 0,
+            ignore_value: false,
+            ignore_lease: false,
+            prev_kv: false,
+        };
+        mvcc.apply(&[put]).await.unwrap();
+    }
+    std::fs::create_dir_all(to.join("wal")).unwrap();
+    std::fs::write(to.join("wal/0000000000000000.wal"), b"old log").unwrap();
+    std::fs::create_dir_all(to.join("snapshots")).unwrap();
+    std::fs::write(to.join("snapshots/1-2-3.snap"), b"old snapshot").unwrap();
+
+    // Without --force: refused, nothing touched.
+    assert!(migrate_snapshot(&snap, &to, false).await.is_err());
+    // A bad source with --force: refused before anything moves.
+    let bad = dir.path().join("bad.db");
+    std::fs::write(&bad, b"not a bolt file").unwrap();
+    assert!(migrate_snapshot(&bad, &to, true).await.is_err());
+    assert!(to.join("wal/0000000000000000.wal").exists() && to.join("snapshots").exists());
+
+    let s = migrate_snapshot(&snap, &to, true).await.unwrap();
+    assert_eq!(s.replaced.len(), 3, "data file, wal, snapshots: {:?}", s.replaced);
+    assert!(!to.join("wal").exists(), "the old WAL is no longer the member's");
+    assert!(!to.join("snapshots").exists(), "nor its snapshots");
+    assert!(!to.join("fastetcd.redb.migrating").exists());
+    let names: Vec<String> = std::fs::read_dir(&to)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    for kept in ["fastetcd.redb.replaced-", "wal.replaced-", "snapshots.replaced-"] {
+        assert!(names.iter().any(|n| n.starts_with(kept)), "{kept}* kept: {names:?}");
+    }
+    let wal_aside = s.replaced.iter().find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("wal.")).unwrap();
+    assert_eq!(std::fs::read(wal_aside.join("0000000000000000.wal")).unwrap(), b"old log");
+
+    // The data file is the import's: the member's own key is gone.
+    let (_engine, mvcc) = open_store(&to).await;
+    let stale = mvcc.range(b"/stale", b"", 0, 0, false, false).await.unwrap();
+    assert!(stale.kvs.is_empty(), "the replaced store's key survived");
+    let plain = mvcc.range(b"/session/a", b"", 0, 0, false, false).await.unwrap();
+    assert_eq!(plain.kvs.len(), 1, "the imported keys are there");
+}
