@@ -552,12 +552,17 @@ opened, and answers for the start until the member serves:
 | `GET /health` | 503 `{"health":"false","reason":"STARTING …"}` |
 | `GET /metrics`, `/` | `fastetcd_starting{phase="…"} 1`, `fastetcd_starting_seconds`, `fastetcd_starting_since_progress_seconds` |
 
-Progress is any of: a phase ends, redb reports its repair (once per full
-scan of the file: 0, 30, 60, 90%), the start's threads read or write
-(`/proc/self/task/<tid>/io` `rchar`/`wchar`) or use CPU. The listener and
-the sampler run on a thread of their own (`fastetcd-starting`), which is
-left out: before 1.43.6 the sampler's own reads of `/proc` counted, so a
-stalled start never failed `/livez` (#219). A repair of a file not
+Progress is any of, within one 2 s sample: a phase ends, redb reports its
+repair (once per full scan of the file: 0, 30, 60, 90%), or the start's
+threads (`/proc/self/task/<tid>/io` and `stat`) do storage I/O
+(`read_bytes`/`write_bytes` grow), read or write 64 KiB
+(`rchar`/`wchar`, page cache included), or use 50 ms of CPU. The
+listener and the sampler run on a thread of their own
+(`fastetcd-starting`), which is left out, and an idle runtime's wake-ups
+(8 bytes of eventfd each, microseconds of CPU) stay below the marks:
+before 1.43.6 any change in the process's counters counted, the
+sampler's own reads of `/proc` among them, so a stalled start never
+failed `/livez` (#219). A repair of a file not
 closed cleanly reads the whole file, so on a slow disk it keeps `/livez`
 ok for as long as it takes; a read that never returns (a device stall
 below fastetcd, #138) fails it after 120 s. So point the startup probe at

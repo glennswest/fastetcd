@@ -4,7 +4,9 @@
 //! The sampler read process-wide counters (`/proc/self/io`, `stat`), and
 //! its own reads of them moved `rchar` every sample, so a start blocked
 //! for good looked busy and `/livez` never failed. The listener and the
-//! sampler now run on a thread the counters leave out. This file holds
+//! sampler now run on a thread the counters leave out, and the 8 bytes a
+//! parked runtime's eventfd moves per wake-up are below what counts as
+//! progress (`PROGRESS_CHARS`). This file holds
 //! one test, so nothing else runs in the process: the real sampler sees
 //! only the "start" (this test's threads), with a 3 s stall instead of
 //! 120 s.
@@ -57,11 +59,11 @@ async fn a_blocked_start_fails_livez_and_a_working_one_does_not() {
     assert_eq!(code, 503, "{body}");
     assert!(body.starts_with("[-]starting failed: no progress for "), "{body}");
 
-    // 2. Working: a thread reads a little every 300 ms, as a repair on a
-    //    slow disk does. `/livez` stays ok for several stall periods.
+    // 2. Working: a thread reads 256 KiB (page cache) every 300 ms, as a
+    //    slow repair does. `/livez` stays ok for several stall periods.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("data");
-    std::fs::write(&file, vec![7u8; 64 * 1024]).unwrap();
+    std::fs::write(&file, vec![7u8; 256 * 1024]).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let worker = {
         let (stop, file) = (stop.clone(), file.clone());

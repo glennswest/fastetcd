@@ -1895,5 +1895,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       stall, a start doing nothing fails `/livez` (503), a thread reading
       every 300 ms keeps it ok for 9 s, and when it stops the stall is
       seen again.
-    - [ ] sc-build; negative control with process-wide counters.
+    - [x] Found by the test (sc-build of 6f4d533 failed it; per-thread
+      dump on a build VM): a parked tokio runtime moves `rchar` 8 bytes
+      per wake-up (its eventfd), so any change still counted as
+      progress. Now within one sample: storage I/O (`read_bytes` +
+      `write_bytes`) grows, or `rchar` + `wchar` by >= 64 KiB, or CPU
+      by >= 5 ticks, or a repair report; sums that drop (a thread ended)
+      are not progress. Unit test with eventfd-sized noise.
+    - [x] Negative control (monitor thread counted, 6f4d533 otherwise):
+      the blocked start never stalls (since_progress ~150 ms at 12 s).
+    - [ ] sc-build.
 

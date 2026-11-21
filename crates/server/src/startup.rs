@@ -48,6 +48,42 @@ pub const STALL: Duration = Duration::from_secs(120);
 /// How often the counters are sampled.
 pub const SAMPLE_EVERY: Duration = Duration::from_secs(2);
 
+/// Read and write calls (`rchar` + `wchar`) that count as progress within
+/// one sample. A parked tokio runtime reads and writes its eventfd, 8 bytes
+/// a wake-up, with no work behind it (#219); a start reading its file from
+/// the page cache moves megabytes.
+pub const PROGRESS_CHARS: u64 = 64 * 1024;
+
+/// CPU ticks (1/100 s) that count as progress within one sample: 50 ms. A
+/// runtime waking for its timers uses microseconds; a start loading its
+/// index or replaying its WAL uses most of a core.
+pub const PROGRESS_TICKS: u64 = 5;
+
+/// One sample of the start's threads (every thread but the monitor's).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Counters {
+    /// `rchar` + `wchar`: read and write calls, page cache or not.
+    chars: u64,
+    /// `read_bytes` + `write_bytes`: what reached the storage layer. No
+    /// eventfd or /proc read counts here, so any growth is progress.
+    storage: u64,
+    /// utime + stime, in ticks.
+    cpu: u64,
+    /// redb's repair reports.
+    repair: u64,
+}
+
+impl Counters {
+    /// Moved since `prev` by more than an idle process does. A thread that
+    /// ended takes its counts out of the sums: that alone is not progress.
+    fn moved_since(&self, prev: &Counters) -> bool {
+        self.storage > prev.storage
+            || self.chars.saturating_sub(prev.chars) >= PROGRESS_CHARS
+            || self.cpu.saturating_sub(prev.cpu) >= PROGRESS_TICKS
+            || self.repair != prev.repair
+    }
+}
+
 /// The phases of one start, in order.
 pub struct Startup {
     start: Instant,
@@ -75,9 +111,8 @@ struct StatusInner {
     phase: &'static str,
     phase_started: Instant,
     last_progress: Instant,
-    /// The last sample: (I/O chars, CPU ticks of every thread but the
-    /// monitor's, repair reports).
-    sample: Option<(u64, u64, u64)>,
+    /// The last sample.
+    sample: Option<Counters>,
     done: bool,
 }
 
@@ -159,8 +194,10 @@ impl StartupStatus {
     }
 
     /// Look at the I/O and CPU counters of every thread but the
-    /// monitor's, and redb's repair reports; any change is progress.
-    /// Called every [`SAMPLE_EVERY`] on the monitor thread.
+    /// monitor's, and redb's repair reports: storage I/O, a repair report,
+    /// [`PROGRESS_CHARS`] of reads and writes or [`PROGRESS_TICKS`] of CPU
+    /// since the last sample is progress. Called every [`SAMPLE_EVERY`] on
+    /// the monitor thread.
     pub fn sample(&self) {
         let repair_steps = fastetcd_storage::redb_engine::RedbEngine::repair_progress().map_or(0, |(_, n)| n);
         // No /proc (not Linux), or no monitor thread to leave out: count
@@ -170,13 +207,17 @@ impl StartupStatus {
             .monitor_tid
             .get()
             .and_then(|tid| threads_but(*tid))
-            .map(|(io, cpu)| (io, cpu, repair_steps));
+            .map(|c| Counters { repair: repair_steps, ..c });
         self.observe(sample, Instant::now());
     }
 
-    fn observe(&self, sample: Option<(u64, u64, u64)>, now: Instant) {
+    fn observe(&self, sample: Option<Counters>, now: Instant) {
         let mut s = self.inner.lock().unwrap();
-        if sample.is_none() || sample != s.sample {
+        let moved = match (&sample, &s.sample) {
+            (Some(cur), Some(prev)) => cur.moved_since(prev),
+            _ => true,
+        };
+        if moved {
             s.last_progress = now;
         }
         s.sample = sample;
@@ -246,13 +287,12 @@ fn this_thread_id() -> Option<u64> {
     link.file_name()?.to_str()?.parse().ok()
 }
 
-/// Every thread of this process but `skip`: the characters they read and
-/// wrote (`/proc/self/task/<tid>/io` `rchar` + `wchar`: every read and
-/// write call, page cache or disk) and their user + system CPU ticks
-/// (`stat` fields 14 and 15). A thread that ends between the listing and
-/// the reads is left out; it changes the sum, as any progress does.
-fn threads_but(skip: u64) -> Option<(u64, u64)> {
-    let (mut io, mut cpu) = (0u64, 0u64);
+/// Every thread of this process but `skip`: what they read and wrote
+/// (`/proc/self/task/<tid>/io`) and their user + system CPU ticks (`stat`
+/// fields 14 and 15). A thread that ends between the listing and the
+/// reads is left out.
+fn threads_but(skip: u64) -> Option<Counters> {
+    let mut sum = Counters::default();
     for entry in std::fs::read_dir("/proc/self/task").ok()? {
         let Ok(entry) = entry else { continue };
         let Some(tid) = entry.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
@@ -263,19 +303,21 @@ fn threads_but(skip: u64) -> Option<(u64, u64)> {
         if let (Ok(i), Ok(st)) =
             (std::fs::read_to_string(dir.join("io")), std::fs::read_to_string(dir.join("stat")))
         {
-            io += io_chars(&i).unwrap_or(0);
-            cpu += cpu_ticks(&st).unwrap_or(0);
+            let (chars, storage) = io_counts(&i).unwrap_or((0, 0));
+            sum.chars += chars;
+            sum.storage += storage;
+            sum.cpu += cpu_ticks(&st).unwrap_or(0);
         }
     }
-    Some((io, cpu))
+    Some(sum)
 }
 
-/// `rchar` + `wchar` of an `io` file.
-fn io_chars(io: &str) -> Option<u64> {
+/// (`rchar` + `wchar`, `read_bytes` + `write_bytes`) of an `io` file.
+fn io_counts(io: &str) -> Option<(u64, u64)> {
     let field = |name: &str| {
         io.lines().find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok())
     };
-    Some(field("rchar:")? + field("wchar:")?)
+    Some((field("rchar:")? + field("wchar:")?, field("read_bytes:")? + field("write_bytes:")?))
 }
 
 /// User + system CPU ticks of a `stat` file (fields 14 and 15).
@@ -446,29 +488,50 @@ mod tests {
         assert!(status.is_done());
     }
 
+    fn c(chars: u64, storage: u64, cpu: u64, repair: u64) -> Option<Counters> {
+        Some(Counters { chars, storage, cpu, repair })
+    }
+
     #[test]
     fn a_start_with_nothing_moving_stalls() {
         let t0 = Instant::now();
         let status = StartupStatus::new(t0, STALL, SAMPLE_EVERY);
-        status.observe(Some((100, 5, 0)), t0);
-        // The same counters for STALL: no progress.
-        status.observe(Some((100, 5, 0)), t0 + STALL);
+        status.observe(c(100, 0, 5, 0), t0);
+        // An idle runtime's eventfd and a tick of CPU every sample, for
+        // STALL: no progress (#219).
+        let mut t = t0;
+        for i in 1..=(STALL.as_secs() / 2) {
+            t = t0 + SAMPLE_EVERY * i as u32;
+            status.observe(c(100 + 16 * i, 0, 5 + i, 0), t);
+        }
         let r = status.report_at(t0 + STALL);
         assert!(!r.progressing(), "{r:?}");
         assert_eq!(r.since_progress, STALL);
-        // A read moves it again.
-        status.observe(Some((4196, 5, 0)), t0 + STALL + Duration::from_secs(1));
-        let r = status.report_at(t0 + STALL + Duration::from_secs(2));
+        // So is a thread that ended (the sums drop).
+        status.observe(c(0, 0, 0, 0), t + SAMPLE_EVERY);
+        assert!(!status.report_at(t0 + STALL + SAMPLE_EVERY).progressing());
+        // Reads of PROGRESS_CHARS move it again.
+        let t1 = t0 + STALL * 2;
+        status.observe(c(PROGRESS_CHARS, 0, 0, 0), t1);
+        let r = status.report_at(t1 + Duration::from_secs(1));
         assert!(r.progressing(), "{r:?}");
         assert_eq!(r.since_progress, Duration::from_secs(1));
-        // So does CPU, or a repair report.
-        status.observe(Some((4196, 6, 0)), t0 + STALL * 2);
-        assert!(status.report_at(t0 + STALL * 2).progressing());
-        status.observe(Some((4196, 6, 1)), t0 + STALL * 3);
-        assert!(status.report_at(t0 + STALL * 3).progressing());
+        // So does any storage I/O, PROGRESS_TICKS of CPU, or a repair report.
+        for (i, s) in [
+            c(PROGRESS_CHARS, 4096, 0, 0),
+            c(PROGRESS_CHARS, 4096, PROGRESS_TICKS, 0),
+            c(PROGRESS_CHARS, 4096, PROGRESS_TICKS, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = t1 + STALL * (i as u32 + 1);
+            status.observe(s, at);
+            assert_eq!(status.report_at(at).since_progress, Duration::ZERO, "{s:?}");
+        }
         // Unknown counters count as progress.
-        status.observe(None, t0 + STALL * 5);
-        assert!(status.report_at(t0 + STALL * 5).progressing());
+        status.observe(None, t0 + STALL * 9);
+        assert!(status.report_at(t0 + STALL * 9).progressing());
     }
 
     #[test]
@@ -478,8 +541,8 @@ mod tests {
         }
         let me = this_thread_id().expect("/proc/thread-self");
         assert!(threads_but(me).is_some(), "/proc/self/task");
-        let parse = io_chars("rchar: 10\nwchar: 5\nsyscr: 1\n");
-        assert_eq!(parse, Some(15));
+        let io = "rchar: 10\nwchar: 5\nsyscr: 1\nsyscw: 1\nread_bytes: 4096\nwrite_bytes: 8192\n";
+        assert_eq!(io_counts(io), Some((15, 12288)));
         let stat = "123 (a b) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15";
         // utime is field 14, stime 15.
         assert_eq!(cpu_ticks(stat), Some(11 + 12));
