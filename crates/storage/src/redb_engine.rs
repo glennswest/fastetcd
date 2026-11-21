@@ -65,6 +65,51 @@ struct RedbInner {
     capture: std::sync::Mutex<Option<Capture>>,
     /// One rewrite or in-place defragment at a time.
     maintenance: tokio::sync::Mutex<()>,
+    /// A rewrite renamed its new file over the data file, and the
+    /// directory sync after it failed (fastetcd#217): the rename may not
+    /// be durable, so a restart could open the old file. Every write syncs
+    /// the directory first and is refused until that succeeds.
+    dir_unsynced: AtomicBool,
+    /// Test fault injection: how many directory syncs fail.
+    #[cfg(test)]
+    fail_dir_syncs: AtomicUsize,
+}
+
+impl RedbInner {
+    /// fsync the data file's directory.
+    fn sync_dir(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_dir_syncs
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(std::io::Error::other("injected directory sync failure"));
+        }
+        match self.path.parent() {
+            Some(dir) => std::fs::File::open(dir).and_then(|d| d.sync_all()),
+            None => Ok(()),
+        }
+    }
+
+    /// Before a write: a directory left unsynced by a rewrite's switch is
+    /// synced now, or the write is refused (#217): a write the restart
+    /// would not find must not be acknowledged.
+    fn ensure_dir_synced(&self) -> StorageResult<()> {
+        if !self.dir_unsynced.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.sync_dir().map_err(|e| {
+            StorageError::io(std::io::Error::other(format!(
+                "the data file {} was replaced by a rewrite and its directory cannot be synced ({e}): \
+                 writes are refused until it can",
+                self.path.display()
+            )))
+        })?;
+        self.dir_unsynced.store(false, Ordering::Release);
+        tracing::info!(path = %self.path.display(), "the data file's directory is synced again; writes resume");
+        Ok(())
+    }
 }
 
 /// The commits a rewrite has yet to apply to its new file.
@@ -270,6 +315,9 @@ impl RedbEngine {
                 cache_bytes,
                 capture: std::sync::Mutex::new(None),
                 maintenance: tokio::sync::Mutex::new(()),
+                dir_unsynced: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_dir_syncs: AtomicUsize::new(0),
             }),
         })
     }
@@ -377,12 +425,27 @@ impl RedbEngine {
             }
             let fresh = builder.create(&tmp).map_err(StorageError::io)?;
             std::fs::rename(&tmp, &path).map_err(StorageError::io)?;
-            if let Some(dir) = path.parent() {
-                std::fs::File::open(dir).and_then(|d| d.sync_all()).map_err(StorageError::io)?;
-            }
-            // The old handle closes here; its file is gone from the
-            // directory and freed once the last snapshot of it is dropped.
+            // The rename is the switch (#217): the data path names the new
+            // file now, so the engine uses it from here on, whatever
+            // follows. The old handle closes here; its file is gone from
+            // the directory and freed once the last snapshot of it is
+            // dropped.
             *db_guard = fresh;
+            drop(db_guard);
+            if let Err(e) = inner.sync_dir() {
+                // Fail closed: no write is acknowledged until the rename
+                // is known to be durable.
+                inner.dir_unsynced.store(true, Ordering::Release);
+                tracing::error!(
+                    path = %inner.path.display(),
+                    error = %e,
+                    "a rewrite switched to its new file, but syncing the directory failed: writes are \
+                     refused until it succeeds"
+                );
+                return Err(StorageError::io(e));
+            }
+            // Durable now, over any earlier switch that was not.
+            inner.dir_unsynced.store(false, Ordering::Release);
             Ok(ops.len() as u64)
         })
         .await
@@ -469,6 +532,7 @@ impl KvStore for RedbEngine {
         let db_guard = self.inner.db.clone().read_owned().await;
         let inner = self.inner.clone();
         let result = task::spawn_blocking(move || -> StorageResult<()> {
+            inner.ensure_dir_synced()?;
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
             durability(&mut txn, opts.sync);
             for op in batch.ops() {
@@ -500,6 +564,7 @@ impl KvStore for RedbEngine {
         let db_guard = self.inner.db.clone().read_owned().await;
         let inner = self.inner.clone();
         task::spawn_blocking(move || -> StorageResult<()> {
+            inner.ensure_dir_synced()?;
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
             durability(&mut txn, opts.sync);
             for op in ops {
@@ -524,7 +589,9 @@ impl KvStore for RedbEngine {
         // An empty durable commit persists every non-durable commit
         // before it (`WriteOptions { sync: false }`).
         let db_guard = self.inner.db.clone().read_owned().await;
+        let inner = self.inner.clone();
         task::spawn_blocking(move || -> StorageResult<()> {
+            inner.ensure_dir_synced()?;
             let mut txn = db_guard.begin_write().map_err(StorageError::io)?;
             durability(&mut txn, true);
             txn.commit().map_err(StorageError::io)
@@ -977,6 +1044,53 @@ mod tests {
         let path = dir.path().join("test.redb");
         let engine = RedbEngine::open(&path).expect("open redb");
         (dir, engine)
+    }
+
+    fn put_one(key: &[u8]) -> WriteBatch {
+        let mut b = WriteBatch::new();
+        b.put("t", key, b"v");
+        b
+    }
+
+    /// fastetcd#217 (finding 4885dd489d4d): a rewrite whose directory
+    /// sync fails after the rename has switched to the new file all the
+    /// same, and refuses writes until the directory syncs. It returned
+    /// with the old handle, so writes went to the unlinked old file, and a
+    /// restart, opening the data path, lost them.
+    #[tokio::test]
+    async fn a_failed_directory_sync_after_the_rename_switches_and_fails_closed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        let eng = RedbEngine::open(&path).unwrap();
+        eng.commit(put_one(b"before"), WriteOptions::default()).await.unwrap();
+
+        // The rewrite's sync and the next write's both fail; the one after
+        // that succeeds.
+        eng.inner.fail_dir_syncs.store(2, Ordering::Release);
+        let err = eng.rewrite(0).await.expect_err("the rewrite reports the failed sync");
+        assert!(err.to_string().contains("injected directory sync failure"), "{err}");
+        assert!(!rewrite_path(&path).exists(), "the new file is the data file now");
+
+        let refused = eng.commit(put_one(b"refused"), WriteOptions::default()).await.expect_err("fail closed");
+        assert!(refused.to_string().contains("writes are refused until it can"), "{refused}");
+        let refused = eng.sync().await.expect_err("a sync is refused too");
+        assert!(refused.to_string().contains("cannot be synced"), "{refused}");
+        // The directory syncs now; writes resume.
+        eng.commit(put_one(b"after"), WriteOptions { sync: false }).await.unwrap();
+        eng.sync().await.unwrap();
+
+        let snap = eng.snapshot().await.unwrap();
+        assert!(snap.get("t", b"after").await.unwrap().is_some());
+        assert!(snap.get("t", b"refused").await.unwrap().is_none());
+        drop(snap);
+        drop(eng);
+        // What a restart opens: every acknowledged write is in it.
+        let again = RedbEngine::open(&path).unwrap();
+        let snap = again.snapshot().await.unwrap();
+        for k in [&b"before"[..], b"after"] {
+            assert!(snap.get("t", k).await.unwrap().is_some(), "{:?} lost", String::from_utf8_lossy(k));
+        }
+        assert!(snap.get("t", b"refused").await.unwrap().is_none());
     }
 
     // fastetcd#119: a defragment right after a non-durable commit (every

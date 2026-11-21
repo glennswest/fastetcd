@@ -191,7 +191,12 @@ any mark is reached:
      applied, the new file is committed durably, closed, reopened and
      renamed over `fastetcd.redb`, and the directory synced. That pause
      is about two fsyncs. Reads already running finish on the old file,
-     whose blocks are freed when the last of them ends.
+     whose blocks are freed when the last of them ends. The rename is
+     the switch: from it on the member uses the new file. If the
+     directory sync after it fails, the member refuses writes (each
+     retries the sync first) until the directory syncs, so no write is
+     acknowledged that a restart might not find (1.43.6, #217; the error
+     is logged at `error`).
 
   The volume needs room for the copy while it runs, which is why it is
   checked against the high-water mark first; above the mark the reclaim

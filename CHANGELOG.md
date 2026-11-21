@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-21
+- **fix:** A background rewrite whose directory sync failed after the rename left the engine on the old, unlinked data file (#217, finding 4885dd489d4d): the handle was swapped only after the sync, so the error returned with the old one, and every later write and checkpoint went to an inode a restart never opens, while the WAL that could replay them was purged. The rename is now the switch (the new handle is installed at once), and a failed directory sync fails closed: every commit, streamed commit and sync retries the sync first and is refused until it succeeds.
+
 ### 2026-11-20
 - **docs:** etcd's robustness suite runs against fastetcd (#195): no scenario passes yet; it found #220 (a key's Version too low after compaction), #222 (clientv3 loops on a watch at a compacted revision), #223 (spurious watch gap warning on a new store), and 3-member write latency past its timeout (#204). `tests/robustness/replay.py` checks a failed scenario's histories; `run.sh` returns reports, go test's log and member logs as an artifact. 02-testing 3b.
 - **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
