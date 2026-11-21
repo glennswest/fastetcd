@@ -1840,3 +1840,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] sc-build workspace (7679b7c, passed first time, no warnings);
       negative control: the two tests with installs never signalled
       (3b772e0) time out (no lock, no election). Release 1.43.5.
+
+109. **A rewrite's failed directory sync left the engine on the old,
+    unlinked file (#217, finding 4885dd489d4d).** After the rename, the
+    data path names the new file, but the handle was swapped only after
+    the directory sync: an error there returned with the old handle, and
+    every later write and checkpoint went to an inode no restart opens.
+    - [ ] The rename is the switch: the new handle is installed at once.
+    - [ ] A directory sync that fails after it fails closed: the engine
+      marks it, and every commit, streamed commit and sync syncs the
+      directory first and errors until it succeeds.
+    - [ ] Test (fault injection on the directory sync): the rewrite and
+      the next commit fail, the one after succeeds; reopened from the
+      data path, the store holds every acknowledged write.
