@@ -281,6 +281,84 @@ async fn a_backup_showing_other_members_refuses() {
     assert_eq!(std::fs::read(&d.data_file).unwrap(), before);
 }
 
+fn membership(voters: &[NodeId], learners: &[NodeId]) -> openraft::Membership<NodeId, openraft::BasicNode> {
+    let nodes: std::collections::BTreeMap<NodeId, openraft::BasicNode> = voters
+        .iter()
+        .chain(learners)
+        .map(|id| (*id, openraft::BasicNode::new(format!("http://node-{id}"))))
+        .collect();
+    openraft::Membership::new(vec![voters.iter().copied().collect()], nodes)
+}
+
+/// Write membership entries into the node's raft WAL, as the log store
+/// does when they are appended.
+fn wal_with(d: &Dirs, entries: &[(u64, openraft::Membership<NodeId, openraft::BasicNode>)]) {
+    use fastetcd_storage::raft_wal::{Wal, WalOptions, KIND_ENTRY};
+    let (mut wal, _) = Wal::open(&d.data_dir.join("wal"), WalOptions::default()).unwrap();
+    for (index, m) in entries {
+        let entry = openraft::Entry::<fastetcd_raft::types::TypeConfig> {
+            log_id: openraft::LogId::new(openraft::CommittedLeaderId::new(1, NODE), *index),
+            payload: openraft::EntryPayload::Membership(m.clone()),
+        };
+        let bytes = bincode::serialize(&entry).unwrap();
+        wal.append(&[(KIND_ENTRY, *index, &bytes)]).unwrap();
+    }
+    wal.sync().unwrap();
+}
+
+/// fastetcd#225: a member joined after the newest backup, which shows
+/// this node alone, and `--initial-cluster` still names only this node.
+/// The WAL recorded the join; restoring the backup would make a member
+/// of a two-node cluster a lone node and drop its raft state.
+#[tokio::test]
+async fn a_join_after_the_newest_backup_refuses() {
+    let d = dirs();
+    lone_member_then_corruption(&d).await;
+    wal_with(&d, &[(1, membership(&[NODE], &[])), (4, membership(&[NODE], &[2]))]);
+    let before = std::fs::read(&d.data_file).unwrap();
+
+    let err = open_or_recover(&d.data_file, &opts(&d, 1)).await.err().expect("must refuse");
+    assert!(err.to_string().contains("member remove"), "{err}");
+    assert_eq!(std::fs::read(&d.data_file).unwrap(), before, "file untouched");
+    assert!(d.data_dir.join("wal").exists(), "raft state left in place");
+}
+
+/// The same join recorded only by a raft snapshot (the log purged past
+/// it) refuses too.
+#[tokio::test]
+async fn a_join_recorded_by_a_raft_snapshot_refuses() {
+    let d = dirs();
+    lone_member_then_corruption(&d).await;
+    let store =
+        fastetcd_raft::snapshot_store::SnapshotStore::open(d.data_dir.join("snapshots"), 1).unwrap();
+    let log_id = openraft::LogId::new(openraft::CommittedLeaderId::new(1, NODE), 9);
+    let meta = openraft::SnapshotMeta {
+        last_log_id: Some(log_id),
+        last_membership: openraft::StoredMembership::new(Some(log_id), membership(&[NODE, 2], &[])),
+        snapshot_id: "t".into(),
+    };
+    store.store(&meta, b"body").unwrap();
+    assert!(open_or_recover(&d.data_file, &opts(&d, 1)).await.is_err());
+}
+
+/// Only the newest membership counts: a member that joined and was
+/// removed again leaves this node alone, and it restores.
+#[tokio::test]
+async fn a_member_removed_again_still_lets_a_lone_member_restore() {
+    let d = dirs();
+    lone_member_then_corruption(&d).await;
+    wal_with(
+        &d,
+        &[
+            (1, membership(&[NODE], &[])),
+            (3, membership(&[NODE], &[2])),
+            (7, membership(&[NODE], &[])),
+        ],
+    );
+    let (_engine, record) = open_or_recover(&d.data_file, &opts(&d, 1)).await.unwrap();
+    assert!(record.is_some(), "restored");
+}
+
 #[tokio::test]
 async fn no_backup_dir_refuse_policy_and_no_usable_backup_all_refuse() {
     let d = dirs();

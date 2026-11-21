@@ -1515,7 +1515,6 @@ async fn main() -> anyhow::Result<()> {
             cfg,
             backup_engine,
             server_state.sm.mvcc().clone(),
-            raft.clone(),
         );
     }
 

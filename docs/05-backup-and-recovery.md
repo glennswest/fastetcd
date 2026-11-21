@@ -31,8 +31,13 @@ Off unless `--backup-dir` is set.
 | `--backup-retain` | `4` | Backups kept, newest first. |
 
 A backup is also taken whenever the raft membership changes, because
-whether a node may restore itself depends on whether it was alone.
-Nothing is written while nothing changes.
+whether a node may restore itself depends on whether it was alone. A
+change is any change of who is a member, who votes and who learns: a
+learner promoted to a voter, and each step of a joint configuration,
+are backed up at once with no write in between (#225). After a
+restart the membership is compared with what the newest backup holds,
+so a member that joined while the process was down is backed up on the
+first tick. Nothing is written while nothing changes.
 
 **What is in a backup.** Every table of the store, read from one
 point-in-time view: the MVCC data, leases, users and roles, node-local
@@ -52,8 +57,9 @@ which nothing can restore.
 
 **File format.** `fastetcd-backup-<unix-ms>-rev<revision>.fbak`: an
 8-byte magic `FEBACKUP`, a format version, a header (version, time,
-node id, cluster id, revision, raft members), the tables, and a SHA-256
-of everything before it. Each is written to a temp file, fsynced,
+node id, cluster id, revision, raft members), the tables, a trailer
+naming the voters and learners (#225; older versions read the file and
+ignore it), and a SHA-256 of everything before it. Each is written to a temp file, fsynced,
 renamed into place, and the directory fsynced, so a listed backup is
 whole. On `ENOSPC` the oldest backup is dropped and the write retried
 once. A failed backup is logged and retried on the next tick. It never
@@ -85,7 +91,8 @@ or permission error is *not* corruption and fails as before.
 | Situation | What happens |
 |---|---|
 | Lone member, `restore`, a backup of this node verifies | **Restored.** See below. |
-| `--initial-cluster` names another member, or the newest backup records another raft member | **Refuses**, whatever the flag says. |
+| `--initial-cluster` names another member, the newest backup records another raft member, or the node's raft WAL or newest raft snapshot does (a join after the backup, #225) | **Refuses**, whatever the flag says. |
+| The raft WAL cannot be read (a damaged segment), so whether others joined is unknown | **Refuses**; `fastetcd restore` by hand if the node is alone. |
 | `refuse` | Refuses. |
 | No `--backup-dir`, or no backup of this node whose checksum verifies | Refuses. |
 

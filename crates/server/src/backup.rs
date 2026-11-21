@@ -18,8 +18,18 @@
 //! 4 bytes   format version, u32 little-endian (1)
 //! bincode   BackupHeader
 //! bincode   Vec<TableDump>
+//! [roles trailer (#225): bincode MembershipRoles,
+//!  4 bytes its length (u32 LE), 8 bytes magic "FEBKROL1"]
 //! 32 bytes  SHA-256 of everything above
 //! ```
+//!
+//! The roles trailer (fastetcd#225) records which members were voters
+//! (per configuration, two during a joint change) and which learners,
+//! so a restart can tell whether the membership changed since the
+//! backup. bincode reads one value and ignores what follows, so an
+//! older fastetcd verifies and restores a backup with the trailer as
+//! before; a backup without it has unknown roles, and the next backup
+//! tick takes a new one.
 //!
 //! Written to a temp file, fsynced, renamed into place, and the
 //! directory fsynced, so a backup that is listed is whole. The newest
@@ -51,6 +61,7 @@ const FORMAT: u32 = 1;
 const PREFIX: &str = "fastetcd-backup-";
 const EXT: &str = "fbak";
 const TMP_SUFFIX: &str = ".tmp";
+const ROLES_MAGIC: &[u8; 8] = b"FEBKROL1";
 /// Rows per write batch when restoring, to bound one commit's size.
 const RESTORE_BATCH_ROWS: usize = 10_000;
 
@@ -67,6 +78,54 @@ pub struct BackupHeader {
     /// Raft members (voters and learners) recorded in the backup. Empty
     /// if the store had no membership yet.
     pub members: Vec<NodeId>,
+    /// Who of `members` votes and who learns, from the roles trailer.
+    /// `None` if the store had no membership, or the backup predates
+    /// the trailer. Not part of the bincode header, which older
+    /// versions read.
+    #[serde(skip)]
+    pub roles: Option<MembershipRoles>,
+}
+
+/// The roles in a raft membership: what [`spawn`] compares to notice a
+/// membership change, a learner's promotion included (fastetcd#225).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipRoles {
+    /// The voters of each configuration, sorted: one set, or two while a
+    /// joint-consensus change is in progress.
+    pub voter_sets: Vec<Vec<NodeId>>,
+    /// Members that do not vote, sorted.
+    pub learners: Vec<NodeId>,
+}
+
+impl MembershipRoles {
+    pub fn of(m: &openraft::Membership<NodeId, openraft::BasicNode>) -> Self {
+        let mut learners: Vec<NodeId> = m.learner_ids().collect();
+        learners.sort_unstable();
+        MembershipRoles {
+            voter_sets: m
+                .get_joint_config()
+                .iter()
+                .map(|set| set.iter().copied().collect())
+                .collect(),
+            learners,
+        }
+    }
+}
+
+type StoredMembership = openraft::StoredMembership<NodeId, openraft::BasicNode>;
+
+fn decode_membership(bytes: &[u8]) -> Option<StoredMembership> {
+    bincode::deserialize::<StoredMembership>(bytes).ok()
+}
+
+/// The roles in the membership `engine` holds now: what a backup taken
+/// now would record.
+pub async fn current_roles(engine: &Arc<dyn KvStore>) -> anyhow::Result<Option<MembershipRoles>> {
+    Ok(engine
+        .get("mvcc_meta", META_KEY_RAFT_MEMBERSHIP)
+        .await?
+        .and_then(|v| decode_membership(&v))
+        .map(|m| MembershipRoles::of(m.membership())))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,6 +196,8 @@ impl Dump {
             }
             tables
         };
+        let membership =
+            find(&tables, "mvcc_meta", META_KEY_RAFT_MEMBERSHIP).and_then(decode_membership);
         let header = BackupHeader {
             fastetcd_version: env!("CARGO_PKG_VERSION").to_string(),
             created_unix_ms: unix_ms(),
@@ -148,15 +209,11 @@ impl Dump {
                 .and_then(|v| <[u8; 8]>::try_from(v).ok())
                 .map(i64::from_be_bytes)
                 .unwrap_or(0),
-            members: find(&tables, "mvcc_meta", META_KEY_RAFT_MEMBERSHIP)
-                .and_then(|v| {
-                    bincode::deserialize::<openraft::StoredMembership<NodeId, openraft::BasicNode>>(
-                        v,
-                    )
-                    .ok()
-                })
+            members: membership
+                .as_ref()
                 .map(|m| m.membership().nodes().map(|(id, _)| *id).collect())
                 .unwrap_or_default(),
+            roles: membership.as_ref().map(|m| MembershipRoles::of(m.membership())),
         };
         Ok(Dump { header, tables })
     }
@@ -165,7 +222,11 @@ impl Dump {
     pub fn encoded_len(&self) -> io::Result<u64> {
         let header = bincode::serialized_size(&self.header).map_err(bincode_io)?;
         let tables = bincode::serialized_size(&self.tables).map_err(bincode_io)?;
-        Ok(MAGIC.len() as u64 + 4 + header + tables + 32)
+        let trailer = match &self.header.roles {
+            Some(r) => bincode::serialized_size(r).map_err(bincode_io)? + 4 + 8,
+            None => 0,
+        };
+        Ok(MAGIC.len() as u64 + 4 + header + tables + trailer + 32)
     }
 
     /// Write the backup file format to `w`: what `fastetcd restore`
@@ -177,6 +238,12 @@ impl Dump {
         w.write_all(&FORMAT.to_le_bytes())?;
         bincode::serialize_into(&mut w, &self.header).map_err(bincode_io)?;
         bincode::serialize_into(&mut w, &self.tables).map_err(bincode_io)?;
+        if let Some(roles) = &self.header.roles {
+            let bytes = bincode::serialize(roles).map_err(bincode_io)?;
+            w.write_all(&bytes)?;
+            w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            w.write_all(ROLES_MAGIC)?;
+        }
         let digest = w.hash.finalize();
         let mut inner = w.inner;
         inner.write_all(&digest)?;
@@ -358,13 +425,36 @@ fn read(path: &Path, tables: bool) -> anyhow::Result<(BackupHeader, Vec<TableDum
             path.display()
         );
     }
-    let header: BackupHeader = bincode::deserialize_from(&mut r)?;
+    let mut header: BackupHeader = bincode::deserialize_from(&mut r)?;
+    let header_end = MAGIC.len() as u64 + 4 + bincode::serialized_size(&header)?;
+    header.roles = read_roles(&mut file, header_end, body_len);
+    file.seek(SeekFrom::Start(header_end))?;
+    let mut r = BufReader::with_capacity(1 << 20, (&file).take(body_len - header_end));
     let tables = if tables {
         bincode::deserialize_from(&mut r)?
     } else {
         Vec::new()
     };
     Ok((header, tables))
+}
+
+/// The roles trailer at the end of a body of `body_len` bytes, if there
+/// is one. Anything that does not decode is taken as no trailer: the
+/// roles are then unknown, and the scheduler backs up again.
+fn read_roles(file: &mut File, header_end: u64, body_len: u64) -> Option<MembershipRoles> {
+    let footer_at = body_len.checked_sub(12).filter(|at| *at >= header_end)?;
+    file.seek(SeekFrom::Start(footer_at)).ok()?;
+    let mut footer = [0u8; 12];
+    file.read_exact(&mut footer).ok()?;
+    if &footer[4..] != ROLES_MAGIC {
+        return None;
+    }
+    let len = u32::from_le_bytes(footer[..4].try_into().ok()?) as u64;
+    let at = footer_at.checked_sub(len).filter(|at| *at >= header_end)?;
+    file.seek(SeekFrom::Start(at)).ok()?;
+    let mut bytes = vec![0u8; len as usize];
+    file.read_exact(&mut bytes).ok()?;
+    bincode::deserialize(&bytes).ok()
 }
 
 /// True if `path` starts with the backup magic, so the offline restore
@@ -420,82 +510,96 @@ pub struct BackupConfig {
 }
 
 /// What the last backup captured, for deciding when the next is due.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Last {
     pub revision: i64,
-    pub members: u64,
+    /// The membership's roles the backup holds (`None`: no membership,
+    /// or unknown for a backup without the roles trailer).
+    pub roles: Option<MembershipRoles>,
 }
 
 /// Whether a backup is due. `since` is the time since the last backup
-/// (`None` if there has not been one); `members` is a fingerprint of the
-/// raft membership. Nothing changed means nothing to back up, however
-/// long it has been.
+/// (`None` if there has not been one); `roles` is the raft membership
+/// now, voters and learners. Nothing changed means nothing to back up,
+/// however long it has been.
 pub fn due(
     cfg: &BackupConfig,
-    last: Option<Last>,
+    last: Option<&Last>,
     since: Option<Duration>,
     revision: i64,
-    members: u64,
+    roles: Option<&MembershipRoles>,
 ) -> bool {
     let Some(last) = last else {
         return true;
     };
-    let changed = revision != last.revision || members != last.members;
-    if !changed {
+    let members_changed = roles != last.roles.as_ref();
+    if revision == last.revision && !members_changed {
         return false;
     }
     // A membership change is backed up at once: whether a node may
-    // restore itself depends on whether it was alone (fastetcd#37).
-    members != last.members
+    // restore itself depends on whether it was alone (fastetcd#37), and
+    // a restore must not undo a promotion (fastetcd#225).
+    members_changed
         || since.is_none_or(|s| s >= cfg.interval)
         || (cfg.every_revisions > 0 && revision - last.revision >= cfg.every_revisions)
 }
 
-/// A fingerprint of the raft membership, to notice it change.
-fn members_fingerprint(raft: &openraft::Raft<fastetcd_raft::TypeConfig>) -> u64 {
-    let m = raft.metrics().borrow().membership_config.clone();
-    let mut ids: Vec<NodeId> = m.membership().nodes().map(|(id, _)| *id).collect();
-    ids.sort_unstable();
-    ids.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, id| {
-        (h ^ id).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+/// The backup task's state: what the last backup holds, and when it
+/// was taken.
+#[derive(Debug, Default)]
+pub struct Scheduler {
+    last: Option<Last>,
+    last_at: Option<Instant>,
+}
+
+impl Scheduler {
+    /// Start from the newest backup already in `dir`, so a restart does
+    /// not immediately take another, and compare against what that
+    /// backup holds, not against the membership now (fastetcd#225: a
+    /// member added while the process was down is backed up at once).
+    pub fn resume(dir: &Path) -> Scheduler {
+        let newest = list(dir).into_iter().find_map(|p| verify(&p).ok());
+        Scheduler {
+            last: newest.as_ref().map(|h| Last { revision: h.revision, roles: h.roles.clone() }),
+            last_at: newest.as_ref().and_then(|h| {
+                let age = unix_ms().saturating_sub(h.created_unix_ms);
+                Instant::now().checked_sub(Duration::from_millis(age))
+            }),
+        }
+    }
+
+    /// Take a backup if one is due. Returns it, or `None` if none was.
+    pub async fn tick(
+        &mut self,
+        cfg: &BackupConfig,
+        engine: &Arc<dyn KvStore>,
+        mvcc: &MvccStore,
+    ) -> anyhow::Result<Option<BackupInfo>> {
+        let revision = mvcc.current_revision().await;
+        let roles = current_roles(engine).await?;
+        let since = self.last_at.map(|t| t.elapsed());
+        if !due(cfg, self.last.as_ref(), since, revision, roles.as_ref()) {
+            return Ok(None);
+        }
+        let info = take(engine, &cfg.dir, cfg.node_id, cfg.retain).await?;
+        // What the backup holds, read from the same snapshot as its data.
+        self.last = Some(Last { revision: info.header.revision, roles: info.header.roles.clone() });
+        self.last_at = Some(Instant::now());
+        Ok(Some(info))
+    }
 }
 
 /// Run periodic backups for the life of the process.
-pub fn spawn(
-    cfg: BackupConfig,
-    engine: Arc<dyn KvStore>,
-    mvcc: MvccStore,
-    raft: openraft::Raft<fastetcd_raft::TypeConfig>,
-) {
+pub fn spawn(cfg: BackupConfig, engine: Arc<dyn KvStore>, mvcc: MvccStore) {
     tokio::spawn(async move {
-        // Start from the newest backup already on the volume, so a
-        // restart does not immediately take another.
-        let newest = list(&cfg.dir).into_iter().find_map(|p| verify(&p).ok());
-        let mut last: Option<Last> = newest.as_ref().map(|h| Last {
-            revision: h.revision,
-            members: 0,
-        });
-        let mut last_at: Option<Instant> = newest.as_ref().and_then(|h| {
-            let age = unix_ms().saturating_sub(h.created_unix_ms);
-            Instant::now().checked_sub(Duration::from_millis(age))
-        });
+        let mut scheduler = Scheduler::resume(&cfg.dir);
         let tick = cfg.interval.min(Duration::from_secs(10)).max(Duration::from_secs(1));
         loop {
             tokio::time::sleep(tick).await;
-            let revision = mvcc.current_revision().await;
-            let members = members_fingerprint(&raft);
-            // A backup read from disk has no fingerprint; adopt the
-            // current one so it is not mistaken for a membership change.
-            if let Some(l) = last.as_mut().filter(|l| l.members == 0) {
-                l.members = members;
-            }
-            if !due(&cfg, last, last_at.map(|t| t.elapsed()), revision, members) {
-                continue;
-            }
             let started = Instant::now();
-            match take(&engine, &cfg.dir, cfg.node_id, cfg.retain).await {
-                Ok(info) => {
+            match scheduler.tick(&cfg, &engine, &mvcc).await {
+                Ok(None) => {}
+                Ok(Some(info)) => {
                     tracing::info!(
                         target: "fastetcd::backup",
                         file = %info.path.display(),
@@ -503,8 +607,6 @@ pub fn spawn(
                         took_ms = started.elapsed().as_millis() as u64,
                         "backup written"
                     );
-                    last = Some(Last { revision: info.header.revision, members });
-                    last_at = Some(Instant::now());
                 }
                 Err(e) => {
                     // Retried on the next tick. A failing backup volume
@@ -536,21 +638,70 @@ mod tests {
         }
     }
 
+    fn dump(roles: Option<MembershipRoles>) -> Dump {
+        Dump {
+            header: BackupHeader {
+                fastetcd_version: "test".into(),
+                created_unix_ms: 1,
+                node_id: 1,
+                cluster_id: None,
+                revision: 5,
+                members: vec![1, 2],
+                roles,
+            },
+            tables: vec![TableDump { name: "t".into(), rows: vec![(b"k".to_vec(), b"v".to_vec())] }],
+        }
+    }
+
+    /// fastetcd#225: the roles trailer round-trips, a backup without it
+    /// reads as unknown roles, and a reader that knows nothing of it (the
+    /// 1.43.5 decode: magic, format, header, tables) still reads the file.
+    #[test]
+    fn the_roles_trailer_round_trips_and_older_readers_ignore_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let roles = MembershipRoles { voter_sets: vec![vec![1], vec![1, 2]], learners: vec![] };
+        for (name, roles) in [("with", Some(roles)), ("without", None)] {
+            let d = dump(roles.clone());
+            let path = dir.path().join(name);
+            write_file(&path, &d).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(bytes.len() as u64, d.encoded_len().unwrap());
+            assert_eq!(verify(&path).unwrap().roles, roles);
+            let (h, tables) = read(&path, true).unwrap();
+            assert_eq!(h, d.header);
+            assert_eq!(tables[0].rows, d.tables[0].rows);
+
+            let mut r = &bytes[12..bytes.len() - 32];
+            let old: BackupHeader = bincode::deserialize_from(&mut r).unwrap();
+            let old_tables: Vec<TableDump> = bincode::deserialize_from(&mut r).unwrap();
+            assert_eq!(old.revision, 5);
+            assert_eq!(old_tables[0].rows, d.tables[0].rows);
+        }
+    }
+
     #[test]
     fn a_backup_is_due_on_time_revisions_or_membership() {
         let c = cfg();
-        let last = Some(Last { revision: 10, members: 7 });
+        let a = MembershipRoles { voter_sets: vec![vec![1]], learners: vec![2] };
+        let promoted = MembershipRoles { voter_sets: vec![vec![1, 2]], learners: vec![] };
+        let joint = MembershipRoles { voter_sets: vec![vec![1], vec![1, 2]], learners: vec![] };
+        let last = Last { revision: 10, roles: Some(a.clone()) };
+        let last = Some(&last);
         let fresh = Some(Duration::from_secs(5));
         let old = Some(Duration::from_secs(901));
 
-        assert!(due(&c, None, None, 0, 7), "no backup yet");
-        assert!(!due(&c, last, old, 10, 7), "nothing changed, however long");
-        assert!(!due(&c, last, fresh, 11, 7), "a change, but not yet due");
-        assert!(due(&c, last, old, 11, 7), "interval elapsed");
-        assert!(due(&c, last, fresh, 110, 7), "revision trigger");
-        assert!(due(&c, last, fresh, 10, 8), "membership changed");
+        assert!(due(&c, None, None, 0, Some(&a)), "no backup yet");
+        assert!(!due(&c, last, old, 10, Some(&a)), "nothing changed, however long");
+        assert!(!due(&c, last, fresh, 11, Some(&a)), "a change, but not yet due");
+        assert!(due(&c, last, old, 11, Some(&a)), "interval elapsed");
+        assert!(due(&c, last, fresh, 110, Some(&a)), "revision trigger");
+        // fastetcd#225: same ids, same revision, different roles.
+        assert!(due(&c, last, fresh, 10, Some(&promoted)), "a learner promoted");
+        assert!(due(&c, last, fresh, 10, Some(&joint)), "a joint configuration");
+        let unknown = Last { revision: 10, roles: None };
+        assert!(due(&c, Some(&unknown), fresh, 10, Some(&a)), "roles unknown");
 
         let no_rev_trigger = BackupConfig { every_revisions: 0, ..cfg() };
-        assert!(!due(&no_rev_trigger, last, fresh, 1_000_000, 7));
+        assert!(!due(&no_rev_trigger, last, fresh, 1_000_000, Some(&a)));
     }
 }

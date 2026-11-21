@@ -26,10 +26,12 @@
 //! - **`--on-corruption=refuse`**, no `--backup-dir`, or no usable backup:
 //!   refuse, leaving the file untouched.
 //!
-//! "Lone" means `--initial-cluster` names at most one member *and* the
-//! newest backup records no other raft member. Backups are taken on
-//! every membership change, so the backup is as current as the
-//! membership.
+//! "Lone" means `--initial-cluster` names at most one member, the
+//! newest backup records no other raft member, *and* neither does the
+//! node's raft state outside the data file: the newest membership in
+//! its WAL or its newest raft snapshot (fastetcd#225). Backups are
+//! taken on every membership change, but a member can join after the
+//! newest backup; the WAL records the join as soon as it happens.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -163,6 +165,22 @@ pub async fn open_or_recover(
     };
     if header.members.iter().any(|m| *m != opts.node_id) {
         anyhow::bail!(multi_member_error(data_file, &reason, opts.node_id));
+    }
+    // The backup can predate a join (fastetcd#225): the raft WAL and
+    // snapshots are separate files, and record every membership the
+    // node took part in since its last snapshot.
+    match fastetcd_raft::wal_log_store::durable_membership(data_dir) {
+        Ok(Some(m)) if m.nodes().any(|(id, _)| *id != opts.node_id) => {
+            anyhow::bail!(multi_member_error(data_file, &reason, opts.node_id));
+        }
+        Ok(_) => {}
+        Err(e) => anyhow::bail!(
+            "the data file {} is corrupt ({reason}), and this node's raft state, which says \
+             whether other members have joined, cannot be read ({e}). Nothing is restored \
+             automatically and the file is left untouched. If this node is the only member, \
+             restore a backup with `fastetcd restore <backup>`.",
+            data_file.display()
+        ),
     }
 
     // Build the restored store beside the corrupt one first, with the

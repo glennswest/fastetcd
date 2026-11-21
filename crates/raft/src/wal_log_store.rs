@@ -109,6 +109,40 @@ pub fn read_history(data_dir: &Path) -> anyhow::Result<Vec<Entry<TypeConfig>>> {
     Ok(entries)
 }
 
+/// The newest raft membership `data_dir`'s raft state records outside
+/// the redb file: the last membership entry in its WAL, or its newest
+/// retained snapshot's membership, whichever is at the higher log index.
+/// `None` if neither has one. Read without changing anything.
+///
+/// For recovery (fastetcd#225): a corrupt redb file says nothing about
+/// who has joined, and the newest backup can predate a join, but the
+/// WAL and the snapshots are separate files that do.
+pub fn durable_membership(
+    data_dir: &Path,
+) -> anyhow::Result<Option<openraft::Membership<NodeId, openraft::BasicNode>>> {
+    let mut newest: Option<(u64, openraft::Membership<NodeId, openraft::BasicNode>)> =
+        crate::snapshot_store::latest_meta_in(&data_dir.join("snapshots")).and_then(|meta| {
+            let at = meta.last_membership.log_id().as_ref().map(|l| l.index)?;
+            Some((at, meta.last_membership.membership().clone()))
+        });
+    let wal = wal_dir(data_dir);
+    if wal.exists() {
+        let history = fastetcd_storage::raft_wal::read_history(&wal)
+            .map_err(|e| anyhow::anyhow!("reading the raft WAL in {}: {e}", wal.display()))?;
+        for (index, bytes) in history.entries.iter().rev() {
+            let entry: Entry<TypeConfig> = bincode::deserialize(bytes)
+                .map_err(|e| anyhow::anyhow!("raft log entry {index}: {e}"))?;
+            if let openraft::EntryPayload::Membership(m) = entry.payload {
+                if newest.as_ref().is_none_or(|(at, _)| *index > *at) {
+                    newest = Some((*index, m));
+                }
+                break;
+            }
+        }
+    }
+    Ok(newest.map(|(_, m)| m))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WalLogOptions {
     /// Preallocated size of each segment.

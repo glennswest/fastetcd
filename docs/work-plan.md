@@ -1949,3 +1949,26 @@ Tracked live in the Claude task system. Snapshot of the order:
       17 MB), so the rewrite counter is what tells them apart; the
       finding's numbers are the unit test's.
 
+113. **Backups miss promotions and joins before a restart (#225,
+    findings 0f2d8cb9a20f, e024cbc14cd8).** The scheduler's membership
+    fingerprint hashed node ids only (a promotion left it unchanged), and
+    on a restart it adopted the current fingerprint as the newest
+    backup's (a join while down looked like no change). Recovery's
+    lone-member check trusted that backup and `--initial-cluster`.
+    - [x] `MembershipRoles` (voter sets per configuration, learners),
+      read from `mvcc_meta`'s stored membership, the same bytes a backup
+      dumps; `Scheduler::{resume, tick}` compares against the roles the
+      backup holds (the header's, after `take`; the newest file's on a
+      restart). `spawn` no longer takes the raft handle.
+    - [x] Roles in a trailer after the tables (`FEBKROL1` footer), no
+      format bump: bincode readers (1.43.5 and older) decode header and
+      tables and ignore it. No trailer = unknown roles = backed up again.
+    - [x] Recovery: `durable_membership` (raft crate) reads the newest
+      membership from the WAL (read-only `read_history`) and the newest
+      snapshot meta; another member refuses, an unreadable WAL refuses.
+    - [x] Tests: `backup_schedule.rs` (promotion and joint step with no
+      KV write; a join before a restart; a restart with no change takes
+      none), `backup` unit tests (due() roles, trailer round trip and the
+      old decode), `corruption_recovery.rs` (join in the WAL refuses, in
+      a snapshot refuses, joined then removed restores).
+    - [ ] sc-build: the tests above, clippy `-D warnings`, workspace.

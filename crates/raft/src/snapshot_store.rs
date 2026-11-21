@@ -58,6 +58,12 @@ const LEGACY_META: &str = "current.meta";
 /// copies as a safety net raise `--max-snapshots`.
 pub const DEFAULT_RETAIN: usize = 1;
 
+/// Metadata of the newest retained snapshot in `dir`, read without
+/// reconciling or creating the directory (unlike [`SnapshotStore::open`]).
+pub fn latest_meta_in(dir: &Path) -> Option<Meta> {
+    SnapshotStore { dir: dir.to_path_buf(), retain: DEFAULT_RETAIN }.latest_meta()
+}
+
 /// A directory of retained snapshots.
 #[derive(Clone, Debug)]
 pub struct SnapshotStore {
