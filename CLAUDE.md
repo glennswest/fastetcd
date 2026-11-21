@@ -10,7 +10,8 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.43.4`** — a lease's key range holds its own keys for every id
+**`1.43.5`** — Lock, Campaign, Observe and Watch follow raft snapshot
+installs (#216). 1.43.4: a lease's key range holds its own keys for every id
 (#215). 1.43.3: a permission grant on the same key/range replaces its
 type (#214). 1.43.2: a snapshot install clears whole tables (#213). 1.43.1:
 a LeaseGrant of an existing id is refused (etcd's
