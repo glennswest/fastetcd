@@ -1870,5 +1870,12 @@ Tracked live in the Claude task system. Snapshot of the order:
       negative); `lease_ttl_max.rs` (refusal and the maximum accepted;
       promotion, TimeToLive, renew and expiry with an i64::MAX lease
       logged directly; the sweeper keeps expiring 2 s leases beside it).
-    - [ ] sc-build workspace green.
+    - [x] sc-build of 421b9c8: clippy `--all-targets -D warnings` clean
+      (after #239: two lints #211 left on main); 727 tests pass, and
+      the 5 failures are all in `multinode_fastpath`, differing between
+      the two runs (leaderless moments under load; #171). That file
+      alone at 421b9c8: 16/16. Negative control: `lease_ttl_max` against
+      the old unchecked deadlines (15f31a5, branch since deleted)
+      panics in `Instant + Duration` in both lessor tests, and the
+      sweeper test's 2 s lease never expires.
 
