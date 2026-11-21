@@ -1916,5 +1916,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       are not progress. Unit test with eventfd-sized noise.
     - [x] Negative control (monitor thread counted, 6f4d533 otherwise):
       the blocked start never stalls (since_progress ~150 ms at 12 s).
-    - [ ] sc-build.
+    - [x] Negative control 2 (any change is progress, fa9edb5
+      otherwise): the blocked start never stalls.
+    - [x] sc-build of fa9edb5: `startup_stall`, `health_checks`,
+      `startup` unit tests, `startup_phases`, clippy `-D warnings`
+      clean; workspace `--no-fail-fast` 542 pass, 0 fail.
 
