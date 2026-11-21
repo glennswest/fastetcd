@@ -154,6 +154,9 @@ pub enum Refusal {
     FutureRevision,
     /// Any other invalid request; the text is the client's error.
     InvalidArgument(String),
+    /// A LeaseGrant of an id that already exists (etcd `ErrLeaseExist`,
+    /// fastetcd#212). Appended: a member older than 1.43.1 cannot decode it.
+    LeaseExists,
 }
 
 impl Refusal {
@@ -165,6 +168,7 @@ impl Refusal {
             Refusal::Compacted => "etcdserver: mvcc: required revision has been compacted",
             Refusal::FutureRevision => "etcdserver: mvcc: required revision is a future revision",
             Refusal::InvalidArgument(m) => m,
+            Refusal::LeaseExists => "etcdserver: lease already exists",
         }
     }
 }
@@ -1182,22 +1186,29 @@ impl MvccStore {
         start_rev: i64,
         end_rev: i64,
     ) -> MvccResult<Vec<MvccEvent>> {
-        let revs = self.inner.view.revs();
+        // The snapshot and the revisions are one read view (#212): with
+        // the compact revision read before the snapshot, a compaction in
+        // between let the replay pass the check and then find a deleted
+        // key's history gone, and it returned no events for it. A
+        // compaction publishes its revision before it deletes anything,
+        // so a snapshot missing records has the revision that refuses it.
+        let (snap, revs, ()) = self
+            .read_view(|_, revs| {
+                if start_rev < revs.compact && revs.compact > 0 {
+                    return Err(MvccError::Compacted {
+                        requested: start_rev,
+                        compact_rev: revs.compact,
+                    });
+                }
+                Ok(())
+            })
+            .await?;
         let current = revs.current.min(end_rev);
-        let compact = revs.compact;
-
-        if start_rev < compact && compact > 0 {
-            return Err(MvccError::Compacted {
-                requested: start_rev,
-                compact_rev: compact,
-            });
-        }
         if start_rev > current {
             // Nothing to backfill; subscribe-only is correct.
             return Ok(Vec::new());
         }
 
-        let snap = self.inner.engine.snapshot().await?;
         let (start, end) = range_bounds(key, range_end);
         let idx_entries = snap.range(TABLE_IDX, start, end, 0).await?;
 
@@ -1259,9 +1270,10 @@ impl MvccStore {
     }
 
     /// Grant a lease with `ttl_secs` and (server-current) `now_unix`
-    /// timestamp. `id == 0` allocates a fresh id (next sequential
-    /// from a counter persisted in `mvcc_meta`); a non-zero id is
-    /// used as-is. Goes through the meta lock so it serializes
+    /// timestamp. `id == 0` allocates a fresh id (the next above a
+    /// counter persisted in `mvcc_meta` that no lease has); a non-zero
+    /// id is used as-is, and refused with [`Refusal::LeaseExists`] if a
+    /// lease has it (#212). Goes through the meta lock so it serializes
     /// with apply()/txn() (matches our "all writes serialize"
     /// invariant).
     pub async fn apply_lease_grant(
@@ -1276,13 +1288,31 @@ impl MvccStore {
             ))));
         }
         let mut state = self.inner.write_state.lock().await;
+        let snap = self.inner.engine.snapshot().await?;
         let mut batch = WriteBatch::new();
         let final_id = if id == 0 {
-            let next = state.next_lease_id + 1;
+            // The next id above the high-water mark that no lease has
+            // (#212): a grant never replaces a lease.
+            let mut next = state.next_lease_id;
+            loop {
+                next = next.checked_add(1).ok_or_else(|| {
+                    MvccError::Refused(Refusal::InvalidArgument("no lease id left to allocate".into()))
+                })?;
+                if snap.get(TABLE_LEASE, &lease_id_key(next)).await?.is_none() {
+                    break;
+                }
+            }
             state.next_lease_id = next;
             write_i64(&mut batch, META_KEY_NEXT_LEASE_ID, next);
             next
         } else {
+            // A grant of a lease that exists is refused, as etcd's
+            // `ErrLeaseExist` (#212): replacing it reset the TTL and
+            // deadline of a lease whose keys the caller need not be
+            // allowed to write.
+            if snap.get(TABLE_LEASE, &lease_id_key(id)).await?.is_some() {
+                return Err(MvccError::Refused(Refusal::LeaseExists));
+            }
             // Track high-water-mark so auto-allocated ids don't collide.
             if id > state.next_lease_id {
                 state.next_lease_id = id;
@@ -1290,6 +1320,7 @@ impl MvccStore {
             }
             id
         };
+        drop(snap);
         let rec = LeaseRecord {
             id: final_id,
             ttl_secs,
@@ -3399,6 +3430,11 @@ mod tests {
         hold: std::sync::Mutex<Option<bool>>,
         held: tokio::sync::Notify,
         release: tokio::sync::Semaphore,
+        /// Hold the next snapshot, before it is taken, until
+        /// `snap_release` (#212).
+        snap_hold: AtomicBool,
+        snap_held: tokio::sync::Notify,
+        snap_release: tokio::sync::Semaphore,
     }
 
     impl HeldCommits {
@@ -3416,6 +3452,10 @@ mod tests {
     #[async_trait::async_trait]
     impl KvStore for HeldCommits {
         async fn snapshot(&self) -> crate::kvstore::StorageResult<Arc<dyn Snapshot>> {
+            if self.snap_hold.swap(false, Ordering::AcqRel) {
+                self.snap_held.notify_one();
+                self.snap_release.acquire().await.unwrap().forget();
+            }
             self.inner.snapshot().await
         }
         async fn commit(
@@ -3453,6 +3493,9 @@ mod tests {
             hold: std::sync::Mutex::new(None),
             held: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
+            snap_hold: AtomicBool::new(false),
+            snap_held: tokio::sync::Notify::new(),
+            snap_release: tokio::sync::Semaphore::new(0),
         });
         let store = MvccStore::open(eng.clone()).await.unwrap();
         (dir, eng, store)
@@ -3523,6 +3566,75 @@ mod tests {
             compactor.await.unwrap();
             assert_eq!(s.compact_revision().await, 3);
         }
+    }
+
+    /// fastetcd#212 (finding 9078e0ee4fdf): a watch replay that reaches
+    /// its engine snapshot only after a compaction has removed a deleted
+    /// key is refused as compacted. It checked the compact revision
+    /// before taking the snapshot, so it passed, found the key's history
+    /// gone and returned no events: the watcher moved past them.
+    #[tokio::test]
+    async fn a_replay_held_before_its_snapshot_through_a_compaction_is_refused() {
+        let (_d, eng, s) = open_held().await;
+        s.apply(&[put(b"k", b"v1")]).await.unwrap();
+        s.apply(&[del_range(b"k", b"")]).await.unwrap();
+        s.apply(&[put(b"x", b"v")]).await.unwrap();
+        let top = s.current_revision().await;
+        eng.snap_hold.store(true, Ordering::Release);
+        let held = eng.snap_held.notified();
+        let replay = {
+            let s = s.clone();
+            tokio::spawn(async move { s.range_events(b"k", b"", 0).await })
+        };
+        held.await;
+        // The deleted key and its history go.
+        s.compact(top).await.unwrap();
+        assert!(s.range(b"k", b"", 0, top, false, false).await.unwrap().kvs.is_empty());
+        eng.snap_release.add_permits(1);
+        let got = replay.await.unwrap();
+        assert!(
+            matches!(got, Err(MvccError::Compacted { requested: 0, compact_rev }) if compact_rev == top),
+            "a replay from 0 after compacting at {top}: {:?}",
+            got.map(|e| e.len())
+        );
+        // Not held, the same replay is refused as before, and one from
+        // the compact revision answers.
+        assert!(matches!(s.range_events(b"k", b"", 0).await, Err(MvccError::Compacted { .. })));
+        assert!(s.range_events(b"k", b"", top).await.unwrap().is_empty());
+    }
+
+    /// fastetcd#212 (finding 839965788fbf): a LeaseGrant of an id that
+    /// exists is refused and leaves the lease as it was; it replaced the
+    /// record, resetting its TTL and deadline.
+    #[tokio::test]
+    async fn a_grant_of_an_existing_lease_is_refused_and_changes_nothing() {
+        let (_d, s) = open_mvcc().await;
+        assert_eq!(s.apply_lease_grant(7, 10, 100).await.unwrap().id, 7);
+        let err = s.apply_lease_grant(7, 1000, 500).await.unwrap_err();
+        assert!(matches!(err, MvccError::Refused(Refusal::LeaseExists)), "{err:?}");
+        assert_eq!(Refusal::LeaseExists.message(), "etcdserver: lease already exists");
+        let ttl = s.lease_ttl(7, false, 100).await.unwrap().unwrap();
+        assert_eq!((ttl.granted_ttl_secs, ttl.remaining_ttl_secs), (10, 10));
+        // Once revoked, the id may be granted again.
+        s.apply_lease_revoke(7).await.unwrap();
+        assert_eq!(s.apply_lease_grant(7, 20, 100).await.unwrap().id, 7);
+    }
+
+    /// An allocated id (`id == 0`) skips an id a lease already has, even
+    /// one the high-water mark does not know of (#212).
+    #[tokio::test]
+    async fn an_allocated_lease_id_never_replaces_a_lease() {
+        let (_d, s) = open_mvcc().await;
+        // A lease the counter does not cover, written as a snapshot of an
+        // older store could leave it.
+        let rec = crate::mvcc::lease::LeaseRecord { id: 1, ttl_secs: 30, deadline_unix_secs: 130 };
+        let mut b = WriteBatch::new();
+        b.put(TABLE_LEASE, &lease_id_key(1), &bincode::serialize(&rec).unwrap());
+        s.inner.engine.commit(b, WriteOptions::default()).await.unwrap();
+        let g = s.apply_lease_grant(0, 60, 100).await.unwrap();
+        assert_eq!(g.id, 2);
+        assert_eq!(s.lease_ttl(1, false, 100).await.unwrap().unwrap().granted_ttl_secs, 30);
+        assert_eq!(s.apply_lease_grant(0, 60, 100).await.unwrap().id, 3);
     }
 
     /// Reads, writes and compactions at once: every read answers, at a

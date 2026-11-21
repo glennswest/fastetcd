@@ -227,3 +227,36 @@ async fn a_put_naming_a_lease_needs_write_on_the_keys_already_on_it() {
     kv.txn(as_user(txn(put("config/d", CONFIG)), &e.alice)).await.expect("txn, a config/ lease");
     kv.put(as_user(put("config/e", SECRET), &e.root)).await.expect("root");
 }
+
+/// fastetcd#212 (finding 839965788fbf): granting a lease id that exists
+/// is refused (etcd's `ErrGRPCLeaseExist`), so a user who may not write
+/// a lease's keys cannot renew it by granting it again with a long TTL.
+/// It replaced the lease's record, TTL and deadline.
+#[tokio::test]
+async fn granting_an_existing_lease_is_refused_and_keeps_its_ttl() {
+    let e = setup().await;
+    let mut l = e.lease().await;
+    let ttl = |l: &mut LeaseClient<Channel>, root: String| {
+        let mut l = l.clone();
+        async move {
+            l.lease_time_to_live(as_user(pb::LeaseTimeToLiveRequest { id: SECRET, keys: false }, &root))
+                .await
+                .unwrap()
+                .into_inner()
+                .granted_ttl
+        }
+    };
+    for (who, token) in [("alice", &e.alice), ("root", &e.root)] {
+        let err = l
+            .lease_grant(as_user(pb::LeaseGrantRequest { ttl: 1_000_000, id: SECRET }, token))
+            .await
+            .expect_err("a grant of an existing lease id");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{who}: {err:?}");
+        assert_eq!(err.message(), "etcdserver: lease already exists", "{who}");
+        assert_eq!(ttl(&mut l, e.root.clone()).await, 600, "{who}'s grant changed the lease");
+    }
+    // A new id, or one the server picks, is granted.
+    let g = l.lease_grant(as_user(pb::LeaseGrantRequest { ttl: 60, id: 0 }, &e.alice)).await.unwrap().into_inner();
+    assert!(![0, SECRET, CONFIG, EMPTY].contains(&g.id), "{}", g.id);
+    l.lease_grant(as_user(pb::LeaseGrantRequest { ttl: 60, id: 400 }, &e.alice)).await.expect("a new id");
+}

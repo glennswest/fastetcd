@@ -205,6 +205,10 @@ Differences from etcd:
 - A `LeaseGrant` with a TTL of 0 or less gets 2 s, etcd's minimum with
   its default timing; a positive TTL below that is granted as asked,
   where etcd raises it to the minimum.
+- A `LeaseGrant` of an id that a lease already has is refused,
+  `FailedPrecondition` `etcdserver: lease already exists`, as in etcd
+  (1.43.1, #212). Before, it replaced the lease's TTL and deadline. An id
+  the server picks (`id: 0`) is never one a lease has.
 
 ### Migration
 

@@ -461,6 +461,8 @@ pub fn refusal_status(r: &Refusal) -> Status {
         Refusal::KeyNotFound | Refusal::InvalidArgument(_) => Status::invalid_argument(msg),
         Refusal::LeaseNotFound => Status::not_found(msg),
         Refusal::Compacted | Refusal::FutureRevision => Status::out_of_range(msg),
+        // etcd's ErrGRPCLeaseExist (#212).
+        Refusal::LeaseExists => Status::failed_precondition(msg),
     }
 }
 

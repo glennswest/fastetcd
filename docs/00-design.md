@@ -288,7 +288,10 @@ applies revisions without emitting events — the watcher is caught up
 from MVCC history to the current revision, as etcd does for unsynced
 watchers. If the history it needs has been compacted, the watch is
 cancelled with `compact_revision` set (etcd's `ErrCompacted`), and the
-client re-lists and re-watches from there. Clients can therefore rely on
+client re-lists and re-watches from there. The replay reads history and
+the compact revision from one consistent view, so a compaction that
+lands while it starts cancels it rather than leaving a gap (1.43.1,
+#212). Clients can therefore rely on
 "no cancel" meaning "my cache is current", with no periodic re-list.
 
 Resyncs and lag cancellations are logged at `warn` on the

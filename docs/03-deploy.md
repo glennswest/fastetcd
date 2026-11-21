@@ -404,7 +404,7 @@ with no keys needs only a login.
 | `LeaseTimeToLive` | read, with `keys: true` only; the TTL alone needs a login |
 | `LeaseLeases` | read, on every key of every lease |
 | `Put` naming a lease, and every put in either branch of a `Txn` | write, besides the put's own key |
-| `LeaseGrant` | a login |
+| `LeaseGrant` | a login; an id that exists is refused for everyone (`etcdserver: lease already exists`, #212), so a grant cannot renew another user's lease |
 
 **Limits.** No authorization gap is known, but every check runs on the member serving the call against its
 applied auth state at that moment (etcd checks a put and a revoke again

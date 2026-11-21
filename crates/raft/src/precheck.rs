@@ -14,7 +14,8 @@
 //!
 //! **Requests that cannot apply (fastetcd#49).** A put with
 //! `ignore_value`/`ignore_lease` on a missing key, `Compact` out of
-//! range, `LeaseKeepAlive` of an unknown lease, `LeaseGrant` with TTL
+//! range, `LeaseKeepAlive` of an unknown lease, `LeaseGrant` of a lease
+//! that exists (#212) or with TTL
 //! <= 0. The state machine refuses these itself (`Refused`, nothing
 //! applied), which is the authority, since the state can change between
 //! here and the apply. Refusing them here too answers the client without
@@ -220,6 +221,14 @@ async fn refusal(mvcc: &MvccStore, entry: &FastetcdLogEntry) -> Result<Option<Re
         FastetcdLogEntry::LeaseGrant { ttl_secs, .. } if *ttl_secs <= 0 => Some(
             Refusal::InvalidArgument(format!("lease TTL must be positive, got {ttl_secs}")),
         ),
+        // Refused at apply too, which is what decides (#212).
+        FastetcdLogEntry::LeaseGrant { id, .. } if *id != 0 => {
+            if mvcc.lease_exists(*id).await.map_err(|e| e.to_string())? {
+                Some(Refusal::LeaseExists)
+            } else {
+                None
+            }
+        }
         _ => None,
     })
 }
