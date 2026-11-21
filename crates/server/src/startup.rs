@@ -11,13 +11,17 @@
 //! [`StartupStatus`] is what a probe sees meanwhile (fastetcd#176): the
 //! metrics listener is bound before the data file is opened, and until the
 //! member serves, `/livez` answers `ok` while the start makes progress (a
-//! phase ends, redb's repair reports, or the process reads, writes or uses
-//! CPU) and fails once nothing has moved for [`STALL`]. `/readyz` and
+//! phase ends, redb's repair reports, or the start's threads read, write or
+//! use CPU) and fails once nothing has moved for [`STALL`]. The listener
+//! and the sampler run on a thread of their own ([`spawn_monitor`]), which
+//! is left out of the counters: watching the start, or answering a probe,
+//! is not progress (fastetcd#219). `/readyz` and
 //! `/health` fail until it serves. A kubelet's startup probe then waits
 //! for a repair that is working, instead of killing it and having the
 //! next start repair the file again from the beginning.
 
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use fastetcd_raft::TypeConfig;
@@ -36,10 +40,13 @@ pub const PHASES: [&str; 8] = [
 ];
 
 /// How long a start may go without any progress before `/livez` fails:
-/// no phase ended, no repair report, and the process read, wrote and ran
-/// nothing. A read of the disk blocked that long is a stall (#138), not a
+/// no phase ended, no repair report, and the start's threads read, wrote
+/// and ran nothing. A read of the disk blocked that long is a stall (#138), not a
 /// slow disk: a repair on a saturated SMR drive still reads continuously.
 pub const STALL: Duration = Duration::from_secs(120);
+
+/// How often the counters are sampled.
+pub const SAMPLE_EVERY: Duration = Duration::from_secs(2);
 
 /// The phases of one start, in order.
 pub struct Startup {
@@ -54,6 +61,11 @@ pub struct Startup {
 #[derive(Debug)]
 pub struct StartupStatus {
     start: Instant,
+    stall: Duration,
+    sample_every: Duration,
+    /// The monitor thread ([`spawn_monitor`]): its reads of `/proc`, and
+    /// the probes it answers, are not the start's progress (#219).
+    monitor_tid: OnceLock<u64>,
     inner: Mutex<StatusInner>,
 }
 
@@ -63,7 +75,8 @@ struct StatusInner {
     phase: &'static str,
     phase_started: Instant,
     last_progress: Instant,
-    /// The last sample: (I/O chars, CPU ticks, repair reports).
+    /// The last sample: (I/O chars, CPU ticks of every thread but the
+    /// monitor's, repair reports).
     sample: Option<(u64, u64, u64)>,
     done: bool,
 }
@@ -78,12 +91,14 @@ pub struct StartupReport {
     /// redb's repair estimate, while it repairs the data file.
     pub repair: Option<f64>,
     pub done: bool,
+    /// How long nothing may move ([`STALL`]).
+    pub stall: Duration,
 }
 
 impl StartupReport {
     /// Making progress: something moved within [`STALL`].
     pub fn progressing(&self) -> bool {
-        self.since_progress < STALL
+        self.since_progress < self.stall
     }
 
     /// One line for a probe's body: `phase data_file_open for 45 s (redb
@@ -106,9 +121,12 @@ impl StartupReport {
 }
 
 impl StartupStatus {
-    fn new(start: Instant) -> Arc<Self> {
+    fn new(start: Instant, stall: Duration, sample_every: Duration) -> Arc<Self> {
         Arc::new(Self {
             start,
+            stall,
+            sample_every,
+            monitor_tid: OnceLock::new(),
             inner: Mutex::new(StatusInner {
                 phase: PHASES[0],
                 phase_started: start,
@@ -140,16 +158,19 @@ impl StartupStatus {
         self.inner.lock().unwrap().done
     }
 
-    /// Look at the process's I/O and CPU counters and redb's repair
-    /// reports; any change is progress. Called every few seconds.
+    /// Look at the I/O and CPU counters of every thread but the
+    /// monitor's, and redb's repair reports; any change is progress.
+    /// Called every [`SAMPLE_EVERY`] on the monitor thread.
     pub fn sample(&self) {
         let repair_steps = fastetcd_storage::redb_engine::RedbEngine::repair_progress().map_or(0, |(_, n)| n);
-        let sample = match (io_chars(), cpu_ticks()) {
-            (Some(io), Some(cpu)) => Some((io, cpu, repair_steps)),
-            // No /proc (not Linux): count every sample as progress rather
-            // than fail a start we cannot see into.
-            _ => None,
-        };
+        // No /proc (not Linux), or no monitor thread to leave out: count
+        // every sample as progress rather than fail a start we cannot see
+        // into.
+        let sample = self
+            .monitor_tid
+            .get()
+            .and_then(|tid| threads_but(*tid))
+            .map(|(io, cpu)| (io, cpu, repair_steps));
         self.observe(sample, Instant::now());
     }
 
@@ -175,24 +196,90 @@ impl StartupStatus {
             since_progress: now.saturating_duration_since(s.last_progress),
             repair: fastetcd_storage::redb_engine::RedbEngine::repair_progress().map(|(p, _)| p),
             done: s.done,
+            stall: self.stall,
         }
     }
 }
 
-/// Characters read and written by this process (`/proc/self/io`'s
-/// `rchar` + `wchar`: every read and write call, page cache or disk).
-fn io_chars() -> Option<u64> {
-    let io = std::fs::read_to_string("/proc/self/io").ok()?;
+/// Run `serve` (the early metrics listener) and the progress sampler on
+/// a thread of their own, with a runtime of its own, until the process
+/// ends. That thread is left out of the counters (#219): before, the
+/// sampler read process-wide counters, and its own reads of `/proc` moved
+/// them, so a start that did nothing never stalled.
+pub fn spawn_monitor<F>(status: Arc<StartupStatus>, serve: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let spawned = std::thread::Builder::new().name("fastetcd-starting".into()).spawn(move || {
+        if let Some(tid) = this_thread_id() {
+            let _ = status.monitor_tid.set(tid);
+        }
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(target: "fastetcd::startup", "the startup monitor's runtime: {e}");
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let sampler = {
+                let status = status.clone();
+                async move {
+                    // Progress is sampled, so a probe sees what moved since.
+                    while !status.is_done() {
+                        status.sample();
+                        tokio::time::sleep(status.sample_every).await;
+                    }
+                }
+            };
+            tokio::join!(sampler, serve);
+        });
+    });
+    if let Err(e) = spawned {
+        tracing::error!(target: "fastetcd::startup", "the startup monitor's thread: {e}");
+    }
+}
+
+/// This thread's id (`/proc/thread-self` names `<pid>/task/<tid>`).
+fn this_thread_id() -> Option<u64> {
+    let link = std::fs::read_link("/proc/thread-self").ok()?;
+    link.file_name()?.to_str()?.parse().ok()
+}
+
+/// Every thread of this process but `skip`: the characters they read and
+/// wrote (`/proc/self/task/<tid>/io` `rchar` + `wchar`: every read and
+/// write call, page cache or disk) and their user + system CPU ticks
+/// (`stat` fields 14 and 15). A thread that ends between the listing and
+/// the reads is left out; it changes the sum, as any progress does.
+fn threads_but(skip: u64) -> Option<(u64, u64)> {
+    let (mut io, mut cpu) = (0u64, 0u64);
+    for entry in std::fs::read_dir("/proc/self/task").ok()? {
+        let Ok(entry) = entry else { continue };
+        let Some(tid) = entry.file_name().to_str().and_then(|n| n.parse::<u64>().ok()) else { continue };
+        if tid == skip {
+            continue;
+        }
+        let dir = entry.path();
+        if let (Ok(i), Ok(st)) =
+            (std::fs::read_to_string(dir.join("io")), std::fs::read_to_string(dir.join("stat")))
+        {
+            io += io_chars(&i).unwrap_or(0);
+            cpu += cpu_ticks(&st).unwrap_or(0);
+        }
+    }
+    Some((io, cpu))
+}
+
+/// `rchar` + `wchar` of an `io` file.
+fn io_chars(io: &str) -> Option<u64> {
     let field = |name: &str| {
         io.lines().find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok())
     };
     Some(field("rchar:")? + field("wchar:")?)
 }
 
-/// User + system CPU ticks of this process (`/proc/self/stat` fields 14
-/// and 15).
-fn cpu_ticks() -> Option<u64> {
-    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+/// User + system CPU ticks of a `stat` file (fields 14 and 15).
+fn cpu_ticks(stat: &str) -> Option<u64> {
     // The command name (field 2) may hold spaces; fields after it follow
     // its closing parenthesis.
     let rest = &stat[stat.rfind(')')? + 2..];
@@ -209,8 +296,14 @@ impl Default for Startup {
 
 impl Startup {
     pub fn new() -> Self {
+        Self::with_timing(STALL, SAMPLE_EVERY)
+    }
+
+    /// A start whose `/livez` fails after `stall` without progress,
+    /// sampled every `sample_every` (tests use seconds, not minutes).
+    pub fn with_timing(stall: Duration, sample_every: Duration) -> Self {
         let now = Instant::now();
-        Self { start: now, last: now, phases: Vec::new(), status: StartupStatus::new(now) }
+        Self { start: now, last: now, phases: Vec::new(), status: StartupStatus::new(now, stall, sample_every) }
     }
 
     /// What a probe sees while this start runs (#176).
@@ -356,7 +449,7 @@ mod tests {
     #[test]
     fn a_start_with_nothing_moving_stalls() {
         let t0 = Instant::now();
-        let status = StartupStatus::new(t0);
+        let status = StartupStatus::new(t0, STALL, SAMPLE_EVERY);
         status.observe(Some((100, 5, 0)), t0);
         // The same counters for STALL: no progress.
         status.observe(Some((100, 5, 0)), t0 + STALL);
@@ -379,14 +472,17 @@ mod tests {
     }
 
     #[test]
-    fn this_process_has_counters() {
-        if cfg!(target_os = "linux") {
-            let io = io_chars().expect("rchar/wchar");
-            cpu_ticks().expect("utime/stime");
-            // A read is progress.
-            let _ = std::fs::read_to_string("/proc/self/status");
-            assert!(io_chars().unwrap() > io);
+    fn the_counters_parse() {
+        if !cfg!(target_os = "linux") {
+            return;
         }
+        let me = this_thread_id().expect("/proc/thread-self");
+        assert!(threads_but(me).is_some(), "/proc/self/task");
+        let parse = io_chars("rchar: 10\nwchar: 5\nsyscr: 1\n");
+        assert_eq!(parse, Some(15));
+        let stat = "123 (a b) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15";
+        // utime is field 14, stime 15.
+        assert_eq!(cpu_ticks(stat), Some(11 + 12));
     }
 
     #[test]
@@ -398,6 +494,7 @@ mod tests {
             since_progress: Duration::from_secs(2),
             repair: Some(0.6),
             done: false,
+            stall: STALL,
         };
         assert_eq!(
             r.describe(),

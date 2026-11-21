@@ -1041,17 +1041,31 @@ pub struct EarlyServer {
 /// member starts anyway.
 pub fn spawn_early_server(addr: SocketAddr, status: Arc<crate::startup::StartupStatus>) -> EarlyServer {
     let full: Arc<std::sync::OnceLock<axum::Router>> = Arc::default();
+    // The listener runs on the startup monitor's thread, which the
+    // progress counters leave out (#219): answering a probe is not the
+    // start's progress. Once the member serves, each request is handed to
+    // the main runtime, where the full routes ran before.
+    let main = tokio::runtime::Handle::current();
     let app = {
         let (full, status) = (full.clone(), status.clone());
         axum::Router::new().fallback(move |req: axum::extract::Request| {
-            let (full, status) = (full.clone(), status.clone());
+            let (full, status, main) = (full.clone(), status.clone(), main.clone());
             async move {
                 match full.get() {
                     Some(router) => {
                         let mut router = router.clone();
-                        match tonic::codegen::Service::call(&mut router, req).await {
+                        let call = main.spawn(async move {
+                            match tonic::codegen::Service::call(&mut router, req).await {
+                                Ok(response) => response,
+                                Err(never) => match never {},
+                            }
+                        });
+                        match call.await {
                             Ok(response) => response,
-                            Err(never) => match never {},
+                            Err(e) => {
+                                use axum::response::IntoResponse;
+                                (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n")).into_response()
+                            }
                         }
                     }
                     None => starting_response(&status.report(), req.uri().path()),
@@ -1059,17 +1073,7 @@ pub fn spawn_early_server(addr: SocketAddr, status: Arc<crate::startup::StartupS
             }
         })
     };
-    {
-        let status = status.clone();
-        tokio::spawn(async move {
-            // Progress is sampled, so a probe sees what moved since.
-            while !status.is_done() {
-                status.sample();
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        });
-    }
-    tokio::spawn(async move {
+    crate::startup::spawn_monitor(status.clone(), async move {
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {

@@ -553,8 +553,11 @@ opened, and answers for the start until the member serves:
 | `GET /metrics`, `/` | `fastetcd_starting{phase="…"} 1`, `fastetcd_starting_seconds`, `fastetcd_starting_since_progress_seconds` |
 
 Progress is any of: a phase ends, redb reports its repair (once per full
-scan of the file: 0, 30, 60, 90%), the process reads or writes
-(`/proc/self/io` `rchar`/`wchar`) or uses CPU. A repair of a file not
+scan of the file: 0, 30, 60, 90%), the start's threads read or write
+(`/proc/self/task/<tid>/io` `rchar`/`wchar`) or use CPU. The listener and
+the sampler run on a thread of their own (`fastetcd-starting`), which is
+left out: before 1.43.6 the sampler's own reads of `/proc` counted, so a
+stalled start never failed `/livez` (#219). A repair of a file not
 closed cleanly reads the whole file, so on a slow disk it keeps `/livez`
 ok for as long as it takes; a read that never returns (a device stall
 below fastetcd, #138) fails it after 120 s. So point the startup probe at

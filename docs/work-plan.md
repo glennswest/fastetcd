@@ -1879,3 +1879,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       panics in `Instant + Duration` in both lessor tests, and the
       sweeper test's 2 s lease never expires.
 
+111. **The startup stall check never fired (#219, finding d4d61f840472).**
+    `StartupStatus::sample` summed process-wide `rchar`/`wchar` and CPU
+    ticks; reading `/proc/self/io` and `stat` moved `rchar` itself, so
+    every 2 s sample differed and `/livez` never failed for a stuck
+    start. Probe handling and runtime CPU counted too.
+    - [x] `startup::spawn_monitor`: the early listener and the sampler on
+      a thread of their own (current-thread runtime); the sample is the
+      sum over `/proc/self/task/*` except that thread. After install,
+      each request runs on the main runtime (`Handle::spawn`).
+    - [x] `Startup::with_timing(stall, sample_every)` for tests;
+      `StartupReport` carries its stall.
+    - [x] Test `startup_stall.rs` (its own binary, so nothing else in the
+      process moves): with the real sampler and listener and a 3 s
+      stall, a start doing nothing fails `/livez` (503), a thread reading
+      every 300 ms keeps it ok for 9 s, and when it stops the stall is
+      seen again.
+    - [ ] sc-build; negative control with process-wide counters.
+

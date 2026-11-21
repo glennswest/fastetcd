@@ -256,6 +256,7 @@ fn a_stalled_start_fails_livez() {
         since_progress: fastetcd_server::startup::STALL,
         repair: Some(0.3),
         done: false,
+        stall: fastetcd_server::startup::STALL,
     };
     let resp = fastetcd_server::metrics::starting_response(&r, "/livez");
     assert_eq!(resp.status().as_u16(), 503);
