@@ -134,6 +134,39 @@ async fn an_election_moves_to_the_next_candidate_on_resign() {
     assert_eq!(e.message(), "\"leader\" field must be provided");
 }
 
+/// A cancelled Observe stream releases its task on a quiet database,
+/// both while the election has no leader and while its leader holds
+/// (fastetcd#227): each live task holds an event receiver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_observe_releases_its_task() {
+    let h = start_test_server_full().await;
+    let mvcc = h.state.sm.mvcc().clone();
+    let lb = grant(&h.endpoint, 60).await;
+    let mut c = ElectionClient::connect(h.endpoint.clone()).await.unwrap();
+    c.campaign(campaign("held", lb, "b")).await.unwrap();
+    let base = mvcc.subscriber_count();
+
+    let empty = c.observe(epb::LeaderRequest { name: b"empty".to_vec() }).await.unwrap().into_inner();
+    let mut held = c.observe(epb::LeaderRequest { name: b"held".to_vec() }).await.unwrap().into_inner();
+    assert_eq!(next(&mut held).await, "b");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while mvcc.subscriber_count() < base + 2 {
+        assert!(tokio::time::Instant::now() < deadline, "both observers subscribe");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // No write follows: only the client going can end them.
+    drop(empty);
+    drop(held);
+    while mvcc.subscriber_count() > base {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} observers still alive after their clients went",
+            mvcc.subscriber_count() - base
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// The services act as their caller: a user who cannot write the lock's
 /// prefix cannot take the lock (etcd's run with the caller's context).
 #[tokio::test]

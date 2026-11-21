@@ -53,7 +53,7 @@ pub fn range_request_to_op(req: &pb::RangeRequest) -> RangeOp {
         // Read whole when the response sorts or filters (#154).
         limit: crate::range_options::store_limit(req),
         revision: req.revision,
-        keys_only: req.keys_only,
+        keys_only: crate::range_options::store_keys_only(req),
         count_only: req.count_only,
     }
 }

@@ -109,6 +109,20 @@ suite_test!(delete_logs_since_11);
 suite_test!(delete_logs_since_0);
 suite_test!(append_to_log);
 
+/// `--wal-segment-bytes 0` is raised to the smallest segment, and the
+/// WAL's size counts at that size, so `--wal-max-bytes` still bounds it
+/// (fastetcd#227).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_segment_size_still_counts_wal_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = WalLogOptions { segment_bytes: 0, cache_bytes: 512, ..Default::default() };
+    let (_e, mut log, _sm) = open_dir_with(dir.path(), opts).await;
+    S::feed_10_logs_vote_self(&mut log).await.unwrap();
+    let min = fastetcd_storage::raft_wal::MIN_SEGMENT_BYTES;
+    let bytes = log.bytes_on_disk();
+    assert!(bytes >= min && bytes % min == 0, "WAL counted as {bytes} bytes");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn log_and_vote_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();

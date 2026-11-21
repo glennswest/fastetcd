@@ -58,6 +58,13 @@ pub fn store_limit(req: &pb::RangeRequest) -> usize {
     }
 }
 
+/// Whether to read the store without values: `keys_only`, unless the
+/// values are what this module sorts by. Then the store returns them,
+/// and [`apply`] drops them after sorting (fastetcd#227).
+pub fn store_keys_only(req: &pb::RangeRequest) -> bool {
+    req.keys_only && !(applies(req) && matches!(effective_order(req), Some((SortTarget::Value, _))))
+}
+
 fn compare(target: SortTarget, a: &KvRecord, b: &KvRecord) -> Ordering {
     match target {
         SortTarget::Key => a.key.cmp(&b.key),
@@ -69,7 +76,7 @@ fn compare(target: SortTarget, a: &KvRecord, b: &KvRecord) -> Ordering {
 }
 
 /// Apply `req`'s filters, sort and limit to `result`, read with
-/// [`store_limit`]. A request this module does not apply to is returned
+/// [`store_limit`] and [`store_keys_only`]. A request this module does not apply to is returned
 /// as it is.
 pub fn apply(req: &pb::RangeRequest, mut result: RangeResult) -> RangeResult {
     if !applies(req) {
@@ -94,6 +101,11 @@ pub fn apply(req: &pb::RangeRequest, mut result: RangeResult) -> RangeResult {
     result.more = limit > 0 && result.kvs.len() > limit;
     if result.more {
         result.kvs.truncate(limit);
+    }
+    if req.keys_only {
+        for kv in &mut result.kvs {
+            kv.value.clear();
+        }
     }
     result
 }
@@ -205,6 +217,27 @@ mod tests {
         assert_eq!(out.count, 3, "etcd's count is before the filters");
         let r = req(|r| { r.min_create_revision = 15; r.max_mod_revision = 31 });
         assert_eq!(keys(&apply(&r, store())), vec!["l/1", "l/3"]);
+    }
+
+    #[test]
+    fn keys_only_sorted_by_value_reads_values_and_drops_them_after() {
+        // Values c, a, b: value order is not key order (fastetcd#227).
+        let r = req(|r| {
+            r.keys_only = true;
+            r.sort_target = SortTarget::Value as i32;
+            r.sort_order = SortOrder::Descend as i32;
+            r.limit = 2;
+        });
+        assert!(!store_keys_only(&r), "the store must return the values to sort by");
+        let out = apply(&r, store());
+        assert_eq!(keys(&out), vec!["l/1", "l/3"]);
+        assert!(out.more);
+        assert!(out.kvs.iter().all(|kv| kv.value.is_empty()), "keys_only answers no values");
+        // Any other target can read the store keys-only.
+        let by_create = req(|r| { r.keys_only = true; r.sort_target = SortTarget::Create as i32 });
+        assert!(store_keys_only(&by_create));
+        let plain = req(|r| r.keys_only = true);
+        assert!(store_keys_only(&plain));
     }
 
     #[test]

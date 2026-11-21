@@ -76,6 +76,10 @@ const MAX_PAYLOAD: u32 = 1 << 30;
 /// clusters run on (#14), large enough that a roll is rare.
 pub const DEFAULT_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The smallest segment [`Wal::open`] makes: a smaller
+/// [`WalOptions::segment_bytes`] (`--wal-segment-bytes 0`) is raised to it.
+pub const MIN_SEGMENT_BYTES: u64 = 4096;
+
 #[derive(Debug, Clone, Copy)]
 pub struct WalOptions {
     /// Size each new segment is preallocated to; a segment past it is
@@ -449,7 +453,7 @@ pub struct Wal {
 impl Wal {
     /// Open (or create) the log in `dir` and replay it.
     pub fn open(dir: &Path, opts: WalOptions) -> io::Result<(Wal, Replay)> {
-        let opts = WalOptions { segment_bytes: opts.segment_bytes.max(4096), ..opts };
+        let opts = WalOptions { segment_bytes: opts.segment_bytes.max(MIN_SEGMENT_BYTES), ..opts };
         std::fs::create_dir_all(dir)?;
         let seqs = list_segments(dir)?;
         let reader = Arc::new(WalReader::new(dir.to_path_buf()));

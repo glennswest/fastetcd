@@ -12,7 +12,7 @@
 //! histogram) and `fastetcd_runtime_schedule_delay_max_seconds`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use prometheus_client::metrics::gauge::Gauge;
@@ -34,6 +34,10 @@ pub struct ScheduleProbe {
     delay: Histogram,
     max_seconds: Gauge<f64, AtomicU64>,
     max_nanos: AtomicU64,
+    /// Held while a new maximum is stored and published, so the gauge
+    /// cannot be set back to a smaller one by a slower writer
+    /// (fastetcd#227).
+    max_lock: Mutex<()>,
 }
 
 impl Default for ScheduleProbe {
@@ -42,6 +46,7 @@ impl Default for ScheduleProbe {
             delay: Histogram::new(BUCKETS.iter().copied()),
             max_seconds: Gauge::default(),
             max_nanos: AtomicU64::new(0),
+            max_lock: Mutex::new(()),
         }
     }
 }
@@ -51,6 +56,10 @@ impl ScheduleProbe {
     pub fn observe(&self, waited: Duration) {
         self.delay.observe(waited.as_secs_f64());
         let nanos = waited.as_nanos().min(u64::MAX as u128) as u64;
+        if self.max_nanos.load(Ordering::Relaxed) >= nanos {
+            return; // not a new maximum: the common case takes no lock
+        }
+        let _held = self.max_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.max_nanos.fetch_max(nanos, Ordering::Relaxed) < nanos {
             self.max_seconds.set(waited.as_secs_f64());
         }
@@ -107,6 +116,28 @@ mod tests {
         prometheus_client::encoding::text::encode(&mut text, &reg).unwrap();
         assert!(text.contains("fastetcd_runtime_schedule_delay_seconds_count 3"), "{text}");
         assert!(text.contains("fastetcd_runtime_schedule_delay_max_seconds 0.003"), "{text}");
+    }
+
+    /// Concurrent observers leave the gauge at the longest wait, never a
+    /// shorter one set after it (fastetcd#227).
+    #[test]
+    fn concurrent_observers_publish_the_longest_wait() {
+        let p = Arc::new(ScheduleProbe::default());
+        let threads: Vec<_> = (0..8u64)
+            .map(|t| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for i in 0..2000u64 {
+                        p.observe(Duration::from_nanos((i * 8 + t) * 1000 + 1));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(p.max(), Duration::from_nanos(((1999 * 8) + 7) * 1000 + 1));
+        assert_eq!(p.max_seconds.get(), p.max().as_secs_f64());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

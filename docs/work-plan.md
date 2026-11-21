@@ -1666,3 +1666,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       peer URL through a follower, restart it on the new port: writes
       reach it; restart another member (its --initial-cluster still old):
       still reaches it. Docs (03-deploy membership), CHANGELOG.
+
+99. **Review: 5 minor findings (#227).**
+    - [x] Range/Txn/forwarded reads with `keys_only` and
+      `sort_target=VALUE` read values from the store, sort, then drop
+      them (`range_options::store_keys_only`); unit test with values
+      ordered unlike keys.
+    - [x] Election Observe ends when its client goes, also while waiting
+      on an event or a range (`select!` on `tx.closed()`); test drops an
+      empty and a held election's streams on a quiet store and sees the
+      event receivers released (`MvccStore::subscriber_count`).
+    - [x] `--wal-segment-bytes 0`: WalLogStore counts segments at the
+      size Wal makes them (`raft_wal::MIN_SEGMENT_BYTES`), so
+      `--wal-max-bytes` still bounds it; test.
+    - [x] `fastetcd_runtime_schedule_delay_max_seconds` cannot move back:
+      a new maximum is stored and published under a lock; concurrent test.

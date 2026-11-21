@@ -325,7 +325,7 @@ async fn serve_range(
             // to the leader's result, as to a local one (#154).
             limit: crate::range_options::store_limit(req) as u64,
             revision: req.revision,
-            keys_only: req.keys_only,
+            keys_only: crate::range_options::store_keys_only(req),
             count_only: req.count_only,
         };
         // On a follower this returns the leader's result directly.
@@ -358,7 +358,7 @@ async fn serve_range(
             &req.range_end,
             crate::range_options::store_limit(req),
             req.revision,
-            req.keys_only,
+            crate::range_options::store_keys_only(req),
             req.count_only,
         )
         .await

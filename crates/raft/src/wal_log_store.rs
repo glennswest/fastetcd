@@ -550,7 +550,9 @@ impl WalLogStore {
         engine: Arc<dyn KvStore>,
         opts: WalLogOptions,
     ) -> anyhow::Result<Self> {
-        let segment_bytes = opts.segment_bytes;
+        // The size Wal::open makes segments at: bytes_on_disk counts by
+        // it, so a 0 here would count nothing (fastetcd#227).
+        let segment_bytes = opts.segment_bytes.max(fastetcd_storage::raft_wal::MIN_SEGMENT_BYTES);
         let wal_opts = WalOptions { segment_bytes, keep_purged: opts.keep_purged };
         if !has_segments(dir) {
             let copied = migrate(dir, &engine, wal_opts).await?;

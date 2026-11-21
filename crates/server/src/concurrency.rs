@@ -425,8 +425,16 @@ impl epb::election_server::Election for ElectionService {
         let pfx = prefix(&request.into_inner().name);
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<epb::LeaderResponse, Status>>(16);
         tokio::spawn(async move {
-            if let Err(e) = observe(&c, &pfx, &tx).await {
-                let _ = tx.send(Err(e)).await;
+            // Ends as soon as the client goes, whatever `observe` waits
+            // on (an event, a range): it is dropped with its receiver
+            // and its state, as the Watch forwarder is (fastetcd#227).
+            tokio::select! {
+                r = observe(&c, &pfx, &tx) => {
+                    if let Err(e) = r {
+                        let _ = tx.send(Err(e)).await;
+                    }
+                }
+                _ = tx.closed() => {}
             }
         });
         Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
@@ -441,7 +449,8 @@ impl epb::election_server::Election for ElectionService {
 }
 
 /// clientv3 `Election.observe`: the leader, then every change to its key,
-/// then, once it is deleted, the next leader. Ends when the client goes.
+/// then, once it is deleted, the next leader. The caller ends it when the
+/// client goes.
 async fn observe(
     c: &Caller,
     pfx: &[u8],

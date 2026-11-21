@@ -928,6 +928,13 @@ impl MvccStore {
         self.inner.event_tx.subscribe()
     }
 
+    /// How many receivers [`subscribe`](Self::subscribe) has handed out
+    /// that are still alive: a stream that outlives its client shows
+    /// here (fastetcd#227).
+    pub fn subscriber_count(&self) -> usize {
+        self.inner.event_tx.receiver_count()
+    }
+
     pub fn engine(&self) -> &Arc<dyn KvStore> {
         &self.inner.engine
     }
