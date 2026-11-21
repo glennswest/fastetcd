@@ -1724,17 +1724,26 @@ Tracked live in the Claude task system. Snapshot of the order:
     and MemberList used a local map seeded from `--initial-cluster` and
     changed only by the local Cluster RPC, so a member added on another
     node, or on this one before a restart, has no route here.
-    - [ ] `GrpcNetwork` dials the `BasicNode` addr openraft hands it
+    - [x] `GrpcNetwork` dials the `BasicNode` addr openraft hands it
       (the replicated membership); the peers map only when it is empty.
-    - [ ] `membership_sync`: on start and on every membership change,
+    - [x] `membership_sync`: on start and on every membership change,
       routes and the member directory follow the applied membership
       (a member that left loses its route and row; learner flag).
-    - [ ] `WriteForwarder` redials when a member's address changes.
-    - [ ] MemberUpdate replicates the address (`SetNodes`, forwarded to
+    - [x] `WriteForwarder` redials when a member's address changes.
+    - [x] MemberUpdate replicates the address (`SetNodes`, forwarded to
       the leader as `MembershipChange::SetNodeAddr`); NotFound for an
       id not in the membership.
-    - [ ] Tests: in-process (member added on the leader, a different
+    - [x] Tests: in-process (member added on the leader, a different
       original voter leads, it replicates to the new one; routes and
       MemberList on every member; MemberUpdate through a follower);
       e2e `tests/member_routes.sh` (real binaries, etcdctl member add,
       move-leader, restart with unchanged flags).
+    - [x] sc-build workspace (769fd22, passed, no warnings) +
+      `tests/member_routes.sh` (7ab4458, 12/12); the same script on the
+      pre-fix efdd964 fails 8/12 (n4 never gets a write under another
+      leader or after the restarts; only n1 lists it). Found #232
+      (joining member's id), #234 (voter MemberAdd races its learner add).
+    - Item 98 (#208): `SetNodeAddr`, routes/directory following the
+      membership, redial and MemberUpdate's NotFound are done here; left
+      for #208: `RemoveNode` (learner removal, fd7f6fcec07f), NotFound on
+      MemberRemove, `Peer URLs already exists` on MemberUpdate.
