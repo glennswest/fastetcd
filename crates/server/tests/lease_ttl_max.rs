@@ -20,6 +20,9 @@ use fastetcd_raft::lessor::{Renewal, MAX_LEASE_TTL_SECS};
 use fastetcd_raft::{FastetcdLogEntry, FastetcdLogResponse};
 use tokio::time::{sleep, Instant};
 
+/// A TTL is counted from its grant: allow the test's own running time.
+const SLACK_SECS: i64 = 120;
+
 /// Grant through raft directly, as a member without the check did.
 async fn grant_logged(h: &common::TestServerHandles, ttl_secs: i64) -> i64 {
     let now_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
@@ -61,7 +64,7 @@ async fn a_grant_above_etcds_maximum_ttl_is_refused_as_etcd_refuses_it() {
         .unwrap()
         .into_inner();
     assert_eq!(ttl.granted_ttl, MAX_LEASE_TTL_SECS);
-    assert!(ttl.ttl >= MAX_LEASE_TTL_SECS - 1, "{ttl:?}");
+    assert!(ttl.ttl >= MAX_LEASE_TTL_SECS - SLACK_SECS, "{ttl:?}");
 }
 
 #[tokio::test]
@@ -75,7 +78,7 @@ async fn promoting_a_persisted_oversized_lease_neither_panics_nor_expires_it() {
     // Promotion (first lessor call of the term) and TimeToLive.
     let t = h.state.lessor.time_to_live(huge, false).await.unwrap().expect("huge lease");
     assert_eq!(t.granted_ttl_secs, i64::MAX);
-    assert!(t.remaining_ttl_secs >= MAX_LEASE_TTL_SECS - 1, "{t:?}");
+    assert!(t.remaining_ttl_secs >= MAX_LEASE_TTL_SECS - SLACK_SECS, "{t:?}");
 
     // A keep-alive of it renews (in RAM) without panicking.
     match h.state.lessor.renew(huge).await {
@@ -128,5 +131,5 @@ async fn ordinary_leases_keep_expiring_beside_an_oversized_one() {
         .unwrap()
         .into_inner();
     assert_eq!(t.granted_ttl, i64::MAX);
-    assert!(t.ttl >= MAX_LEASE_TTL_SECS - 1, "{t:?}");
+    assert!(t.ttl >= MAX_LEASE_TTL_SECS - SLACK_SECS, "{t:?}");
 }
