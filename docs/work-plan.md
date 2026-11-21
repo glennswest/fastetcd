@@ -1826,14 +1826,17 @@ Tracked live in the Claude task system. Snapshot of the order:
     changes the store and broadcasts nothing, so a predecessor deleted
     inside the snapshot was waited for forever, and Observe kept
     following a leader that was gone.
-    - [ ] `MvccStore::installs()`: a watch counter every install (and
+    - [x] `MvccStore::installs()`: a watch counter every install (and
       `reload_write_state`) bumps, after the reload.
-    - [ ] `wait_deletes` and `observe` re-read on an install or on a
+    - [x] `wait_deletes` and `observe` re-read on an install or on a
       batch whose revision is not the successor of the last seen;
       Observe does not repeat a leader value it already sent.
-    - [ ] Watch streams resync on an install too (they waited for the
+    - [x] Watch streams resync on an install too (they waited for the
       next write's revision gap).
-    - [ ] Tests (gRPC, one member, a snapshot installed under it with no
+    - [x] Tests (gRPC, one member, a snapshot installed under it with no
       write after): a waiting Lock gets the lock; a waiting Campaign
       wins and Observe moves to it; a Watch on the deleted key gets the
       delete.
+    - [x] sc-build workspace (7679b7c, passed first time, no warnings);
+      negative control: the two tests with installs never signalled
+      (3b772e0) time out (no lock, no election). Release 1.43.5.
