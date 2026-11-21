@@ -394,8 +394,7 @@ pub async fn migrate_snapshot_with_mode(
         }
     };
     let auth_enabled = import_auth(&mvcc, &auth).await?;
-    drop(mvcc);
-    drop(engine);
+    drop(mvcc); // closes the staged file before it is renamed
     let replaced = install(to, &staging, &target_path)?;
     Ok(MigrationSummary {
         scanned,
