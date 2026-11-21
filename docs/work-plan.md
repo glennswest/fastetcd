@@ -1846,13 +1846,25 @@ Tracked live in the Claude task system. Snapshot of the order:
     data path names the new file, but the handle was swapped only after
     the directory sync: an error there returned with the old handle, and
     every later write and checkpoint went to an inode no restart opens.
-    - [ ] The rename is the switch: the new handle is installed at once.
-    - [ ] A directory sync that fails after it fails closed: the engine
+    - [x] The rename is the switch: the new handle is installed at once.
+    - [x] A directory sync that fails after it fails closed: the engine
       marks it, and every commit, streamed commit and sync syncs the
-      directory first and errors until it succeeds.
-    - [ ] Test (fault injection on the directory sync): the rewrite and
-      the next commit fail, the one after succeeds; reopened from the
-      data path, the store holds every acknowledged write.
+      directory first and errors until it succeeds. A refused flush keeps
+      its write-behind layers; a failed checkpoint retries and purges no
+      WAL (`spawn_checkpointer`), so nothing acknowledged is lost.
+    - [x] Test (fault injection on the directory sync): the rewrite, the
+      next commit and the next sync fail, the one after succeeds;
+      reopened from the data path, the store holds every acknowledged
+      write. As first committed (9a22546) it injected 2 failures for 3
+      refused calls and failed; it was never run (#218's workspace run
+      stopped before the storage crate). Fixed in 951d587.
+    - [x] sc-build of 951d587: storage 126/126, clippy `-D warnings`
+      clean, workspace `--no-fail-fast` 676 pass, 0 fail (the first
+      attempt's 1 failure, `move_leader_hands_leadership_to_the_target`,
+      is multinode timing, seen in #218's runs too). Negative control
+      (old order: sync, then switch; 15f31a5-style throwaway branch):
+      the write after the failed sync is accepted, onto the unlinked
+      file.
 
 110. **A large lease TTL panicked the lease expiry worker (#218, finding
     d103e96b1b1d).** LeaseGrant took any positive TTL; the leader's
