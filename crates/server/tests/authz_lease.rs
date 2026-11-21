@@ -260,3 +260,53 @@ async fn granting_an_existing_lease_is_refused_and_keeps_its_ttl() {
     assert!(![0, SECRET, CONFIG, EMPTY].contains(&g.id), "{}", g.id);
     l.lease_grant(as_user(pb::LeaseGrantRequest { ttl: 60, id: 400 }, &e.alice)).await.expect("a new id");
 }
+
+/// fastetcd#215 (finding fb3adfe70c94): the lease calls are judged by
+/// the keys of that lease only, for ids at the ends of the i64 range.
+/// The i64::MAX lease's key range ran over every negative lease's keys
+/// (alice was refused revoking it for `secret/` keys on other leases,
+/// and root's revoke deleted them), and -1's range was inverted (its
+/// keys were never checked).
+#[tokio::test]
+async fn leases_at_the_ends_of_the_id_space_are_judged_by_their_own_keys() {
+    let e = setup().await;
+    let mut l = e.lease().await;
+    let mut kv = e.kv().await;
+    for (id, key) in [(i64::MAX, "config/max"), (-5, "secret/neg"), (-1, "secret/minus-one")] {
+        l.lease_grant(as_user(pb::LeaseGrantRequest { ttl: 600, id }, &e.root)).await.unwrap();
+        kv.put(as_user(put(key, id), &e.root)).await.unwrap();
+    }
+    // TimeToLive with keys lists that lease's key only.
+    let keys = |id| {
+        let mut l = l.clone();
+        let root = e.root.clone();
+        async move {
+            l.lease_time_to_live(as_user(pb::LeaseTimeToLiveRequest { id, keys: true }, &root))
+                .await
+                .unwrap()
+                .into_inner()
+                .keys
+        }
+    };
+    assert_eq!(keys(i64::MAX).await, vec![b"config/max".to_vec()]);
+    assert_eq!(keys(-1).await, vec![b"secret/minus-one".to_vec()]);
+    assert_eq!(keys(-5).await, vec![b"secret/neg".to_vec()]);
+    // -1 carries a secret/ key: alice may not revoke it, nor list its keys.
+    denied("alice revokes lease -1", l.lease_revoke(as_user(pb::LeaseRevokeRequest { id: -1 }, &e.alice)).await);
+    denied(
+        "alice lists lease -1's keys",
+        l.lease_time_to_live(as_user(pb::LeaseTimeToLiveRequest { id: -1, keys: true }, &e.alice)).await,
+    );
+    // i64::MAX carries a config/ key only: alice revokes it, and the
+    // negative leases' keys stay.
+    l.lease_revoke(as_user(pb::LeaseRevokeRequest { id: i64::MAX }, &e.alice))
+        .await
+        .expect("alice revokes the i64::MAX lease, which holds only config/max");
+    assert!(!e.exists("config/max").await);
+    assert!(e.exists("secret/neg").await, "revoking i64::MAX deleted lease -5's key");
+    assert!(e.exists("secret/minus-one").await, "revoking i64::MAX deleted lease -1's key");
+    // Root's revoke of -1 deletes its key and leaves -5's.
+    l.lease_revoke(as_user(pb::LeaseRevokeRequest { id: -1 }, &e.root)).await.unwrap();
+    assert!(!e.exists("secret/minus-one").await);
+    assert!(e.exists("secret/neg").await);
+}

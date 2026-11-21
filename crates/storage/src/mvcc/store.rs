@@ -3637,6 +3637,49 @@ mod tests {
         assert_eq!(s.apply_lease_grant(0, 60, 100).await.unwrap().id, 3);
     }
 
+    /// fastetcd#215 (finding fb3adfe70c94): revoking, and listing the
+    /// keys of, a lease of id -1, i64::MAX or another negative id touches
+    /// that lease's keys only. i64::MAX's range ran over every negative
+    /// lease's keys (its revoke deleted them), and -1's was inverted.
+    #[tokio::test]
+    async fn leases_at_the_ends_of_the_id_space_keep_their_own_keys() {
+        let (_d, s) = open_mvcc().await;
+        let ids = [i64::MAX, -1, -5, i64::MIN, 3];
+        for id in ids {
+            s.apply_lease_grant(id, 600, 100).await.unwrap();
+            let key = format!("k{id}");
+            s.apply(&[Mutation::Put {
+                key: key.into_bytes(),
+                value: b"v".to_vec(),
+                lease: id,
+                ignore_value: false,
+                ignore_lease: false,
+                prev_kv: false,
+            }])
+            .await
+            .unwrap();
+        }
+        let keys_of = |id: i64| vec![format!("k{id}").into_bytes()];
+        for id in ids {
+            assert_eq!(s.lease_attached_keys(id).await.unwrap(), keys_of(id), "lease {id}");
+            let ttl = s.lease_ttl(id, true, 100).await.unwrap().unwrap();
+            assert_eq!(ttl.keys, keys_of(id), "lease {id}: TimeToLive with keys");
+        }
+        let alive = |s: MvccStore| async move {
+            let r = s.range(b"k", b"l", 0, 0, true, false).await.unwrap();
+            r.kvs.into_iter().map(|kv| String::from_utf8(kv.key).unwrap()).collect::<std::collections::BTreeSet<_>>()
+        };
+        s.apply_lease_revoke(i64::MAX).await.unwrap();
+        let want: std::collections::BTreeSet<String> = ["k-1", "k-5", &format!("k{}", i64::MIN), "k3"].iter().map(|k| k.to_string()).collect();
+        assert_eq!(alive(s.clone()).await, want, "revoking i64::MAX deleted only its key");
+        s.apply_lease_revoke(-1).await.unwrap();
+        let want: std::collections::BTreeSet<String> = ["k-5", &format!("k{}", i64::MIN), "k3"].iter().map(|k| k.to_string()).collect();
+        assert_eq!(alive(s.clone()).await, want, "revoking -1 deleted its key, and only it");
+        for id in [-5, i64::MIN, 3] {
+            assert_eq!(s.lease_attached_keys(id).await.unwrap(), keys_of(id), "lease {id} after the revokes");
+        }
+    }
+
     /// Reads, writes and compactions at once: every read answers, at a
     /// revision no older than its last, with records no newer than it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

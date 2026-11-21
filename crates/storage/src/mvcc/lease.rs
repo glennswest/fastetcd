@@ -91,18 +91,17 @@ pub fn lease_key_index(id: LeaseId, user_key: &[u8]) -> Vec<u8> {
 
 /// Iterate the lease_keys range for `id` — used by revoke to find
 /// what to cascade-delete.
+///
+/// The table orders its keys by their bytes, so the end is the next
+/// 8-byte prefix as an unsigned number (fastetcd#215): the id's
+/// big-endian bits plus one. Only the all-ones prefix (lease -1) has
+/// none, and its range runs to the end of the table. Taking the
+/// successor as a signed id gave i64::MAX an unbounded end, over every
+/// negative lease's keys, and -1 an end of 0, below its start.
 pub fn lease_keys_bounds(id: LeaseId) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     let start = lease_id_key(id).to_vec();
-    let mut end = lease_id_key(id).to_vec();
-    // Successor of the 8-byte id: increment as a u64. If overflow,
-    // end is unbounded.
-    let next = (i64::from_be_bytes(end.clone().try_into().expect("8 bytes")))
-        .checked_add(1);
-    match next {
-        Some(n) => {
-            end = n.to_be_bytes().to_vec();
-            (Bound::Included(start), Bound::Excluded(end))
-        }
+    match u64::from_be_bytes(lease_id_key(id)).checked_add(1) {
+        Some(n) => (Bound::Included(start), Bound::Excluded(n.to_be_bytes().to_vec())),
         None => (Bound::Included(start), Bound::Unbounded),
     }
 }
@@ -118,4 +117,46 @@ pub fn parse_lease_keys_key(bytes: &[u8]) -> MvccResult<(LeaseId, Vec<u8>)> {
     let id = i64::from_be_bytes(bytes[..8].try_into().expect("8 bytes"));
     let key = bytes[8..].to_vec();
     Ok((id, key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contains(b: &(Bound<Vec<u8>>, Bound<Vec<u8>>), key: &[u8]) -> bool {
+        let lo = match &b.0 {
+            Bound::Included(s) => key >= s.as_slice(),
+            Bound::Excluded(s) => key > s.as_slice(),
+            Bound::Unbounded => true,
+        };
+        let hi = match &b.1 {
+            Bound::Included(e) => key <= e.as_slice(),
+            Bound::Excluded(e) => key < e.as_slice(),
+            Bound::Unbounded => true,
+        };
+        lo && hi
+    }
+
+    /// fastetcd#215 (finding fb3adfe70c94): a lease's range holds every
+    /// key of that lease and none of another's, whatever the id's sign:
+    /// the table orders bytes, and a negative id's bytes sort above every
+    /// positive one's.
+    #[test]
+    fn a_lease_range_holds_its_keys_and_no_others() {
+        let ids = [0, 1, 2, 255, 256, i64::MAX - 1, i64::MAX, i64::MIN, i64::MIN + 1, -256, -5, -2, -1];
+        for &id in &ids {
+            let b = lease_keys_bounds(id);
+            if let (Bound::Included(s), Bound::Excluded(e)) = (&b.0, &b.1) {
+                assert!(s < e, "lease {id}: an empty or inverted range");
+            }
+            for &other in &ids {
+                for key in [&b""[..], b"k", &[0xFF; 70][..]] {
+                    let entry = lease_key_index(other, key);
+                    assert_eq!(contains(&b, &entry), other == id, "lease {id}'s range and lease {other}'s key {key:?}");
+                }
+            }
+        }
+        assert_eq!(lease_keys_bounds(i64::MAX).1, Bound::Excluded(i64::MIN.to_be_bytes().to_vec()));
+        assert_eq!(lease_keys_bounds(-1).1, Bound::Unbounded);
+    }
 }
