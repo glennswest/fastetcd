@@ -1808,9 +1808,14 @@ Tracked live in the Claude task system. Snapshot of the order:
     8-byte prefix as a signed i64, but the table orders raw bytes:
     i64::MAX got an unbounded end (every negative lease's keys too),
     -1 an end of 0, below its start.
-    - [ ] Successor as a u64 over the encoded bits; unbounded only for
+    - [x] Successor as a u64 over the encoded bits; unbounded only for
       0xFF..FF (-1).
-    - [ ] Tests: bounds for 0, 1, i64::MAX, -1, i64::MIN, -5; store:
+    - [x] Tests: bounds for 0, 1, i64::MAX, -1, i64::MIN, -5; store:
       revoke and TTL-with-keys for -1, i64::MAX and a negative lease
       leave the others' keys; gRPC authz: revoking the i64::MAX lease
       is not judged by a negative lease's keys, and revoking -1 is.
+    - [x] sc-build workspace (e02c3f1): the first build failed both runs
+      on #237's MoveLeader test, which fails about 1 run in 5 alone on
+      52fab2c too (4/20; e02c3f1 5/20); the rebuild passed, no warnings.
+      Negative control: the three tests with the signed successor
+      (976f438) fail. Release 1.43.4.
