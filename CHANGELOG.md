@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### 2026-11-21
-- **fix:** `RoleGrantPermission` on a key and range_end a role already has replaces that permission's type, as etcd's does (#214, finding d7b5308df357). It added a second permission, and any covering one allowed an access, so granting READ over READWRITE left writes allowed. A role stored with such duplicates is read as its last grant of each key/range (authorization and RoleGet), and its next grant of that range collapses them.
-
 ### 2026-11-20
 - **docs:** etcd's robustness suite runs against fastetcd (#195): no scenario passes yet; it found #220 (a key's Version too low after compaction), #222 (clientv3 loops on a watch at a compacted revision), #223 (spurious watch gap warning on a new store), and 3-member write latency past its timeout (#204). `tests/robustness/replay.py` checks a failed scenario's histories; `run.sh` returns reports, go test's log and member logs as an artifact. 02-testing 3b.
 - **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
@@ -38,6 +35,11 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.43.3] — 2026-11-21
+
+### Fixed
+- **fix:** `RoleGrantPermission` on a key and range_end a role already has replaces that permission's type, as etcd's does (#214, finding d7b5308df357). It added a second permission, and any covering one allowed an access, so granting READ over READWRITE left writes allowed. A role stored with such duplicates is read as its last grant of each key/range (authorization and RoleGet), and its next grant of that range collapses them.
 
 ## [v1.43.2] — 2026-11-21
 

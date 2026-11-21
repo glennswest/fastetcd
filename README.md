@@ -10,7 +10,7 @@ B-tree.
 
 ## Status
 
-`v1.43.2` (see `CHANGELOG.md`). What works today, all through Raft,
+`v1.43.3` (see `CHANGELOG.md`). What works today, all through Raft,
 single- and multi-member, with linearizable reads by default:
 
 - The etcd v3 gRPC API: KV (Range, Put, DeleteRange, Txn, Compact),

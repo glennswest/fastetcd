@@ -10,7 +10,8 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.43.2`** — a snapshot install clears whole tables (#213). 1.43.1:
+**`1.43.3`** — a permission grant on the same key/range replaces its
+type (#214). 1.43.2: a snapshot install clears whole tables (#213). 1.43.1:
 a LeaseGrant of an existing id is refused (etcd's
 `lease already exists`); a watch replay reads history and the compact
 revision as one view (#212). 1.43.0: members are dialed at their address in the replicated
