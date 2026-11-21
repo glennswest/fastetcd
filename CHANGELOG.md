@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-21
-- **fix:** `cargo clippy --all-targets -D warnings` is clean again (#239): the forwarder's per-member client map names its value as a `DialedClient` alias (clippy `type_complexity`, from #211).
+- **fix:** `cargo clippy --all-targets -D warnings` is clean again (#239): the forwarder's per-member client map names its value as a `DialedClient` alias (clippy `type_complexity`), and membership sync lets its guards auto-deref (`explicit_auto_deref`); both from #211.
 - **fix:** A lease TTL too large for a monotonic deadline no longer kills lease expiry (#218, finding d103e96b1b1d). LeaseGrant took any positive TTL and the leader's lessor added it to an `Instant` unchecked: a TTL of `i64::MAX` s panicked the expiry sweeper for good (no lease expired again, on this leader or on any later one, since the lease is persisted). A grant above etcd's maximum (9e9 s) is now refused as etcd refuses it (`OutOfRange`, `etcdserver: too large lease TTL`), and the lessor's deadlines are checked: a lease already persisted with a larger TTL is held at 9e9 s.
 - **fix:** A background rewrite whose directory sync failed after the rename left the engine on the old, unlinked data file (#217, finding 4885dd489d4d): the handle was swapped only after the sync, so the error returned with the old one, and every later write and checkpoint went to an inode a restart never opens, while the WAL that could replay them was purged. The rename is now the switch (the new handle is installed at once), and a failed directory sync fails closed: every commit, streamed commit and sync retries the sync first and is refused until it succeeds.
 

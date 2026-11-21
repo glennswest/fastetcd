@@ -394,7 +394,7 @@ pub fn follow_membership(
                 {
                     let mut p = peers.write().await;
                     let mut d = directory.write().await;
-                    reconcile(&mut *p, &mut *d, &nodes, &voters, &gone, self_id);
+                    reconcile(&mut p, &mut d, &nodes, &voters, &gone, self_id);
                 }
                 if !nodes.is_empty() {
                     known = members;
