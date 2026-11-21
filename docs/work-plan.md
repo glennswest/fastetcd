@@ -1802,3 +1802,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       control: the storage and gRPC tests with grants appended again
       (ddc206c) fail (READWRITE and READ both kept; the put after the
       downgrade succeeds). Release 1.43.3.
+
+107. **Lease key range for i64::MAX and negative ids (#215, finding
+    fb3adfe70c94).** `lease_keys_bounds` took the successor of the
+    8-byte prefix as a signed i64, but the table orders raw bytes:
+    i64::MAX got an unbounded end (every negative lease's keys too),
+    -1 an end of 0, below its start.
+    - [ ] Successor as a u64 over the encoded bits; unbounded only for
+      0xFF..FF (-1).
+    - [ ] Tests: bounds for 0, 1, i64::MAX, -1, i64::MIN, -5; store:
+      revoke and TTL-with-keys for -1, i64::MAX and a negative lease
+      leave the others' keys; gRPC authz: revoking the i64::MAX lease
+      is not judged by a negative lease's keys, and revoking -1 is.
