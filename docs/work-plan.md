@@ -1783,3 +1783,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       one failure was #236's checkpoint-stall flake, unrelated); negative
       control: the install test on the old bound (1fe8e3e) fails with
       `missing KvRecord` for the 64 0xFF key. Release 1.43.2.
+
+106. **RoleGrantPermission appended (#214, finding d7b5308df357).**
+    Granting READ on a key/range a role already had READWRITE on added
+    a second permission; any covering one allowed the access, so the
+    downgrade did nothing. etcd replaces the type for an identical
+    key and range_end.
+    - [ ] `StoredRole::grant`: replace every permission with the same
+      key and range_end by the new one (duplicates collapsed), else
+      append.
+    - [ ] Roles stored with duplicates before the fix: read with the last
+      grant of a key/range winning (`StoredRole::effective`), in authz
+      and in RoleGet, so no migration is needed.
+    - [ ] Tests: storage (grant over a grant, stored duplicates); gRPC:
+      READWRITE then READ on the same range refuses Put and DeleteRange
+      at once, Range still allowed, RoleGet shows one READ.
