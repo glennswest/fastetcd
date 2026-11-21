@@ -163,10 +163,11 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for GrpcNetworkFactory {
     async fn new_client(
         &mut self,
         target: NodeId,
-        _node: &openraft::BasicNode,
+        node: &openraft::BasicNode,
     ) -> Self::Network {
         GrpcNetwork {
             target,
+            addr: node.addr.clone(),
             peers: self.peers.clone(),
             tls: self.tls.clone(),
             dial: self.dial,
@@ -175,11 +176,34 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for GrpcNetworkFactory {
     }
 }
 
+/// The membership change that moves `node_id` to `addr` (MemberUpdate,
+/// fastetcd#211): its `BasicNode` replaced, its voter or learner role
+/// kept.
+pub fn set_node_addr(node_id: NodeId, addr: &str) -> openraft::ChangeMembers<NodeId, openraft::BasicNode> {
+    openraft::ChangeMembers::SetNodes([(node_id, openraft::BasicNode::new(addr))].into_iter().collect())
+}
+
+/// The URL raft dials `target` at: its replicated `addr`, or the peers
+/// map's entry when the membership holds no address (fastetcd#211).
+pub async fn route(addr: &str, target: NodeId, peers: &PeerEndpoints) -> Option<String> {
+    if !addr.is_empty() {
+        return Some(addr.to_string());
+    }
+    peers.read().await.get(&target).cloned()
+}
+
 /// Per-peer network handle. Lazily dials the first time it's used and
 /// caches the tonic `Channel`; reconnect is a fresh dial on the next
 /// call after an error.
 pub struct GrpcNetwork {
     target: NodeId,
+    /// The target's address in the replicated membership, as openraft
+    /// hands it to `new_client` (fastetcd#211). openraft builds a new
+    /// client when the membership changes, so an address replicated by
+    /// MemberUpdate is dialed from then on.
+    addr: String,
+    /// Consulted only when `addr` is empty: a cluster bootstrapped
+    /// before 1.0 initialized its members with no address (#4).
     peers: PeerEndpoints,
     tls: PeerTls,
     dial: DialOptions,
@@ -197,14 +221,12 @@ impl GrpcNetwork {
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        let peers = self.peers.read().await;
-        let url = peers.get(&self.target).cloned().ok_or_else(|| {
+        let url = route(&self.addr, self.target, &self.peers).await.ok_or_else(|| {
             RPCError::Network(NetworkError::new(&std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("no peer URL for node {}", self.target),
             )))
         })?;
-        drop(peers);
         let chan = dial_peer_with(&url, &self.tls, self.dial)
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
@@ -338,7 +360,10 @@ pub struct WriteForwarder {
     peers: PeerEndpoints,
     tls: PeerTls,
     dial: DialOptions,
-    clients: Arc<RwLock<HashMap<NodeId, pb::raft_peer_client::RaftPeerClient<Channel>>>>,
+    /// One channel per member, with the URL it was dialed at: a member
+    /// whose route has changed (MemberUpdate, fastetcd#211) is dialed
+    /// again at its new one.
+    clients: Arc<RwLock<HashMap<NodeId, (String, pb::raft_peer_client::RaftPeerClient<Channel>)>>>,
 }
 
 impl WriteForwarder {
@@ -366,9 +391,6 @@ impl WriteForwarder {
         &self,
         target: NodeId,
     ) -> Result<pb::raft_peer_client::RaftPeerClient<Channel>, String> {
-        if let Some(c) = self.clients.read().await.get(&target) {
-            return Ok(c.clone());
-        }
         let url = self
             .peers
             .read()
@@ -376,9 +398,14 @@ impl WriteForwarder {
             .get(&target)
             .cloned()
             .ok_or_else(|| format!("no peer URL for node {target}"))?;
+        if let Some((at, c)) = self.clients.read().await.get(&target) {
+            if *at == url {
+                return Ok(c.clone());
+            }
+        }
         let chan = dial_peer_with(&url, &self.tls, self.dial).await.map_err(|e| e.to_string())?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
-        self.clients.write().await.insert(target, cli.clone());
+        self.clients.write().await.insert(target, (url, cli.clone()));
         Ok(cli)
     }
 
@@ -859,6 +886,20 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
+            crate::types::MembershipChange::SetNodeAddr { node_id, addr } => {
+                // SetNodes adds a node it does not find, as a learner:
+                // only a member is moved.
+                let known = self.raft.metrics().borrow().membership_config.membership().get_node(&node_id).is_some();
+                if known {
+                    self.raft
+                        .change_membership(set_node_addr(node_id, &addr), false)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                } else {
+                    Err(format!("member {node_id:x} not found"))
+                }
+            }
         };
         let data = bincode::serialize(&result)
             .map_err(|e| Status::internal(format!("encode response: {e}")))?;

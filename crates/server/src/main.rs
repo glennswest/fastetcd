@@ -1241,11 +1241,10 @@ async fn main() -> anyhow::Result<()> {
     // otherwise defaults every member's `Node` to `BasicNode::default()`
     // (empty `addr`), which is the root cause of #4: a follower that
     // needs to forward a client write has no address for the leader
-    // in its raft membership. fastetcd's own peer transport
-    // (`GrpcNetworkFactory`) doesn't actually dial through this addr
-    // — it resolves peers via the separate `peers` map below — but
-    // openraft's own `ForwardToLeader` error surfaces this addr to
-    // operators/logs, so it should be real regardless.
+    // in its raft membership. Since #211 the peer transport
+    // (`GrpcNetworkFactory`) dials this addr; the `peers` map below
+    // (seeded here, then kept to the applied membership by
+    // `cluster::follow_membership`) routes forwarded requests.
     let own_peer_url = split_list(
         args.initial_advertise_peer_urls
             .as_deref()
@@ -1603,6 +1602,9 @@ async fn main() -> anyhow::Result<()> {
         peers.clone(),
         directory.clone(),
     );
+    // Routes and MemberList follow the applied raft membership, not
+    // only `--initial-cluster` and this member's own Cluster RPCs (#211).
+    let _membership_routes = fastetcd_server::cluster::follow_membership(raft.clone(), peers.clone(), directory.clone(), node_id);
     let maintenance = MaintenanceService::new(server_state.clone());
     let watch = WatchService::new(server_state.clone())
         .with_progress_notify_interval(args.watch_progress_notify_interval);

@@ -54,6 +54,11 @@ pub enum MembershipChange {
     /// Replace the voter set wholesale. Used for promotion (MemberAdd
     /// of a voter, MemberPromote) and removal (MemberRemove).
     SetVoters { voters: Vec<NodeId> },
+    /// Move member `node_id` to `addr` in the replicated membership
+    /// (MemberUpdate, fastetcd#211). Appended last so the variants above
+    /// keep their bincode tags; a leader older than 1.43 cannot decode
+    /// it and refuses the forward.
+    SetNodeAddr { node_id: NodeId, addr: String },
 }
 
 /// A linearizable Range forwarded to the leader (#10). Carries the

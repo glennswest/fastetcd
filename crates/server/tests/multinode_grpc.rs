@@ -37,6 +37,8 @@ struct Node {
     _dir: TempDir,
     client_endpoint: String,
     raft: Raft<TypeConfig>,
+    /// The routes its forwarder and Cluster service share (#211).
+    peers: fastetcd_raft::PeerEndpoints,
 }
 
 async fn start_node(
@@ -79,10 +81,9 @@ async fn start_node(
         .await
         .unwrap();
 
-    let forwarder = fastetcd_raft::WriteForwarder::new(peers);
+    let forwarder = fastetcd_raft::WriteForwarder::new(peers.clone());
     let state = Arc::new(ServerState::new(raft.clone(), sm, 7, id, forwarder));
     let kv = KvService::new(state.clone());
-    let test_peers = fastetcd_raft::network::empty_peers();
     let test_dir: fastetcd_server::cluster::MemberDirectory =
         std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
     ClusterService::seed_self(
@@ -93,7 +94,9 @@ async fn start_node(
         vec![format!("http://client-{id}:0")],
     )
     .await;
-    let cluster_svc = ClusterService::new(state.clone(), id, test_peers, test_dir);
+    // As main does: routes and MemberList follow the membership (#211).
+    fastetcd_server::cluster::follow_membership(raft.clone(), peers.clone(), test_dir.clone(), id);
+    let cluster_svc = ClusterService::new(state.clone(), id, peers.clone(), test_dir);
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let peer_mvcc = state.sm.mvcc().clone();
@@ -146,6 +149,7 @@ async fn start_node(
         _dir: dir,
         client_endpoint: format!("http://{client_addr}"),
         raft,
+        peers,
     }
 }
 
@@ -430,6 +434,170 @@ async fn membership_changes_forward_from_a_follower() {
 
     let _ = n2;
     let _ = n3;
+}
+
+/// Wait until `n` serves `key` with `value` from its own state machine.
+async fn wait_for_value(n: &Node, key: &[u8], value: &[u8], what: &str) {
+    let mut kv = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let r = kv
+            .range(pb::RangeRequest { key: key.to_vec(), serializable: true, ..Default::default() })
+            .await
+            .unwrap()
+            .into_inner();
+        if r.kvs.first().map(|kv| kv.value.as_slice()) == Some(value) {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{what}: never served");
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until `n` leads, or another member it knows of does; the leader.
+async fn wait_for_leader(n: &Node, not: NodeId) -> NodeId {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(l) = n.raft.metrics().borrow().current_leader {
+            if l != not {
+                return l;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no new leader in 20 s");
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// fastetcd#211 (finding 77b6d12bfcd4): a member added through one
+/// leader is replicated to by another. Before, raft dialed through a
+/// map seeded from the initial members and changed only by the Cluster
+/// RPC a member served itself, so the next leader had no route to the
+/// new member and it never received another entry. Also #208's
+/// 0f514801e95b: MemberUpdate through a follower moves the address in
+/// the replicated membership, so the leader dials the new one.
+#[tokio::test]
+async fn a_member_added_through_one_leader_is_replicated_to_by_the_next() {
+    use fastetcd_proto::etcdserverpb::cluster_client::ClusterClient;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let p4 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let all: BTreeMap<NodeId, openraft::BasicNode> =
+        members.iter().map(|(id, url)| (*id, openraft::BasicNode::new(url.clone()))).collect();
+    n1.raft.initialize(all).await.unwrap();
+    let first = wait_for_leader(&n1, 0).await;
+    let by_id = |id: NodeId| match id {
+        1 => &n1,
+        2 => &n2,
+        3 => &n3,
+        other => panic!("unexpected node id {other}"),
+    };
+    let leader = by_id(first);
+    leader
+        .raft
+        .wait(Some(Duration::from_secs(10)))
+        .applied_index_at_least(Some(1), "initial membership committed")
+        .await
+        .expect("leader applies its first entry");
+
+    // MemberAdd a learner on the leader, then start it, as etcd's order is.
+    let url4 = format!("http://127.0.0.1:{p4}");
+    let mut cluster = ClusterClient::connect(leader.client_endpoint.clone()).await.unwrap();
+    let added = cluster
+        .member_add(pb::MemberAddRequest { peer_ur_ls: vec![url4.clone()], is_learner: true })
+        .await
+        .expect("MemberAdd on the leader")
+        .into_inner();
+    let id4 = added.member.expect("MemberAddResponse.member").id;
+    let mut members4 = members.clone();
+    members4.insert(id4, url4.clone());
+    let n4 = start_node(id4, &members4).await;
+
+    let mut kv = KvClient::connect(leader.client_endpoint.clone()).await.unwrap();
+    kv.put(pb::PutRequest { key: b"k".to_vec(), value: b"first".to_vec(), ..Default::default() })
+        .await
+        .unwrap();
+    wait_for_value(&n4, b"k", b"first", "the first leader's write on the new member").await;
+
+    // Every original member routes to it and lists it, the two that did
+    // not serve the MemberAdd included.
+    for n in [&n1, &n2, &n3] {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while n.peers.read().await.get(&id4) != Some(&url4) {
+            assert!(tokio::time::Instant::now() < deadline, "{}: no route to {id4:x}", n.client_endpoint);
+            sleep(Duration::from_millis(50)).await;
+        }
+        let list = ClusterClient::connect(n.client_endpoint.clone())
+            .await
+            .unwrap()
+            .member_list(pb::MemberListRequest::default())
+            .await
+            .unwrap()
+            .into_inner();
+        let row = list.members.iter().find(|m| m.id == id4).expect("MemberList has the new member");
+        assert_eq!(row.peer_ur_ls, vec![url4.clone()]);
+        assert!(row.is_learner);
+    }
+
+    // The first leader stops; another original voter leads.
+    leader.raft.shutdown().await.unwrap();
+    let others: Vec<&Node> = [&n1, &n2, &n3].into_iter().filter(|n| !std::ptr::eq(*n, leader)).collect();
+    let second = wait_for_leader(others[0], first).await;
+    assert_ne!(second, id4, "the learner does not lead");
+    let next = by_id(second);
+    let mut kv = KvClient::connect(next.client_endpoint.clone()).await.unwrap();
+    kv.put(pb::PutRequest { key: b"k".to_vec(), value: b"second".to_vec(), ..Default::default() })
+        .await
+        .expect("put on the second leader");
+    wait_for_value(&n4, b"k", b"second", "the second leader's write on the new member").await;
+
+    // MemberUpdate through the follower: the leader's membership moves.
+    let follower = others.iter().copied().find(|n| !std::ptr::eq(*n, next)).unwrap();
+    let mut fc = ClusterClient::connect(follower.client_endpoint.clone()).await.unwrap();
+    let nowhere = "http://127.0.0.1:1".to_string();
+    fc.member_update(pb::MemberUpdateRequest { id: id4, peer_ur_ls: vec![nowhere.clone()] })
+        .await
+        .expect("MemberUpdate through a follower");
+    let addr_on = |n: &Node| {
+        n.raft.metrics().borrow().membership_config.membership().get_node(&id4).map(|b| b.addr.clone())
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while addr_on(next) != Some(nowhere.clone()) {
+        assert!(tokio::time::Instant::now() < deadline, "the leader's membership did not move");
+        sleep(Duration::from_millis(50)).await;
+    }
+    // And back: the leader dials the new address, and replicates again.
+    fc.member_update(pb::MemberUpdateRequest { id: id4, peer_ur_ls: vec![url4.clone()] })
+        .await
+        .expect("MemberUpdate back");
+    kv.put(pb::PutRequest { key: b"k".to_vec(), value: b"third".to_vec(), ..Default::default() })
+        .await
+        .unwrap();
+    wait_for_value(&n4, b"k", b"third", "a write after MemberUpdate moved it back").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while follower.peers.read().await.get(&id4) != Some(&url4) {
+        assert!(tokio::time::Instant::now() < deadline, "the follower's route did not move back");
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    // A member that is not in the membership is NotFound, as in etcd.
+    let err = fc
+        .member_update(pb::MemberUpdateRequest { id: 0x1234, peer_ur_ls: vec![nowhere] })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+    assert_eq!(err.message(), "etcdserver: member not found");
 }
 
 /// Reproduction for #10: a single client doing sequential

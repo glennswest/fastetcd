@@ -399,6 +399,27 @@ impl ServerState {
         }
     }
 
+    /// Move member `node_id` to `addr` in the replicated membership
+    /// (MemberUpdate, fastetcd#211), forwarding to the leader if this
+    /// node isn't it. The caller checks that `node_id` is a member.
+    pub async fn propose_set_node_addr(
+        &self,
+        node_id: fastetcd_raft::NodeId,
+        addr: &str,
+    ) -> Result<(), Status> {
+        let change = fastetcd_raft::network::set_node_addr(node_id, addr);
+        match self.raft.change_membership(change, false).await {
+            Ok(_) => Ok(()),
+            Err(e) => self
+                .forward_membership(
+                    &e,
+                    MembershipChange::SetNodeAddr { node_id, addr: addr.to_string() },
+                )
+                .await
+                .unwrap_or_else(|| Err(Status::unavailable(format!("raft change_membership: {e}")))),
+        }
+    }
+
     /// If `err` is a `ForwardToLeader` naming a leader, send `change`
     /// there and return the outcome. `None` means the error wasn't a
     /// forwardable one (or no leader is known yet), so the caller

@@ -28,6 +28,8 @@ pub const ROLE_ALREADY_EXIST: &str = "etcdserver: role name already exists";
 pub const ROLE_EMPTY: &str = "etcdserver: role name is empty";
 pub const ROOT_USER_NOT_EXIST: &str = "etcdserver: root user does not exist";
 pub const PERMISSION_NOT_GIVEN: &str = "etcdserver: permission not given";
+// Cluster (#211): `ErrGRPCMemberNotFound`, codes.NotFound.
+pub const MEMBER_NOT_FOUND: &str = "etcdserver: member not found";
 // MoveLeader (#57).
 pub const NOT_LEADER: &str = "etcdserver: not leader";
 pub const BAD_LEADER_TRANSFEREE: &str = "etcdserver: bad leader transferee";
