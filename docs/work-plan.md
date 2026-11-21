@@ -1789,12 +1789,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     a second permission; any covering one allowed the access, so the
     downgrade did nothing. etcd replaces the type for an identical
     key and range_end.
-    - [ ] `StoredRole::grant`: replace every permission with the same
+    - [x] `StoredRole::grant`: replace every permission with the same
       key and range_end by the new one (duplicates collapsed), else
       append.
-    - [ ] Roles stored with duplicates before the fix: read with the last
+    - [x] Roles stored with duplicates before the fix: read with the last
       grant of a key/range winning (`StoredRole::effective`), in authz
       and in RoleGet, so no migration is needed.
-    - [ ] Tests: storage (grant over a grant, stored duplicates); gRPC:
+    - [x] Tests: storage (grant over a grant, stored duplicates); gRPC:
       READWRITE then READ on the same range refuses Put and DeleteRange
       at once, Range still allowed, RoleGet shows one READ.
+    - [x] sc-build workspace (0f916b5, passed, no warnings); negative
+      control: the storage and gRPC tests with grants appended again
+      (ddc206c) fail (READWRITE and READ both kept; the put after the
+      downgrade succeeds). Release 1.43.3.
