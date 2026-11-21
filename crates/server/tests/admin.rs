@@ -43,7 +43,7 @@ async fn backup_then_restore_round_trips_and_guards_newer() {
     let rev1 = seed(dir.path(), 5).await;
 
     let backup = dir.path().join("snap.redb");
-    admin::cmd_backup(dir.path(), &backup).await.unwrap();
+    admin::cmd_backup(dir.path(), 1, &backup).await.unwrap();
     assert!(backup.exists() && backup.metadata().unwrap().len() > 0);
 
     // Advance the live dir past the backup.
@@ -107,7 +107,7 @@ async fn backup_refuses_while_locked() {
 
     let out = dir.path().join("snap.redb");
     assert!(
-        admin::cmd_backup(dir.path(), &out).await.is_err(),
+        admin::cmd_backup(dir.path(), 1, &out).await.is_err(),
         "backup must refuse while the data file is locked by another opener"
     );
 }

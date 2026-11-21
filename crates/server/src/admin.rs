@@ -310,13 +310,29 @@ fn sanitize(v: &str) -> String {
 /// the data file exclusively first, so it refuses while the server holds
 /// it (a raw copy of a live db would be inconsistent — use
 /// `fastetcd-ctl snapshot-save` for a hot backup).
-pub async fn cmd_backup(data_dir: &Path, out: &Path) -> anyhow::Result<()> {
+///
+/// An acknowledged write can be durable in the raft WAL and not yet
+/// checkpointed into the data file (a member killed before its
+/// checkpoint): a restart replays it from the WAL, but a restore moves
+/// the WAL aside. So the backup first brings the data file up to date
+/// as a start would ([`catch_up_from_wal`], fastetcd#210), then copies it.
+pub async fn cmd_backup(data_dir: &Path, node_id: NodeId, out: &Path) -> anyhow::Result<()> {
     let src = data_file(data_dir);
     if !src.exists() {
         anyhow::bail!("no data directory at {}", src.display());
     }
     // Opening validates the file and proves no other process holds it.
-    let engine = open_or_hint(&src)?;
+    let engine: Arc<dyn KvStore> = Arc::new(open_or_hint(&src)?);
+    if let Some(c) = catch_up_from_wal(data_dir, engine.clone(), node_id).await? {
+        if c.applied_after > c.applied_before {
+            println!(
+                "backup: applied raft log entries {}..={} from {} (written, not yet checkpointed)",
+                c.applied_before + 1,
+                c.applied_after,
+                wal_dir(data_dir).display()
+            );
+        }
+    }
     let bytes = std::fs::copy(&src, out)?;
     drop(engine);
     println!(
@@ -591,6 +607,152 @@ pub async fn cmd_fsck(
 }
 
 // ---------------- helpers ----------------
+
+/// How far [`catch_up_from_wal`] brought the data file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatchUp {
+    /// The last raft log index applied in the data file before, and after.
+    pub applied_before: u64,
+    pub applied_after: u64,
+}
+
+/// How long [`catch_up_from_wal`] waits for the replay.
+const CATCH_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Apply to the data file what the raft WAL holds beyond it, as this
+/// member's next start would (fastetcd#210), with no peers: openraft's
+/// own startup over the member's log and state machine, elections and
+/// heartbeats off. A member that is the sole voter commits and applies
+/// its whole log, as on a restart; any other member applies
+/// up to the commit index it saved, and the leader replicates the rest
+/// when it rejoins. `None` when there is no WAL (a data dir from before
+/// fastetcd#85 keeps its log in the data file, and the copy carries it).
+pub async fn catch_up_from_wal(
+    data_dir: &Path,
+    engine: Arc<dyn KvStore>,
+    node_id: NodeId,
+) -> anyhow::Result<Option<CatchUp>> {
+    use openraft::storage::RaftStateMachine;
+    let wal = wal_dir(data_dir);
+    if !wal.is_dir() {
+        return Ok(None);
+    }
+    let mvcc = MvccStore::open(engine.clone()).await?;
+    let sm = FastetcdStateMachine::open(mvcc, data_dir.join("snapshots")).await?;
+    let mut log = WalLogStore::open(&wal, engine, WalLogOptions::default()).await?;
+    let applied_index = |sm: &FastetcdStateMachine| {
+        let mut sm = sm.clone();
+        async move { sm.applied_state().await.map(|(a, _)| a.map_or(0, |l| l.index)) }
+    };
+    let applied_before = applied_index(&sm).await?;
+    let state = log.get_log_state().await?;
+    let committed = log.read_committed().await?.map_or(0, |l| l.index);
+    let last = state.last_log_id.map_or(0, |l| l.index);
+    if last <= applied_before {
+        return Ok(Some(CatchUp { applied_before, applied_after: applied_before }));
+    }
+    let config = openraft::Config {
+        enable_heartbeat: false,
+        enable_elect: false,
+        snapshot_policy: openraft::SnapshotPolicy::Never,
+        ..Default::default()
+    }
+    .validate()?;
+    let raft = openraft::Raft::<TypeConfig>::new(node_id, Arc::new(config), OfflinePeers, log, sm.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("raft over the data dir: {e}"))?;
+    // Once openraft's startup has run: a member that was leader with a
+    // quorum of itself is restored as leader and commits its whole log;
+    // a sole voter that was not elects itself, as on a restart. Any other
+    // member applies what it knew to be committed.
+    let (was_leader, sole_voter, members) = raft
+        .with_raft_state(move |st| {
+            let v = st.vote_ref();
+            let m = st.membership_state.effective();
+            let voters: Vec<NodeId> = m.voter_ids().collect();
+            let members: Vec<NodeId> = m.nodes().map(|(id, _)| *id).collect();
+            (v.is_committed() && v.leader_id().voted_for() == Some(node_id), voters == [node_id], members)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("raft over the data dir: {e}"))?;
+    if !members.contains(&node_id) {
+        let _ = raft.shutdown().await;
+        anyhow::bail!(
+            "node id {node_id} is not a member of this data dir (members {members:?}), so it \
+             cannot tell what its WAL commits: pass the member's --name (or --node-id), as \
+             the server is started with"
+        );
+    }
+    if sole_voter && !was_leader {
+        raft.trigger().elect().await.map_err(|e| anyhow::anyhow!("raft over the data dir: {e}"))?;
+    }
+    let target = if sole_voter { last } else { committed.max(applied_before) };
+    let waited = raft
+        .wait(Some(CATCH_UP_TIMEOUT))
+        .metrics(|m| m.last_applied.map_or(0, |l| l.index) >= target, "WAL replayed")
+        .await;
+    let _ = raft.shutdown().await;
+    if let Err(e) = waited {
+        anyhow::bail!(
+            "the data file is behind the raft WAL (applied {applied_before}, log at {last}) \
+             and the replay did not reach {target}: {e}. Start the member once to bring it \
+             up to date, stop it, and back up again"
+        );
+    }
+    let applied_after = applied_index(&sm).await?;
+    Ok(Some(CatchUp { applied_before, applied_after }))
+}
+
+/// The peers of an offline replay: none. Elections and heartbeats are
+/// off, so nothing is sent; a call that is made fails as unreachable.
+#[derive(Clone)]
+struct OfflinePeers;
+
+fn offline<E: std::error::Error>() -> openraft::error::RPCError<NodeId, BasicNode, E> {
+    openraft::error::RPCError::Unreachable(openraft::error::Unreachable::new(&std::io::Error::other(
+        "offline: no peers",
+    )))
+}
+
+impl openraft::network::RaftNetworkFactory<TypeConfig> for OfflinePeers {
+    type Network = OfflinePeers;
+    async fn new_client(&mut self, _target: NodeId, _node: &BasicNode) -> Self::Network {
+        OfflinePeers
+    }
+}
+
+type RaftRpcError = openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId>>;
+
+impl openraft::network::RaftNetwork<TypeConfig> for OfflinePeers {
+    async fn append_entries(
+        &mut self,
+        _: openraft::raft::AppendEntriesRequest<TypeConfig>,
+        _: openraft::network::RPCOption,
+    ) -> Result<openraft::raft::AppendEntriesResponse<NodeId>, RaftRpcError> {
+        Err(offline())
+    }
+    async fn install_snapshot(
+        &mut self,
+        _: openraft::raft::InstallSnapshotRequest<TypeConfig>,
+        _: openraft::network::RPCOption,
+    ) -> Result<
+        openraft::raft::InstallSnapshotResponse<NodeId>,
+        openraft::error::RPCError<
+            NodeId,
+            BasicNode,
+            openraft::error::RaftError<NodeId, openraft::error::InstallSnapshotError>,
+        >,
+    > {
+        Err(offline())
+    }
+    async fn vote(
+        &mut self,
+        _: openraft::raft::VoteRequest<NodeId>,
+        _: openraft::network::RPCOption,
+    ) -> Result<openraft::raft::VoteResponse<NodeId>, RaftRpcError> {
+        Err(offline())
+    }
+}
 
 fn open_or_hint(src: &Path) -> anyhow::Result<RedbEngine> {
     RedbEngine::open(src).map_err(|e| {

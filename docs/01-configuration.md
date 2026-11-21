@@ -179,7 +179,7 @@ exclusively and refuses if it is in use.
 
 | Command | Does |
 |---|---|
-| `fastetcd backup --out <file>` | Consistent single-file copy of the store. |
+| `fastetcd backup --out <file>` | Consistent single-file copy of the store (server stopped). First applies what the raft WAL holds beyond the data file, as a start would (#210); give it the member's `--name`/`--node-id`. |
 | `fastetcd restore <backup> [--force]` | Restore a backup (either format) over the data dir; refuses a newer dir without `--force`; keeps the old file as `fastetcd.redb.replaced-*`. |
 | `fastetcd fsck [--repair]` | Check structure, format version, raft membership and MVCC counters; `--repair` fixes the raft/format metadata. |
 | `fastetcd defrag` | Return freed pages to the filesystem; works on a full volume with no quorum. |

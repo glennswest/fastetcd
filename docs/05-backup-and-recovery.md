@@ -157,11 +157,17 @@ newer store without `--force`, and keeps the current file as
 the same way. The raft snapshots and WAL that went with the replaced
 file are moved to `snapshots.replaced-<ts>` and `wal.replaced-<ts>`.
 
-`fastetcd backup` copies the data file only. The data file is durable as
-of its last checkpoint (#85): a server stopped cleanly checkpoints on the
-way out, but one that was killed has its last ~100 ms of applies only in
-the WAL. Start and stop it once before an offline backup if it was not
-stopped cleanly. Restoring onto a node with a different identity needs
+`fastetcd backup` writes one file, the data file. The data file is
+durable as of its last checkpoint (#85): a server stopped cleanly
+checkpoints on the way out, but one that was killed has its last ~100 ms
+of applies only in the WAL. So the backup first applies to the data file
+what the WAL holds beyond it, as the member's next start would (#210):
+the sole voter of a cluster of one applies its whole log, any other
+member up to the commit index it saved (the leader sends it the rest
+when it rejoins). It prints the entries it applied. It needs the
+member's own `--name` (or `--node-id`), as the server is started with,
+and refuses with a node id that is not a member of the data dir.
+Restoring onto a node with a different identity needs
 `--force-new-cluster` on its first start, as with etcd.
 
 ## redb quick-repair commits (two-phase commit) since 1.37.0

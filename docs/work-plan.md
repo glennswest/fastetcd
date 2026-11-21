@@ -1695,3 +1695,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       migrates `--force`, restarts twice.
     - [x] sc-build: workspace (9e27280, passed) + `tests/migrate_e2e.sh`
       (passed); the same e2e on the old migrate fails (3 old keys replay).
+
+101. **Offline backup misses WAL-only writes (#210, finding
+    76dc21f6cb5f).** `fastetcd backup` copied `fastetcd.redb`, durable
+    only as of its last checkpoint; restore moves the WAL aside.
+    - [x] `admin::catch_up_from_wal`: openraft over the member's WAL and
+      state machine, no peers, elections/heartbeats off; sole voter
+      applies its whole log (elects itself if it was not leader), others
+      up to their saved committed index; refuses a node id that is not a
+      member. `cmd_backup` runs it before the copy.
+    - [x] Test: `apply_replay::an_offline_backup_after_sigkill_holds_every_acknowledged_put`
+      (SIGKILL after 100 puts, data file behind, `fastetcd backup`,
+      `fastetcd restore` into a new dir, start, all 100 there).
+    - [ ] sc-build workspace; negative control on the old code.
+    - [ ] The upgrade safety backup (`backup_before_version`) copies the
+      data file before the WAL replays too: filed separately.

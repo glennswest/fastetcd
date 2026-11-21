@@ -87,3 +87,66 @@ async fn acknowledged_puts_survive_sigkill_through_log_replay() {
     }
     assert!(all.header.unwrap().revision > KEYS);
 }
+
+/// An offline backup of a member killed before its checkpoint carries
+/// every acknowledged write (fastetcd#210): `fastetcd backup` replays the
+/// WAL into the data file before copying it, so a restore, which moves
+/// the WAL aside, loses none of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offline_backup_after_sigkill_holds_every_acknowledged_put() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, mut kv) = start(dir.path()).await;
+    for i in 0..KEYS {
+        kv.put(PutRequest {
+            key: format!("k{i:03}").into_bytes(),
+            value: format!("v{i}").into_bytes(),
+            ..Default::default()
+        })
+        .await
+        .expect("put");
+    }
+    child.child.kill().await.unwrap();
+    child.child.wait().await.unwrap();
+    let on_disk = |path: std::path::PathBuf| async move {
+        let engine = RedbEngine::open(path).unwrap();
+        MvccStore::open(std::sync::Arc::new(engine)).await.unwrap().current_revision().await
+    };
+    let before = on_disk(dir.path().join("fastetcd.redb")).await;
+    eprintln!("revision on disk after SIGKILL: {before} (acknowledged: {})", KEYS + 1);
+    assert!(before <= KEYS, "every apply was on disk ({before}); this test no longer exercises the WAL");
+
+    // Offline backup, then restore it into a new data dir.
+    let backup = dir.path().join("offline.redb");
+    let fastetcd = env!("CARGO_BIN_EXE_fastetcd");
+    let out = std::process::Command::new(fastetcd)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("backup")
+        .arg("--out")
+        .arg(&backup)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "backup failed: {said}");
+    eprintln!("{said}");
+    assert_eq!(on_disk(backup.clone()).await, KEYS + 1, "the backup is at the last acknowledged put");
+
+    let restored = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(fastetcd)
+        .arg("--data-dir")
+        .arg(restored.path())
+        .arg("restore")
+        .arg(&backup)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "restore failed: {}", String::from_utf8_lossy(&out.stderr));
+    let (_child, mut kv) = start(restored.path()).await;
+    let all = kv
+        .range(RangeRequest { key: b"k".to_vec(), range_end: b"l".to_vec(), ..Default::default() })
+        .await
+        .expect("range")
+        .into_inner();
+    assert_eq!(all.count, KEYS, "every acknowledged put is in the restored member");
+    let last = all.kvs.last().unwrap();
+    assert_eq!((last.key.as_slice(), last.value.as_slice()), (format!("k{:03}", KEYS - 1).as_bytes(), format!("v{}", KEYS - 1).as_bytes()));
+}

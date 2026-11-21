@@ -856,7 +856,7 @@ async fn run_subcommand(
 ) -> anyhow::Result<()> {
     use fastetcd_server::admin;
     match command {
-        Command::Backup { out } => admin::cmd_backup(&args.data_dir, out).await,
+        Command::Backup { out } => admin::cmd_backup(&args.data_dir, node_id, out).await,
         Command::Restore { backup, force } => {
             admin::cmd_restore(&args.data_dir, backup, *force).await
         }
