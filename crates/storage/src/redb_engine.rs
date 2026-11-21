@@ -1064,9 +1064,9 @@ mod tests {
         let eng = RedbEngine::open(&path).unwrap();
         eng.commit(put_one(b"before"), WriteOptions::default()).await.unwrap();
 
-        // The rewrite's sync and the next write's both fail; the one after
-        // that succeeds.
-        eng.inner.fail_dir_syncs.store(2, Ordering::Release);
+        // The directory sync fails for the rewrite, the next commit and the
+        // sync after it; the one after that succeeds.
+        eng.inner.fail_dir_syncs.store(3, Ordering::Release);
         let err = eng.rewrite(0).await.expect_err("the rewrite reports the failed sync");
         assert!(err.to_string().contains("injected directory sync failure"), "{err}");
         assert!(!rewrite_path(&path).exists(), "the new file is the data file now");
