@@ -3,8 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-20
-- **fix:** A `LeaseGrant` of an id a lease already has is refused at apply and by the leader's precheck, `FailedPrecondition` `etcdserver: lease already exists`, as etcd's `ErrLeaseExist` (#212, finding 839965788fbf). It replaced the lease's record, so any logged-in user could reset the TTL and deadline of a lease whose keys it may not write (keep-alive and revoke check those keys). An id the server allocates skips any id a lease has. A member older than 1.43.1 cannot decode the new refusal (a write through it then answers `Unavailable`, as for #49's).
-- **fix:** A watch replay could skip history while a compaction ran (#212, finding 9078e0ee4fdf): `range_events_until` read the compact revision before taking its engine snapshot, so a compaction finishing in between let it pass the check and find a deleted key's history gone, returning no events for it; the watcher moved past them. The snapshot and revisions are now one read view (as Range's), and a start below the view's compact revision is refused as compacted.
 - **docs:** etcd's robustness suite runs against fastetcd (#195): no scenario passes yet; it found #220 (a key's Version too low after compaction), #222 (clientv3 loops on a watch at a compacted revision), #223 (spurious watch gap warning on a new store), and 3-member write latency past its timeout (#204). `tests/robustness/replay.py` checks a failed scenario's histories; `run.sh` returns reports, go test's log and member logs as an artifact. 02-testing 3b.
 - **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
 - **docs:** #195 (etcd robustness suite): owner chose (a). #160 (new stores start at revision 1, as etcd's; existing stores keep their numbering) goes first as its own release; #195 waits behind it. Work plan item 93.
@@ -37,6 +35,12 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.43.1] — 2026-11-20
+
+### Fixed
+- **fix:** A `LeaseGrant` of an id a lease already has is refused at apply and by the leader's precheck, `FailedPrecondition` `etcdserver: lease already exists`, as etcd's `ErrLeaseExist` (#212, finding 839965788fbf). It replaced the lease's record, so any logged-in user could reset the TTL and deadline of a lease whose keys it may not write (keep-alive and revoke check those keys). An id the server allocates skips any id a lease has. A member older than 1.43.1 cannot decode the new refusal (a write through it then answers `Unavailable`, as for #49's).
+- **fix:** A watch replay could skip history while a compaction ran (#212, finding 9078e0ee4fdf): `range_events_until` read the compact revision before taking its engine snapshot, so a compaction finishing in between let it pass the check and find a deleted key's history gone, returning no events for it; the watcher moved past them. The snapshot and revisions are now one read view (as Range's), and a start below the view's compact revision is refused as compacted.
 
 ## [v1.43.0] — 2026-11-20
 

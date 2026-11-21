@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.43.0`** — members are dialed at their address in the replicated
+**`1.43.1`** — a LeaseGrant of an existing id is refused (etcd's
+`lease already exists`); a watch replay reads history and the compact
+revision as one view (#212). 1.43.0: members are dialed at their address in the replicated
 membership, and routes and MemberList follow it; MemberUpdate is
 replicated (#211). 1.42: etcd's robustness suite runs against
 fastetcd (#195). 1.41: new stores start at revision 1 (#160).
