@@ -18,8 +18,9 @@
 //! given. Live delivery only sends batches at or above it. When the
 //! forwarder cannot see every batch — the broadcast channel reports
 //! `Lagged` because this stream fell behind, or a batch arrives whose
-//! revision is not the successor of the last one (a follower installing
-//! a raft snapshot, which emits no events) — each watcher is *resynced*:
+//! revision is not the successor of the last one, or the store says a
+//! raft snapshot was installed under it (which emits no events, #216) —
+//! each watcher is *resynced*:
 //! its missed events are read back from MVCC history up to the current
 //! revision, as etcd does for its unsynced watchers. If that history has
 //! been compacted, the watch is cancelled with `compact_revision` set
@@ -123,6 +124,8 @@ impl Watch for WatchService {
         // Outbound channel feeds the gRPC response stream.
         let (tx, rx) = mpsc::channel::<Result<pb::WatchResponse, Status>>(64);
         let stream_state = Arc::new(Mutex::new(WatchStreamState::new()));
+        // An install of a raft snapshot moves this, and emits no batch (#216).
+        let installs = state.sm.mvcc().installs();
         let event_rx = state.sm.mvcc().subscribe();
         // Read after subscribing: every batch above this revision is
         // guaranteed to reach `event_rx` (commits broadcast under the
@@ -138,7 +141,7 @@ impl Watch for WatchService {
             let tx = tx.clone();
             let open = GaugeHold::new(&state.traffic.watch_streams, 1);
             tokio::spawn(async move {
-                forward_events(state, stream_state.clone(), tx, event_rx, subscribed_at).await;
+                forward_events(state, stream_state.clone(), tx, event_rx, installs, subscribed_at).await;
                 // The client is gone (or the store closed): its
                 // watchers are too.
                 stream_state.lock().await.watchers.clear();
@@ -698,6 +701,7 @@ async fn forward_events(
     stream_state: Arc<Mutex<WatchStreamState>>,
     tx: mpsc::Sender<Result<pb::WatchResponse, Status>>,
     mut event_rx: tokio::sync::broadcast::Receiver<EventBatch>,
+    mut installs: tokio::sync::watch::Receiver<u64>,
     subscribed_at: i64,
 ) {
     use tokio::sync::broadcast::error::RecvError;
@@ -710,6 +714,24 @@ async fn forward_events(
         // the next send that fails (which might never come).
         let received = tokio::select! {
             r = event_rx.recv() => r,
+            r = installs.changed() => {
+                if r.is_err() {
+                    return; // the store is closing
+                }
+                // A raft snapshot was installed: its revisions came with
+                // no batches. Catch up from history now, rather than at
+                // the next write's revision gap, which may never come
+                // (#216).
+                tracing::info!(
+                    target: "fastetcd::watch",
+                    "a raft snapshot was installed under this watch stream; resyncing watchers from history"
+                );
+                match resync(&state, &stream_state, &tx).await {
+                    Ok(rev) => last_rev = last_rev.max(rev),
+                    Err(()) => return,
+                }
+                continue;
+            }
             _ = tx.closed() => return,
         };
         let batch = match received {

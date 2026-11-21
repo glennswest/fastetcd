@@ -432,6 +432,14 @@ struct Inner {
     /// [`META_KEY_CLUSTER_ID`] as the engine holds it (0: not set yet),
     /// with a watch for the server to follow it (fastetcd#38).
     cluster_id: watch::Sender<u64>,
+    /// How many times the tables were replaced under this handle (a raft
+    /// snapshot install, a reload), bumped after the reload (#216). An
+    /// install broadcasts no events, so a consumer of [`subscribe`]
+    /// that waits for one would wait forever for a change the snapshot
+    /// brought in; it watches this too, and re-reads when it moves.
+    ///
+    /// [`subscribe`]: MvccStore::subscribe
+    installs: watch::Sender<u64>,
     /// Auth's in-memory half: the enabled flag and the token set
     /// (fastetcd#32). Owned here so the state machine updates it on
     /// apply and the server's interceptor reads the same state.
@@ -583,6 +591,7 @@ impl MvccStore {
                 batched: AtomicBool::new(batched),
                 start_revision: AtomicBool::new(start_revision),
                 cluster_id: watch::channel(cluster_id).0,
+                installs: watch::channel(0).0,
                 auth: AuthMemory::default(),
                 lease_applied: std::sync::Mutex::default(),
                 ops: OpCounters::default(),
@@ -935,6 +944,14 @@ impl MvccStore {
     /// How many receivers [`subscribe`](Self::subscribe) has handed out
     /// that are still alive: a stream that outlives its client shows
     /// here (fastetcd#227).
+    /// The install counter (#216): it moves after every replacement of
+    /// the tables, which emits no event batch. Take it before the read
+    /// whose result an event wait depends on, as with
+    /// [`subscribe`](Self::subscribe).
+    pub fn installs(&self) -> watch::Receiver<u64> {
+        self.inner.installs.subscribe()
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.inner.event_tx.receiver_count()
     }
@@ -1017,6 +1034,9 @@ impl MvccStore {
         state.compact_rev = compact;
         state.next_lease_id = next_lease;
         self.inner.view.store(Revs { current, compact });
+        // After the reload: a reader that sees the count move sees the
+        // new tables (#216).
+        self.inner.installs.send_modify(|n| *n += 1);
         Ok(())
     }
 

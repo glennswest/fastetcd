@@ -1166,6 +1166,11 @@ needs write on `<name>/`):
   none), **Observe** (a stream: the leader, its changes, then the next),
   **Resign**. Errors are etcd's texts, gRPC `Unknown`, as etcd's servers
   return them.
+- A wait (Lock, Campaign, Observe) follows the member's applied events,
+  and reads again when a raft snapshot is installed under it or the
+  events skip a revision (1.43.5, #216): a key deleted inside a snapshot
+  frees the next Lock or Campaign and moves Observe on, with no write
+  after it. Watch streams resync from history at the install too.
 - clientv3's `concurrency` package used directly (the usual way) works
   too, since 1.33.1 (#154).
 

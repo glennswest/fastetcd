@@ -220,3 +220,129 @@ async fn a_lock_needs_write_on_its_prefix() {
     let root = token("root").await;
     c.lock(as_user(lock_req("lk", lease), &root)).await.expect("root locks");
 }
+
+/// Install, under this member, the raft snapshot a leader that applied
+/// deletes of `keys` would send: this member's MVCC tables with the keys
+/// deleted, as one table replacement. Nothing is broadcast, as for a real
+/// install; no write follows it.
+async fn install_snapshot_deleting(h: &common::TestServerHandles, keys: &[Vec<u8>]) {
+    use fastetcd_storage::kvstore::{KvStore, WriteBatch, WriteOptions};
+    use fastetcd_storage::mvcc::{Mutation, MvccStore};
+    use std::ops::Bound;
+    const TABLES: [&str; 3] = ["mvcc_kv", "mvcc_idx", "mvcc_meta"];
+    let mvcc = h.state.sm.mvcc();
+    let dir = tempfile::tempdir().unwrap();
+    let leader_engine: std::sync::Arc<dyn KvStore> =
+        std::sync::Arc::new(fastetcd_storage::redb_engine::RedbEngine::open(dir.path().join("leader.redb")).unwrap());
+    let mine = mvcc.engine().snapshot().await.unwrap();
+    let mut copy = WriteBatch::new();
+    for t in TABLES {
+        for (k, v) in mine.range(t, Bound::Unbounded, Bound::Unbounded, 0).await.unwrap() {
+            copy.put(t, &k, &v);
+        }
+    }
+    leader_engine.commit(copy, WriteOptions::default()).await.unwrap();
+    let leader = MvccStore::open(leader_engine.clone()).await.unwrap();
+    for key in keys {
+        leader
+            .apply(&[Mutation::DeleteRange { key: key.clone(), range_end: Vec::new(), prev_kv: false }])
+            .await
+            .unwrap();
+    }
+    let theirs = leader_engine.snapshot().await.unwrap();
+    let mut install = WriteBatch::new();
+    for t in TABLES {
+        install.clear_table(t);
+        for (k, v) in theirs.range(t, Bound::Unbounded, Bound::Unbounded, 0).await.unwrap() {
+            install.put(t, &k, &v);
+        }
+    }
+    mvcc.install_tables(install).await.unwrap();
+}
+
+/// fastetcd#216 (finding 5bbfa8faa667): a Lock waiting for its
+/// predecessor's key gets the lock when the delete arrives inside a raft
+/// snapshot, with no write after it. It waited only for a DELETE event or
+/// a lagged stream, and an install sends neither, so it waited forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_lock_follows_a_snapshot_that_deletes_its_predecessor() {
+    let h = start_test_server_full().await;
+    let (la, lb) = (grant(&h.endpoint, 60).await, grant(&h.endpoint, 60).await);
+    let mut c = LockClient::connect(h.endpoint.clone()).await.unwrap();
+    let a = c.lock(lock_req("snap", la)).await.unwrap().into_inner();
+    let waiting = {
+        let mut c = c.clone();
+        tokio::spawn(async move { c.lock(lock_req("snap", lb)).await.map(|r| r.into_inner()) })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!waiting.is_finished(), "b holds the lock while a does");
+    install_snapshot_deleting(&h, &[a.key]).await;
+    let b = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("b gets the lock once a snapshot deletes a's key")
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.key, format!("snap/{lb:x}").into_bytes());
+}
+
+/// fastetcd#216: a waiting Campaign wins, and Observe moves to the new
+/// leader, when the old leader's key is deleted inside a raft snapshot.
+/// Observe kept following the old leader; a Watch on its key gets the
+/// delete without waiting for a later write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_campaign_observe_and_watch_follow_a_snapshot_that_deletes_the_leader() {
+    use fastetcd_proto::etcdserverpb::watch_client::WatchClient;
+    use fastetcd_proto::mvccpb;
+    let h = start_test_server_full().await;
+    let (la, lb) = (grant(&h.endpoint, 60).await, grant(&h.endpoint, 60).await);
+    let mut c = ElectionClient::connect(h.endpoint.clone()).await.unwrap();
+    let leader_a = c.campaign(campaign("snapel", la, "a")).await.unwrap().into_inner().leader.unwrap();
+    let mut observe = c.observe(epb::LeaderRequest { name: b"snapel".to_vec() }).await.unwrap().into_inner();
+    assert_eq!(next(&mut observe).await, "a");
+    let b_campaign = {
+        let mut c = c.clone();
+        tokio::spawn(async move { c.campaign(campaign("snapel", lb, "b")).await.map(|r| r.into_inner()) })
+    };
+    // A watch on a's key, created before the install.
+    let (wtx, wrx) = tokio::sync::mpsc::channel(4);
+    wtx.send(pb::WatchRequest {
+        request_union: Some(pb::watch_request::RequestUnion::CreateRequest(pb::WatchCreateRequest {
+            key: leader_a.key.clone(),
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    let mut watch = WatchClient::connect(h.endpoint.clone())
+        .await
+        .unwrap()
+        .watch(tokio_stream::wrappers::ReceiverStream::new(wrx))
+        .await
+        .unwrap()
+        .into_inner();
+    let created = tokio::time::timeout(Duration::from_secs(10), watch.message()).await.unwrap().unwrap().unwrap();
+    assert!(created.created);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!b_campaign.is_finished(), "b is elected while a leads");
+
+    install_snapshot_deleting(&h, std::slice::from_ref(&leader_a.key)).await;
+    let b = tokio::time::timeout(Duration::from_secs(10), b_campaign)
+        .await
+        .expect("b is elected once a snapshot deletes a's key")
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.leader.unwrap().key, format!("snapel/{lb:x}").into_bytes());
+    assert_eq!(next(&mut observe).await, "b", "observe moves to the new leader");
+    let deleted = loop {
+        let m = tokio::time::timeout(Duration::from_secs(10), watch.message())
+            .await
+            .expect("the watch gets a's delete")
+            .unwrap()
+            .unwrap();
+        if let Some(e) = m.events.into_iter().find(|e| e.kv.as_ref().is_some_and(|kv| kv.key == leader_a.key)) {
+            break e;
+        }
+    };
+    assert_eq!(deleted.r#type, mvccpb::event::EventType::Delete as i32);
+    drop(wtx);
+}

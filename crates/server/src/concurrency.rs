@@ -21,7 +21,10 @@
 //!   oldest key), Observe (the leader, then its changes, then the next).
 //!
 //! Waiting for a delete follows this member's applied events, subscribed
-//! to before the read, so none is missed. A Lock or Campaign whose client
+//! to before the read, so none is missed. A raft snapshot installed under
+//! this member changes the store without events, so a wait also reads
+//! again when the store says an install happened, or when the events skip
+//! a revision (#216): a delete inside a snapshot is found by the read. A Lock or Campaign whose client
 //! goes away while it waits removes its key, as etcd's do.
 //!
 //! The owner queries need Range's sort and create-revision filters
@@ -36,7 +39,7 @@ use fastetcd_proto::etcdserverpb::lease_server::Lease;
 use fastetcd_proto::mvccpb;
 use fastetcd_proto::v3electionpb as epb;
 use fastetcd_proto::v3lockpb as lpb;
-use fastetcd_storage::mvcc::EventKind;
+use fastetcd_storage::mvcc::{EventBatch, EventKind};
 use tokio::sync::broadcast::error::RecvError;
 use tonic::{Request, Response, Status};
 
@@ -61,6 +64,42 @@ struct Caller {
     lease: LeaseService,
     state: Arc<ServerState>,
     user: Option<UserIdentity>,
+}
+
+/// What an event wait saw next (#216).
+enum Next {
+    /// The batch after the last one seen, in order.
+    Batch(EventBatch),
+    /// The store changed in a way the events do not show: a snapshot was
+    /// installed, a revision was skipped, or this stream fell behind.
+    /// Read again.
+    Reread,
+    /// The store is closing.
+    Closed,
+}
+
+/// The next batch above `last` (the revision read or last seen), from
+/// `events` and `installs`, both taken before that read.
+async fn next_batch(
+    events: &mut tokio::sync::broadcast::Receiver<EventBatch>,
+    installs: &mut tokio::sync::watch::Receiver<u64>,
+    last: i64,
+) -> Next {
+    loop {
+        tokio::select! {
+            r = events.recv() => match r {
+                // In the read already.
+                Ok(b) if b.revision <= last => {}
+                Ok(b) if b.revision == last + 1 => return Next::Batch(b),
+                // Revisions advance only with events: a skipped one is
+                // one this stream never saw (an install between them).
+                Ok(_) => return Next::Reread,
+                Err(RecvError::Lagged(_)) => return Next::Reread,
+                Err(RecvError::Closed) => return Next::Closed,
+            },
+            r = installs.changed() => return if r.is_ok() { Next::Reread } else { Next::Closed },
+        }
+    }
 }
 
 fn range_end_of_prefix(prefix: &[u8]) -> Vec<u8> {
@@ -180,7 +219,9 @@ impl Caller {
         }
         loop {
             // Subscribed first: a delete applied after the read below is
-            // in this stream, one applied before it is not in the read.
+            // in this stream, one applied before it is not in the read;
+            // one an install brought in after it moves `installs`.
+            let mut installs = self.state.sm.mvcc().installs();
             let mut events = self.state.sm.mvcc().subscribe();
             let read = pb::RangeRequest {
                 key: pfx.to_vec(),
@@ -195,19 +236,19 @@ impl Caller {
             let Some(last) = resp.kvs.first() else {
                 return Ok(());
             };
-            let read_at = resp.header.map(|h| h.revision).unwrap_or(0);
-            // clientv3 `waitDelete`: the key's first DELETE after the read.
+            let mut seen = resp.header.map(|h| h.revision).unwrap_or(0);
+            // clientv3 `waitDelete`: the key's first DELETE after the read;
+            // anything the events cannot show (#216) is read again.
             loop {
-                match events.recv().await {
-                    Ok(batch) if batch.revision > read_at => {
+                match next_batch(&mut events, &mut installs, seen).await {
+                    Next::Batch(batch) => {
+                        seen = batch.revision;
                         if batch.events.iter().any(|e| e.kind == EventKind::Delete && e.kv.key == last.key) {
                             break;
                         }
                     }
-                    Ok(_) => {}
-                    // Fell behind: read again rather than miss the delete.
-                    Err(RecvError::Lagged(_)) => break,
-                    Err(RecvError::Closed) => return Err(Status::unavailable("the store is closing")),
+                    Next::Reread => break,
+                    Next::Closed => return Err(Status::unavailable("the store is closing")),
                 }
             }
         }
@@ -460,37 +501,42 @@ async fn observe(
         let state = c.state.clone();
         async move { crate::state::response_header(&state, rev).await }
     };
-    loop {
+    // The leader key and revision last sent: a re-read (#216) that finds
+    // the same does not send it again.
+    let mut sent: Option<(Vec<u8>, i64)> = None;
+    'read: loop {
+        let mut installs = c.state.sm.mvcc().installs();
         let mut events = c.state.sm.mvcc().subscribe();
         let resp = c.range(first_create(pfx)).await?;
-        let read_at = resp.header.as_ref().map(|h| h.revision).unwrap_or(0);
-        let (mut at, leader) = match resp.kvs.into_iter().next() {
-            Some(kv) => (read_at, kv),
+        let mut at = resp.header.as_ref().map(|h| h.revision).unwrap_or(0);
+        let leader = match resp.kvs.into_iter().next() {
+            Some(kv) => kv,
             // No leader yet: the first key put under the prefix.
             None => loop {
-                match events.recv().await {
-                    Ok(b) if b.revision > read_at => {
+                match next_batch(&mut events, &mut installs, at).await {
+                    Next::Batch(b) => {
+                        at = b.revision;
                         let put = b.events.iter().find(|e| e.kind == EventKind::Put && e.kv.key.starts_with(pfx));
                         if let Some(e) = put {
-                            break (e.kv.mod_revision, crate::conv::record_to_kv(&e.kv));
+                            break crate::conv::record_to_kv(&e.kv);
                         }
                     }
-                    Ok(_) => {}
-                    Err(RecvError::Lagged(_)) => break (0, mvccpb::KeyValue::default()),
-                    Err(RecvError::Closed) => return Ok(()),
+                    Next::Reread => continue 'read,
+                    Next::Closed => return Ok(()),
                 }
             },
         };
-        if at == 0 {
-            continue; // lagged: read again
-        }
-        if tx.send(Ok(epb::LeaderResponse { header: Some(header(at).await), kv: Some(leader.clone()) })).await.is_err() {
-            return Ok(());
+        if sent.as_ref() != Some(&(leader.key.clone(), leader.mod_revision)) {
+            let msg = epb::LeaderResponse { header: Some(header(at).await), kv: Some(leader.clone()) };
+            if tx.send(Ok(msg)).await.is_err() {
+                return Ok(());
+            }
+            sent = Some((leader.key.clone(), leader.mod_revision));
         }
         // The leader's changes until it is deleted.
         loop {
-            match events.recv().await {
-                Ok(b) if b.revision > at => {
+            match next_batch(&mut events, &mut installs, at).await {
+                Next::Batch(b) => {
                     at = b.revision;
                     let mut deleted = false;
                     for e in b.events.iter().filter(|e| e.kv.key == leader.key) {
@@ -499,6 +545,7 @@ async fn observe(
                             break;
                         }
                         let kv = crate::conv::record_to_kv(&e.kv);
+                        sent = Some((kv.key.clone(), kv.mod_revision));
                         let msg = epb::LeaderResponse { header: Some(header(b.revision).await), kv: Some(kv) };
                         if tx.send(Ok(msg)).await.is_err() {
                             return Ok(());
@@ -508,9 +555,10 @@ async fn observe(
                         break;
                     }
                 }
-                Ok(_) => {}
-                Err(RecvError::Lagged(_)) => break,
-                Err(RecvError::Closed) => return Ok(()),
+                // Read the leader again: the same one at the same
+                // revision is not sent twice.
+                Next::Reread => break,
+                Next::Closed => return Ok(()),
             }
             if tx.is_closed() {
                 return Ok(());

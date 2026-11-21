@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-21
+- **fix:** Lock, Campaign and Observe follow a raft snapshot installed under the member (#216, finding 5bbfa8faa667). They waited for a DELETE event or a lagged stream, and an install broadcasts neither, so a predecessor deleted inside the snapshot was waited for forever and Observe kept following a leader that was gone. The store now counts installs (`MvccStore::installs()`), and the waits read again when it moves or when the events skip a revision; Observe does not repeat a leader value it already sent. Watch streams resync from history at the install instead of at the next write's revision gap.
+
 ### 2026-11-20
 - **docs:** etcd's robustness suite runs against fastetcd (#195): no scenario passes yet; it found #220 (a key's Version too low after compaction), #222 (clientv3 loops on a watch at a compacted revision), #223 (spurious watch gap warning on a new store), and 3-member write latency past its timeout (#204). `tests/robustness/replay.py` checks a failed scenario's histories; `run.sh` returns reports, go test's log and member logs as an artifact. 02-testing 3b.
 - **fix:** `lease_clock_step` no longer fails on a slow build VM (#205): it checked the 1970- and 3000-clock leases 2.5 s after their grant plus every write in between, inside a 3 s TTL. It now checks them 500 ms after the puts (a few sweeper ticks, still catching "expired at once") and renews the logged lease 1.5 s after the grants. Test only.
