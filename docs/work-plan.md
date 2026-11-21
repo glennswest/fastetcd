@@ -1707,6 +1707,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Test: `apply_replay::an_offline_backup_after_sigkill_holds_every_acknowledged_put`
       (SIGKILL after 100 puts, data file behind, `fastetcd backup`,
       `fastetcd restore` into a new dir, start, all 100 there).
-    - [ ] sc-build workspace; negative control on the old code.
-    - [ ] The upgrade safety backup (`backup_before_version`) copies the
-      data file before the WAL replays too: filed separately.
+    - [x] sc-build workspace (f2c91ba, passed); negative control: the old
+      backup held revision 12 of 101 acknowledged.
+    - [x] The upgrade safety backup (`backup_before_version`) copies the
+      data file before the WAL replays too: filed as #231 (proposed).
