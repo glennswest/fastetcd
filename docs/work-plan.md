@@ -1718,3 +1718,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     >= 1.43. Every gate today is <= 1.41, so it would hold nothing until
     a 1.44+ gate exists. Asked on the issue: build now / close as not
     planned (recommended) / hidden reserved key. No code yet.
+
+103. **Raft transport ignores replicated member addresses (#211, finding
+    77b6d12bfcd4; with #208's 0f514801e95b).** The transport, forwarder
+    and MemberList used a local map seeded from `--initial-cluster` and
+    changed only by the local Cluster RPC, so a member added on another
+    node, or on this one before a restart, has no route here.
+    - [ ] `GrpcNetwork` dials the `BasicNode` addr openraft hands it
+      (the replicated membership); the peers map only when it is empty.
+    - [ ] `membership_sync`: on start and on every membership change,
+      routes and the member directory follow the applied membership
+      (a member that left loses its route and row; learner flag).
+    - [ ] `WriteForwarder` redials when a member's address changes.
+    - [ ] MemberUpdate replicates the address (`SetNodes`, forwarded to
+      the leader as `MembershipChange::SetNodeAddr`); NotFound for an
+      id not in the membership.
+    - [ ] Tests: in-process (member added on the leader, a different
+      original voter leads, it replicates to the new one; routes and
+      MemberList on every member; MemberUpdate through a follower);
+      e2e `tests/member_routes.sh` (real binaries, etcdctl member add,
+      move-leader, restart with unchanged flags).
