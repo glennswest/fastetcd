@@ -1711,3 +1711,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       backup held revision 12 of 101 acknowledged.
     - [x] The upgrade safety backup (`backup_before_version`) copies the
       data file before the WAL replays too: filed as #231 (proposed).
+
+102. **Downgrade ENABLE/CANCEL (#202): waiting on the owner.** A
+    replicated target has to be a new bincode log variant, which only
+    1.43+ members can decode, so ENABLE could accept only targets
+    >= 1.43. Every gate today is <= 1.41, so it would hold nothing until
+    a 1.44+ gate exists. Asked on the issue: build now / close as not
+    planned (recommended) / hidden reserved key. No code yet.
