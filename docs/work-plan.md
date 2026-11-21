@@ -1819,3 +1819,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       52fab2c too (4/20; e02c3f1 5/20); the rebuild passed, no warnings.
       Negative control: the three tests with the signed successor
       (976f438) fail. Release 1.43.4.
+
+108. **Lock, Campaign and Observe miss a snapshot's deletes (#216,
+    finding 5bbfa8faa667).** They follow the event broadcast and re-read
+    only on a matching DELETE or `Lagged`; a raft snapshot install
+    changes the store and broadcasts nothing, so a predecessor deleted
+    inside the snapshot was waited for forever, and Observe kept
+    following a leader that was gone.
+    - [ ] `MvccStore::installs()`: a watch counter every install (and
+      `reload_write_state`) bumps, after the reload.
+    - [ ] `wait_deletes` and `observe` re-read on an install or on a
+      batch whose revision is not the successor of the last seen;
+      Observe does not repeat a leader value it already sent.
+    - [ ] Watch streams resync on an install too (they waited for the
+      next write's revision gap).
+    - [ ] Tests (gRPC, one member, a snapshot installed under it with no
+      write after): a waiting Lock gets the lock; a waiting Campaign
+      wins and Observe moves to it; a Watch on the deleted key gets the
+      delete.
