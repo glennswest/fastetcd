@@ -355,6 +355,9 @@ pub enum ConfirmError {
     Unreachable(String),
 }
 
+/// A member's peer client and the URL it was dialed at.
+type DialedClient = (String, pb::raft_peer_client::RaftPeerClient<Channel>);
+
 #[derive(Clone)]
 pub struct WriteForwarder {
     peers: PeerEndpoints,
@@ -363,7 +366,7 @@ pub struct WriteForwarder {
     /// One channel per member, with the URL it was dialed at: a member
     /// whose route has changed (MemberUpdate, fastetcd#211) is dialed
     /// again at its new one.
-    clients: Arc<RwLock<HashMap<NodeId, (String, pb::raft_peer_client::RaftPeerClient<Channel>)>>>,
+    clients: Arc<RwLock<HashMap<NodeId, DialedClient>>>,
 }
 
 impl WriteForwarder {
