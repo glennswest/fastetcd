@@ -701,6 +701,26 @@ with `--initial-cluster-state=existing`); `MemberRemove` removes them.
 On separate hosts, listen on a routable address and set
 `--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 
+**Member addresses are the replicated membership's (1.43, #211).** Raft
+dials each member at the peer URL in the raft membership: the
+`--initial-cluster` URLs at bootstrap, then the URL `member add` or
+`member update` replicated. Every member's routes for forwarded requests
+and its `MemberList` follow the applied membership too, at start and on
+every change, so a member added through one member is reached by every
+leader, and still is after the others restart with their original
+`--initial-cluster` (which a member with data reads only for the names
+of the members it lists). A member removed is dropped from every
+member's list. A member added at runtime is listed with an empty name
+on the members that did not serve its `member add`, as etcd lists one
+that has not started (`tests/member_routes.sh`). `member update`
+replicates the new URL through the leader (from any member; a leader
+older than 1.43 refuses it), and an id not in the membership is
+`NotFound` (`etcdserver: member not found`). Before 1.43 the routes
+were `--initial-cluster` plus the Cluster calls the member had served
+itself, so after a `member add` another leader could not replicate to
+the new member, and `member update` moved only the serving member's
+route.
+
 **Tested rolling upgrades** (`tests/rolling_upgrade.sh`, #65, at 1.25.1):
 v1.9.0 → 1.25.1 and v1.24.1 → 1.25.1 one member process at a time, and
 1.25.1 → v1.24.1 back, under writes, with auth and a lease: nothing

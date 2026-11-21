@@ -85,6 +85,13 @@ certificate is refused on the client port and answered on the metrics
 port (`/health`, `/livez`, `/readyz`, per-check routes, the same bodies
 as the client port's), and that `/metrics` is still served.
 
+Member routes (#211): `sc-build tests/member_routes.sh [<ref>]` starts
+three member processes, `etcdctl member add`s a fourth through the first
+and starts it, moves leadership to another original member, writes, and
+checks the new member serves the write and every member lists it; then
+restarts the three with unchanged flags and checks the same under a
+third leader. Given a ref it builds that instead (a negative control).
+
 A real rolling upgrade (#65): `sc-build 'tests/rolling_upgrade.sh
 <from-ref> [<to-ref>]'` (`tree` names this tree either side, so `tree
 v1.24.1` is a downgrade) builds both, starts three member processes on

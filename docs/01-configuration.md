@@ -40,7 +40,7 @@ list is bound; the rest are accepted for compatibility.
 | `--listen-client-urls` | `http://127.0.0.1:2379` | `FASTETCD_LISTEN_CLIENT_URLS` | `ETCD_LISTEN_CLIENT_URLS` | Client port. |
 | `--listen-peer-urls` | `http://127.0.0.1:2380` | `FASTETCD_LISTEN_PEER_URLS` | `ETCD_LISTEN_PEER_URLS` | Peer port. |
 | `--advertise-client-urls` | the listen URLs | `FASTETCD_ADVERTISE_CLIENT_URLS` | `ETCD_ADVERTISE_CLIENT_URLS` | This member's client URLs in `MemberList`. |
-| `--initial-advertise-peer-urls` | the listen URLs | `FASTETCD_INITIAL_ADVERTISE_PEER_URLS` | `ETCD_INITIAL_ADVERTISE_PEER_URLS` | This member's raft address and its peer URLs in `MemberList`. Other members dial the URLs in *their* `--initial-cluster`. |
+| `--initial-advertise-peer-urls` | the listen URLs | `FASTETCD_INITIAL_ADVERTISE_PEER_URLS` | `ETCD_INITIAL_ADVERTISE_PEER_URLS` | This member's raft address and its peer URLs in `MemberList`. Other members dial the URL in the replicated raft membership: the `--initial-cluster` URLs at bootstrap, then `member add`/`member update`'s (#211). |
 | `--initial-cluster` | empty | `FASTETCD_INITIAL_CLUSTER` | `ETCD_INITIAL_CLUSTER` | `name=URL,...`. Empty: a cluster of one. |
 | `--initial-cluster-state` | `new` | `FASTETCD_INITIAL_CLUSTER_STATE` | `ETCD_INITIAL_CLUSTER_STATE` | `new` bootstraps; `existing` joins without initializing. |
 | `--initial-cluster-token` | none | `FASTETCD_INITIAL_CLUSTER_TOKEN` | `ETCD_INITIAL_CLUSTER_TOKEN` | Derives the cluster id on a new store (FNV-1a-64, 63 bits). |
