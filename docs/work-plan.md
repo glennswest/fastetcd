@@ -1693,4 +1693,5 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] e2e: `tests/migrate_e2e.sh` runs the member with
       `--snapshot-count 20`, writes, compacts, snapshots, stops,
       migrates `--force`, restarts twice.
-    - [ ] sc-build: workspace + `tests/migrate_e2e.sh`.
+    - [x] sc-build: workspace (9e27280, passed) + `tests/migrate_e2e.sh`
+      (passed); the same e2e on the old migrate fails (3 old keys replay).
