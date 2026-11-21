@@ -1922,3 +1922,24 @@ Tracked live in the Claude task system. Snapshot of the order:
       `startup` unit tests, `startup_phases`, clippy `-D warnings`
       clean; workspace `--no-fail-fast` 542 pass, 0 fail.
 
+112. **The pressure reclaim could not rewrite above the high-water mark
+    (#221, finding 4475547ca4da).** `reclaim` ended with
+    `rewrite_if_due`, whose `rewrite_decision` keeps the copy under the
+    high-water mark; at the alarm the store is above it, so the copy was
+    never admitted, and redb's in-place defragment often frees nothing:
+    the alarm stayed raised after deletes.
+    - [x] `pressure_rewrite_decision`: the copy (live + 1/8) plus a
+      reserve (1% of the filesystem, >= 1 MiB) fits in
+      `fs_available`; >= `--defrag-min-reclaim-bytes` to come back; no
+      filesystem probe or `--defrag-free-percent 0`: no rewrite.
+      `reclaim` calls `rewrite_under_pressure`; the background rewrite
+      keeps `rewrite_decision`.
+    - [x] Tests (`background_rewrite.rs`): the decision at 96% of a
+      1000 MiB volume (900 MiB file, 20 live): background refuses,
+      pressure admits, 8% left (below the 70% clear mark); a copy that
+      does not fit, a small volume's 1 MiB reserve, the refusals. On a
+      member with a one-byte quota (alarm raised, filesystem with room):
+      the background check refuses, `reclaim` rewrites, the file
+      shrinks, the keys kept.
+    - [ ] sc-build; negative control (reclaim calling `rewrite_if_due`).
+

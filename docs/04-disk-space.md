@@ -150,7 +150,15 @@ order that actually frees bytes:
    step that returns space to the filesystem, and it pauses reads and
    writes while it runs — so it is skipped when the live data itself is
    what fills the volume. In place it often frees nothing (see above), so
-   it is followed by the rewrite below, if that is due and now fits.
+   it is followed by the rewrite below. Here the rewrite is admitted on
+   whether the copy fits on the filesystem, not on the high-water mark
+   the store is already above (since 1.43.6, #221; before, a store at
+   the alarm never rewrote, and the alarm stayed raised after its keys
+   were deleted): the live bytes plus an eighth, with 1% of the
+   filesystem (at least 1 MiB) left free, and at least
+   `--defrag-min-reclaim-bytes` to come back. Not without a filesystem
+   probe, and not with `--defrag-free-percent 0`. A rewrite it skips is
+   logged at `warn` (`no rewrite under disk pressure`, with why).
 
 The snapshot step waits for its snapshot and purges the whole log it covers
 (since 1.38.0, #182), and is skipped when nothing was applied since the last
@@ -200,7 +208,8 @@ any mark is reached:
 
   The volume needs room for the copy while it runs, which is why it is
   checked against the high-water mark first; above the mark the reclaim
-  below (an in-place defragment, which needs no room) does the job. A raft
+  above does the job (its in-place defragment, then this rewrite if the
+  copy fits on the filesystem). A raft
   snapshot installed during the copy abandons it (the copy is out of
   date). A kill at any point leaves `fastetcd.redb` as it was: an
   unfinished `fastetcd.redb.rewrite` is removed at the next start. Each

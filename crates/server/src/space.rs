@@ -148,6 +148,47 @@ pub fn rewrite_decision(
     Ok(())
 }
 
+/// Whether a reclaim under disk pressure may rewrite the data file, and
+/// if not, why (#221). Above the high-water mark [`rewrite_decision`]
+/// never admits the copy (it keeps the volume under that mark), and redb's
+/// in-place defragment often frees nothing, so the NOSPACE alarm stayed
+/// raised after the keys filling it were deleted. Here the question is
+/// only whether the copy fits on the filesystem: its live bytes plus an
+/// eighth for the new file's layout, and a reserve of 1% of the
+/// filesystem (at least 1 MiB) left over (`fs_total`/`fs_available`, 0 =
+/// no probe: no rewrite, since nothing says it fits). Worth it when at
+/// least `--defrag-min-reclaim-bytes` would come back; off with
+/// `--defrag-free-percent 0`, as the background rewrite is.
+pub fn pressure_rewrite_decision(
+    cfg: &SpaceConfig,
+    file: u64,
+    in_use: u64,
+    fs_total: u64,
+    fs_available: u64,
+) -> Result<(), &'static str> {
+    if cfg.rewrite.free_percent == 0 {
+        return Err("off");
+    }
+    if in_use == 0 {
+        return Err("live bytes not measured");
+    }
+    if file.saturating_sub(in_use) < cfg.defrag_min_reclaim_bytes {
+        return Err("less than --defrag-min-reclaim-bytes would come back");
+    }
+    if fs_total == 0 {
+        return Err("no filesystem probe: nothing says the copy fits");
+    }
+    let copy = in_use.saturating_add(in_use / 8);
+    let reserve = (fs_total / 100).max(PRESSURE_RESERVE_MIN);
+    if copy.saturating_add(reserve) > fs_available {
+        return Err("the copy does not fit on the filesystem with its reserve");
+    }
+    Ok(())
+}
+
+/// The least a rewrite under pressure leaves free on the filesystem.
+pub const PRESSURE_RESERVE_MIN: u64 = 1 << 20;
+
 impl Default for SpaceConfig {
     fn default() -> Self {
         Self {
@@ -609,21 +650,48 @@ pub fn spawn_rewrite(state: Arc<ServerState>) -> Option<tokio::task::JoinHandle<
 
 /// One check of the background rewrite, and the rewrite if it is due.
 pub async fn rewrite_if_due(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<()> {
+    rewrite_checked(state, cfg, false).await
+}
+
+/// The rewrite at the end of a reclaim under disk pressure (#221): admitted
+/// by [`pressure_rewrite_decision`] (the copy fits on the filesystem), not
+/// by the high-water mark the store is already above.
+pub async fn rewrite_under_pressure(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<()> {
+    rewrite_checked(state, cfg, true).await
+}
+
+async fn rewrite_checked(state: &ServerState, cfg: &SpaceConfig, pressure: bool) -> anyhow::Result<()> {
     let guard = &state.space;
     let engine = state.sm.mvcc().engine().clone();
     let stats = guard.refresh(state).await;
     let in_use = guard.in_use_bytes(&engine, IN_USE_MAX_AGE).await;
     let file = engine.size_on_disk().await?;
     let free_pct = (file.saturating_sub(in_use) * 100).checked_div(file).unwrap_or(0);
-    if let Err(why) = rewrite_decision(
-        &cfg.rewrite,
-        cfg.high_water_percent,
-        file,
-        in_use,
-        stats.used_bytes(),
-        stats.capacity_bytes,
-    ) {
-        tracing::debug!(target: "fastetcd::space", file_bytes = file, in_use_bytes = in_use, free_pct, why, "background rewrite not due");
+    let decision = if pressure {
+        pressure_rewrite_decision(cfg, file, in_use, stats.fs_total_bytes, stats.fs_available_bytes)
+    } else {
+        rewrite_decision(
+            &cfg.rewrite,
+            cfg.high_water_percent,
+            file,
+            in_use,
+            stats.used_bytes(),
+            stats.capacity_bytes,
+        )
+    };
+    if let Err(why) = decision {
+        if pressure {
+            tracing::warn!(
+                target: "fastetcd::space",
+                file_bytes = file,
+                in_use_bytes = in_use,
+                fs_available_bytes = stats.fs_available_bytes,
+                why,
+                "no rewrite under disk pressure"
+            );
+        } else {
+            tracing::debug!(target: "fastetcd::space", file_bytes = file, in_use_bytes = in_use, free_pct, why, "background rewrite not due");
+        }
         return Ok(());
     }
     tracing::info!(
@@ -631,6 +699,7 @@ pub async fn rewrite_if_due(state: &ServerState, cfg: &SpaceConfig) -> anyhow::R
         file_bytes = file,
         in_use_bytes = in_use,
         free_pct,
+        pressure,
         "rewriting the data file into a fresh one in the background"
     );
     let r = &guard.rewrites;
@@ -734,9 +803,10 @@ pub async fn reclaim(state: &ServerState, cfg: &SpaceConfig) -> anyhow::Result<(
         "defragment complete"
     );
     // In place, redb only cuts whole regions off the end of the file, often
-    // nothing. The copy gets it all, now that the log has made room for it
-    // (`rewrite_decision` says whether it fits and is worth it).
-    if let Err(e) = rewrite_if_due(state, cfg).await {
+    // nothing. The copy gets it all, now that the log has made room for it:
+    // admitted on whether it fits on the filesystem, not on the high-water
+    // mark the store is already above (#221).
+    if let Err(e) = rewrite_under_pressure(state, cfg).await {
         tracing::warn!(target: "fastetcd::space", "rewrite under disk pressure failed: {e}");
     }
     Ok(())
