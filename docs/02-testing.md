@@ -86,8 +86,8 @@ port (`/health`, `/livez`, `/readyz`, per-check routes, the same bodies
 as the client port's), and that `/metrics` is still served.
 
 Member routes (#211): `sc-build tests/member_routes.sh [<ref>]` starts
-three member processes, `etcdctl member add`s a fourth through the first
-and starts it, moves leadership to another original member, writes, and
+three member processes, `etcdctl member add --learner`s a fourth through
+the first, starts and promotes it, moves leadership to another original member, writes, and
 checks the new member serves the write and every member lists it; then
 restarts the three with unchanged flags and checks the same under a
 third leader. Given a ref it builds that instead (a negative control).

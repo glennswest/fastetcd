@@ -8,7 +8,7 @@
 #
 # With etcd's own etcdctl (v3.5.17, sha256 checked) it:
 #   1. starts three members n1..n3 (`--initial-cluster` names only them);
-#   2. `member add n4` through n1 and starts n4 (`existing`, its id as
+#   2. `member add --learner n4` through n1, starts n4 and promotes it (`existing`, its id as
 #      `--node-id`); waits until n4 serves a write;
 #   3. moves leadership to an original member other than the one that
 #      served the MemberAdd, writes through it, and checks n4 serves it;
@@ -121,13 +121,18 @@ for i in 1 2 3; do wait_healthy "$i"; done
 on 1 put /k v0 >/dev/null
 
 # ---- 2. member add n4 through n1, start it ---------------------------------
-added=$(on 1 member add n4 --peer-urls="http://127.0.0.1:${PP[4]}")
+# As a learner, then promoted once it runs: the order 03-deploy gives
+# for a log that has batched (#77).
+added=$(on 1 member add n4 --learner --peer-urls="http://127.0.0.1:${PP[4]}")
 ID4=$(echo "$added" | awk '/^Member/ {print $2; exit}')
 echo "== n4 added as $ID4"
 EXTRA=(--initial-cluster "$CLUSTER,n4=http://127.0.0.1:${PP[4]}" --initial-cluster-state existing --node-id "$(printf '%d' "0x$ID4")")
 start 4 "${EXTRA[@]}"
 on 1 put /k v1 >/dev/null
 check "n4 serves a write once added" "$(serves 4 /k v1 && echo 1 || echo 0)"
+promoted=0
+for _ in $(seq 50); do on 1 member promote "$ID4" >/dev/null 2>&1 && { promoted=1; break; }; sleep 0.2; done
+check "n4 promoted to a voter" "$promoted"
 
 # ---- 3. another original member leads ---------------------------------------
 # Not n1, which served the MemberAdd (its own map had n4's route before #211).
