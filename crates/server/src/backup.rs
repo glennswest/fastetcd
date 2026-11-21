@@ -122,6 +122,8 @@ fn decode_membership(bytes: &[u8]) -> Option<StoredMembership> {
 /// now would record.
 pub async fn current_roles(engine: &Arc<dyn KvStore>) -> anyhow::Result<Option<MembershipRoles>> {
     Ok(engine
+        .snapshot()
+        .await?
         .get("mvcc_meta", META_KEY_RAFT_MEMBERSHIP)
         .await?
         .and_then(|v| decode_membership(&v))
