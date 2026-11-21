@@ -1971,4 +1971,11 @@ Tracked live in the Claude task system. Snapshot of the order:
       none), `backup` unit tests (due() roles, trailer round trip and the
       old decode), `corruption_recovery.rs` (join in the WAL refuses, in
       a snapshot refuses, joined then removed restores).
-    - [ ] sc-build: the tests above, clippy `-D warnings`, workspace.
+    - [x] sc-build of a08f220: `backup_schedule` (2), `corruption_recovery`
+      (13), `snapshot_restore` (2), `backup` unit tests (2), clippy
+      `-D warnings` clean; workspace `--no-fail-fast` 550 pass, 0 fail
+      (the job's first attempt failed only `lease_clock_step`, unrelated:
+      #245). Negative controls, each old behaviour patched back in on the
+      build VM: ids-only comparison fails the promotion test; adopting the
+      current membership at restart fails the restart test; no WAL/snapshot
+      check fails the two join refusals.
