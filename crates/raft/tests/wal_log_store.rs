@@ -698,7 +698,11 @@ async fn snapshots_and_purges_are_counted_in_proposals() {
     let metrics = |r: &Raft<TypeConfig>| -> RaftMetrics<NodeId, openraft::BasicNode> { r.metrics().borrow().clone() };
 
     // Without the policy: 300 writes in a few batched entries, no snapshot.
-    write(0, 300).await;
+    // In six rounds, so they span at least six entries: all 300 in one or
+    // two leave no entry to purge that keeps 100 proposals (#229).
+    for round in 0..6 {
+        write(round * 50, 50).await;
+    }
     sleep_ms(1500).await;
     let m = metrics(&raft);
     assert!(m.snapshot.is_none(), "openraft snapshotted at {:?} entries", m.last_log_index);
