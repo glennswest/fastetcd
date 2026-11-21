@@ -1779,4 +1779,7 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Tests: `snapshot_install::an_install_clears_keys_at_and_above_64_ff_bytes`;
       conformance `clear_table_removes_every_key` (redb, write-behind;
       commit durable and not, commit_stream).
-    - [ ] sc-build; negative control (install test on the old bound).
+    - [x] sc-build workspace (ce9fcef, passed on its rerun: the first run's
+      one failure was #236's checkpoint-stall flake, unrelated); negative
+      control: the install test on the old bound (1fe8e3e) fails with
+      `missing KvRecord` for the 64 0xFF key. Release 1.43.2.
