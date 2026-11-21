@@ -1,7 +1,7 @@
 # 00 — Design
 
 The architectural call for fastetcd, kept current with the code (last
-checked against v1.43.3). It describes what the code does; ideas not
+checked against v1.43.4). It describes what the code does; ideas not
 built are issues, not text here (#191).
 
 ## Position
