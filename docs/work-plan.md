@@ -1990,5 +1990,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Each lease's TimeToLive is checked right after its own grant,
       with the lower bound `TTL - ceil(elapsed)` (floored at 0) from the
       time measured; still fails a wall-clock reading either way.
-    - [ ] sc-build: `lease_clock_step` passes, repeated; negative control
-      (TimeToLive from the persisted deadline on the leader) fails it.
+    - [x] sc-build of 39a152d: clippy `-p fastetcd-server --all-targets
+      -D warnings` clean; `lease_clock_step` passed 15 of 15 runs.
+      Negative control (the leader's monotonic path disabled in
+      `Lessor::time_to_live`, so TimeToLive reads the persisted deadline):
+      fails at once with `lease 2: TimeToLive -1795342854`, confirming a
+      wall-clock bug could not have produced the 0 seen.
