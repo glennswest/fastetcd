@@ -45,6 +45,23 @@ async fn alive(kv: &mut KvClient<tonic::transport::Channel>, key: &[u8]) -> bool
         .is_empty()
 }
 
+/// TimeToLive of lease `id`, granted after `asked`: its TTL counted on
+/// the monotonic clock from the grant's apply. Checked right after the
+/// grant, and the lower bound allows for the time the grant and this
+/// call took (#245: on a slow build VM the grants and puts once took over
+/// 2 s, and the 3 s lease rightly answered 0). A wall-clock reading
+/// would answer about -1.7e9 (1970) or about 3e10 (year 3000).
+async fn ttl_follows_grant(lc: &mut LeaseClient<tonic::transport::Channel>, id: i64, asked: Instant) {
+    let t = lc.lease_time_to_live(pb::LeaseTimeToLiveRequest { id, keys: false }).await.unwrap().into_inner();
+    let took = asked.elapsed();
+    let lowest = (TTL - took.as_secs_f64().ceil() as i64).max(0);
+    assert!(
+        (lowest..=TTL).contains(&t.ttl),
+        "lease {id}: TimeToLive {} of a {TTL} s lease, {took:?} after asking for its grant",
+        t.ttl
+    );
+}
+
 #[tokio::test]
 async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
     let h = start_test_server_full_with_expiry_ticker().await;
@@ -60,17 +77,16 @@ async fn a_stepped_wall_clock_neither_expires_nor_immortalises_a_lease() {
 
     let granted = Instant::now();
     let past = grant(&h, 0).await; // persisted deadline: 1970
+    ttl_follows_grant(&mut lc, past, Instant::now()).await;
+    let at = Instant::now();
     let future = grant(&h, YEAR_3000).await; // persisted deadline: year 3000
+    ttl_follows_grant(&mut lc, future, at).await;
     let logged = lc.lease_grant(pb::LeaseGrantRequest { ttl: TTL, id: 0 }).await.unwrap().into_inner().id;
     let started = Instant::now();
     for (key, id) in [(&b"past"[..], past), (b"future", future), (b"logged", logged)] {
         kv.put(pb::PutRequest { key: key.to_vec(), value: b"v".to_vec(), lease: id, ..Default::default() })
             .await
             .unwrap();
-    }
-    for id in [past, future] {
-        let t = lc.lease_time_to_live(pb::LeaseTimeToLiveRequest { id, keys: false }).await.unwrap().into_inner();
-        assert!((1..=TTL).contains(&t.ttl), "lease {id}: TimeToLive {} of a {TTL} s lease", t.ttl);
     }
 
     // Not expired at once: alive after a few sweeper ticks (200 ms).

@@ -1979,3 +1979,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       build VM: ids-only comparison fails the promotion test; adopting the
       current membership at restart fails the restart test; no WAL/snapshot
       check fails the two join refusals.
+
+114. **`lease_clock_step` flakes: TimeToLive 0 of a 3 s lease (#245).**
+    Lease 2 is the 1970-clock grant (ids: 1 warm, 2 past, 3 future). On
+    the leader TimeToLive counts from the grant's apply on the monotonic
+    clock (`Lessor::time_to_live`); a wall-clock reading would answer
+    about -1.7e9 for it, never 0. So 0 means over 2 s passed between that
+    apply and the check (the future grant, the logged grant, three puts):
+    a test margin, not a lease bug.
+    - [x] Each lease's TimeToLive is checked right after its own grant,
+      with the lower bound `TTL - ceil(elapsed)` (floored at 0) from the
+      time measured; still fails a wall-clock reading either way.
+    - [ ] sc-build: `lease_clock_step` passes, repeated; negative control
+      (TimeToLive from the persisted deadline on the leader) fails it.
