@@ -2011,5 +2011,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `test_container.sh`: the range's key and range end are
       base64-encoded at run time.
     - [x] `gitleaks dir .` (8.30.1, default rules): no leaks found.
-    - [ ] sc-build: `tests/test_container.sh` and
-      `tests/rolling_upgrade.sh` pass.
+    - [x] sc-build of 090cd98: `tests/test_container.sh` (job d242555029)
+      short 7/7, medium 7/7, long 3/3, no keys left under /storm-test/
+      (the run-time-encoded range answered a plain count-only header);
+      `tests/rolling_upgrade.sh v1.43.4 tree` (job 4dcee7e7b8) every
+      check ok: root logs in, alice reads /app/x and is denied /secret/s
+      with the generated passwords, 323 writes acknowledged, 0 missing.
