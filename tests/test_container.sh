@@ -57,8 +57,9 @@ suite medium 1800
 suite long 2400 FASTETCD_TEST_LONG_SCALE=0.005 FASTETCD_TEST_LONG_HOLD_SECS=10 FASTETCD_TEST_LONG_WAVES=2
 
 # short left nothing on the "node".
+b64() { printf %s "$1" | base64 -w0; }
 left=$(curl -s -X POST "http://127.0.0.1:$NODE_PORT/v3/kv/range" \
-    -d '{"key":"L3N0b3JtLXRlc3Qv","range_end":"L3N0b3JtLXRlc3Qw","count_only":true}')
+    -d "{\"key\":\"$(b64 /storm-test/)\",\"range_end\":\"$(b64 /storm-test0)\",\"count_only\":true}")
 echo "keys left under /storm-test/ on the node: $left"
 case "$left" in *'"count"'*) echo "short left keys behind"; FAILED=1 ;; esac
 exit "$FAILED"

@@ -1996,3 +1996,20 @@ Tracked live in the Claude task system. Snapshot of the order:
       `Lessor::time_to_live`, so TimeToLive reads the persisted deadline):
       fails at once with `lease 2: TimeToLive -1795342854`, confirming a
       wall-clock bug could not have produced the 0 seen.
+
+115. **Secret scan: 2 findings at 885c4c2 (#246, stormcentral#1679).**
+    Both false positives, reproduced with the pinned gitleaks 8.30.1
+    (`gitleaks dir .`): `curl-auth-user` matched from the `curl` in
+    `rolling_upgrade.sh`'s `metric()` (line 99) to `--user root:rootpw`
+    four lines on (the rule spans up to 5 lines, so the line's
+    "not a secret" comment, on line 103, did not count); `generic-api-key`
+    took `test_container.sh`'s base64 of `/storm-test/` for a key.
+    Fixed in the tests rather than allowlisted (sessions-CLAUDE.md,
+    "Test secrets"); no `.gitleaks.toml`.
+    - [x] `rolling_upgrade.sh`: root's and alice's passwords are made per
+      run (`od` of `/dev/urandom`), none committed.
+    - [x] `test_container.sh`: the range's key and range end are
+      base64-encoded at run time.
+    - [x] `gitleaks dir .` (8.30.1, default rules): no leaks found.
+    - [ ] sc-build: `tests/test_container.sh` and
+      `tests/rolling_upgrade.sh` pass.

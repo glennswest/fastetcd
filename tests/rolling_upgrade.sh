@@ -98,9 +98,12 @@ trap cleanup EXIT
 metric() { # metric <i> <name>: the value, 0 if absent
     curl -sf "http://127.0.0.1:${MP[$1]}/metrics" 2>/dev/null | awk -v n="$2" '$1==n {print $2; f=1} END {if (!f) print 0}'
 }
+# The passwords: made for each run, not committed.
+ROOTPW=$(od -An -N9 -tx1 /dev/urandom | tr -d ' \n')
+ALICEPW=$(od -An -N9 -tx1 /dev/urandom | tr -d ' \n')
 ctl() { "$CTL" --endpoints "$EPS" --command-timeout=5s "$@"; }
-root() { ctl --user root:rootpw "$@"; } # not a secret: test fixture
-on() { local i=$1; shift; "$CTL" --endpoints "http://127.0.0.1:${CP[$i]}" --command-timeout=5s --user root:rootpw "$@"; } # not a secret: test fixture
+root() { ctl --user "root:$ROOTPW" "$@"; }
+on() { local i=$1; shift; "$CTL" --endpoints "http://127.0.0.1:${CP[$i]}" --command-timeout=5s --user "root:$ROOTPW" "$@"; }
 
 FAILED=0
 check() { # check <what> <ok?>
@@ -117,20 +120,20 @@ ctl put /plain p >/dev/null
 # the third had not applied the first yet (found by this test, #65).
 first() { "$CTL" --endpoints "http://127.0.0.1:${CP[1]}" --command-timeout=5s "$@"; }
 first role add root >/dev/null
-first user add root:rootpw >/dev/null # not a secret: test fixture
+first user add "root:$ROOTPW" >/dev/null
 first user grant-role root root >/dev/null
 first role add app >/dev/null
 first role grant-permission app readwrite /app/ --prefix >/dev/null
-first user add alice:alicepw >/dev/null # not a secret: test fixture
+first user add "alice:$ALICEPW" >/dev/null
 first user grant-role alice app >/dev/null
 first auth enable >/dev/null
 # Also through one member: before 1.23.1 a token reaching a member that
 # has not applied it yet got fastetcd's own text, and etcdctl does not
 # authenticate again on that (#105).
-first --user root:rootpw put /app/x appv >/dev/null # not a secret: test fixture
-first --user root:rootpw put /secret/s sv >/dev/null # not a secret: test fixture
-LEASE=$(first --user root:rootpw lease grant 600 | awk '{print $2}') # not a secret: test fixture
-first --user root:rootpw put /lease/k lv --lease="$LEASE" >/dev/null # not a secret: test fixture
+first --user "root:$ROOTPW" put /app/x appv >/dev/null
+first --user "root:$ROOTPW" put /secret/s sv >/dev/null
+LEASE=$(first --user "root:$ROOTPW" lease grant 600 | awk '{print $2}')
+first --user "root:$ROOTPW" put /lease/k lv --lease="$LEASE" >/dev/null
 echo "== $OLD_V on all three: auth on, lease $LEASE, writers starting"
 
 # ---- writers ----------------------------------------------------------------
@@ -220,8 +223,8 @@ done
 check "every acknowledged write is there ($acked acknowledged, $lost missing)" "$([ "$lost" = 0 ] && echo 1 || echo 0)"
 check "the longest stretch without an acknowledged write: ${longest} s (bound ${MAX_OUTAGE_S} s)" "$(awk -v a="$longest" -v b="$MAX_OUTAGE_S" 'BEGIN {print (a <= b) ? 1 : 0}')"
 check "root logs in and reads" "$([ "$(root get /plain --print-value-only)" = p ] && echo 1 || echo 0)"
-check "alice reads /app/x" "$([ "$(ctl --user alice:alicepw get /app/x --print-value-only 2>/dev/null)" = appv ] && echo 1 || echo 0)" # not a secret: test fixture
-check "alice is denied /secret/s" "$(ctl --user alice:alicepw get /secret/s >/dev/null 2>&1 && echo 0 || echo 1)" # not a secret: test fixture
+check "alice reads /app/x" "$([ "$(ctl --user "alice:$ALICEPW" get /app/x --print-value-only 2>/dev/null)" = appv ] && echo 1 || echo 0)"
+check "alice is denied /secret/s" "$(ctl --user "alice:$ALICEPW" get /secret/s >/dev/null 2>&1 && echo 0 || echo 1)"
 check "a wrong password is refused" "$(ctl --user alice:nope get /app/x >/dev/null 2>&1 && echo 0 || echo 1)" # not a secret: test fixture
 ttl=$(root lease timetolive "$LEASE" --keys)
 echo "   $ttl"

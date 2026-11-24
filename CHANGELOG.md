@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-23
+- **fix:** The secret scan's two findings at 885c4c2 were false positives in tests, and they no longer come up (#246, stormcentral#1679). `tests/rolling_upgrade.sh` makes root's and alice's passwords for each run instead of committing `rootpw`, which gitleaks' `curl-auth-user` matched together with a `curl` four lines up. `tests/test_container.sh` base64-encodes its `/storm-test/` range at run time, which `generic-api-key` had read as a key. `gitleaks dir .` (8.30.1) finds nothing. Test only.
+
 ### 2026-11-22
 - **fix:** `lease_clock_step` no longer flakes on TimeToLive (#245). Not a lease bug: the leader counts a lease's TTL on the monotonic clock from its grant's apply (a wall-clock reading would answer about -1.7e9 for the 1970-clock lease, not 0); the check ran after two more grants and three puts, which on a slow build VM took over 2 s, so the 3 s lease rightly answered 0. Each lease is now checked right after its own grant, its lower bound allowing for the time measured. Test only.
 
