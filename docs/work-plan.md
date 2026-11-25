@@ -2312,4 +2312,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       `downgrade_target.rs` (refusals, ENABLE, info, a held and an open
       gate, the floor, CANCEL, the leader's clear).
     - [x] docs: 03-deploy Downgrades, 00-design, README.
-    - [ ] sc-build: clippy, workspace; release 1.45.0.
+    - [x] sc-build of b474ba8: clippy `--workspace --all-targets -D
+      warnings` clean; workspace `--no-fail-fast` 576 pass, 0 fail (the
+      gateway test's ENABLE/CANCEL codes updated: 9, not "unknown action").
+      Not run: ENABLE across several members (the entry replicates as any
+      other; `downgrade_gate` asks every member's version first).
+      Release 1.45.0.
