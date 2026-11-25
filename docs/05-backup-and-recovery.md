@@ -172,6 +172,15 @@ newer store without `--force`, and keeps the current file as
 the same way. The raft snapshots and WAL that went with the replaced
 file are moved to `snapshots.replaced-<ts>` and `wal.replaced-<ts>`.
 
+An upgrade safety backup (`--upgrade-backup`,
+`fastetcd-<from>-to-<to>-<ts>.redb`) has its raft WAL beside it,
+`fastetcd-<from>-to-<to>-<ts>.wal/` (since 1.44.5, #231): the safety
+backup is taken before the new version writes anything, so before the
+WAL replays, and a member killed before its last checkpoint has its last
+acknowledged writes only in the WAL. `fastetcd restore` of the `.redb`
+puts the `.wal/` back as `wal/`, and the next start replays it, as a
+restart after the kill would have. Before 1.44.5 those writes were lost.
+
 `fastetcd backup` writes one file, the data file. The data file is
 durable as of its last checkpoint (#85): a server stopped cleanly
 checkpoints on the way out, but one that was killed has its last ~100 ms

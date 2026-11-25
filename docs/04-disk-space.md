@@ -380,7 +380,8 @@ the 63 MiB is how a volume fills.
 **The upgrade safety backup never fills the volume** (since 1.34.3,
 #163). It is taken at startup, synchronously, when a different version
 opens the data file, into `<data-dir>/backups` by default: the volume
-the store runs on. Before copying, fastetcd checks that the copy, less
+the store runs on. It copies the data file and, since 1.44.5, the raft
+WAL beside it (#231). Before copying, fastetcd checks that the copy (both), less
 the old backups it would roll off, leaves that filesystem at or below
 `--space-high-water-percent` (80%); if not, it skips the backup with a
 WARN (`skipped the pre-version safety backup`) and rolls nothing off.
