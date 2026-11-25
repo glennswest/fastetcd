@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.5`** — the upgrade safety backup copies the raft WAL beside the
+**`1.44.6`** — replication to a member that cannot be dialed backs off
+(Unreachable: 100, 200, 400, then 500 ms) instead of retrying in a tight
+loop (#226). 1.44.5: the upgrade safety backup copies the raft WAL beside the
 data file and `restore` puts it back, so writes a kill left only in the
 WAL are kept (#231). 1.44.4: a member joining with `existing` and no `--node-id`
 runs as the id `member add` gave its peer URL, and records its id in
