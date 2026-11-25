@@ -337,10 +337,20 @@ async fn watch_at_compacted_revision_returns_canceled() {
         .await
         .unwrap()
         .into_inner();
-    let resp = stream.next().await.unwrap().unwrap();
-    assert!(resp.created);
-    assert!(resp.canceled);
-    assert_eq!(resp.compact_revision, 2);
+    // As etcd (#222): the create is acknowledged, then cancelled with
+    // compact_revision and no reason. One created-and-canceled response
+    // with a reason is a failed create to clientv3, which re-creates the
+    // watch for ever.
+    let created = stream.next().await.unwrap().unwrap();
+    assert!(created.created, "{created:?}");
+    assert!(!created.canceled, "{created:?}");
+    assert_eq!(created.compact_revision, 0);
+    let cancel = stream.next().await.unwrap().unwrap();
+    assert_eq!(cancel.watch_id, created.watch_id);
+    assert!(!cancel.created, "{cancel:?}");
+    assert!(cancel.canceled, "{cancel:?}");
+    assert_eq!(cancel.compact_revision, 2);
+    assert!(cancel.cancel_reason.is_empty(), "{cancel:?}");
 }
 
 /// #58: a watcher created with `fragment` gets a large response as

@@ -152,7 +152,8 @@ async fn lagging_watch_is_resynced_or_cancelled_never_gapped() {
             );
         };
         assert_eq!(cancel.compact_revision, last_rev);
-        assert!(!cancel.cancel_reason.is_empty());
+        // No reason, as etcd: clientv3 reports ErrCompacted (#222).
+        assert!(cancel.cancel_reason.is_empty(), "{cancel:?}");
         assert!(seen.len() < PUTS, "a compacted-away lag cannot have been delivered in full");
         for pair in seen.windows(2) {
             assert_eq!(pair[1], pair[0] + 1, "revision gap before the cancel");

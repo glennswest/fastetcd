@@ -462,26 +462,36 @@ async fn handle_create(
         }
     }
 
-    // Compacted-watch detection: if the client wants history from a
-    // revision that's been compacted, send a canceled response with
-    // compact_revision set; do NOT register the watcher.
+    // Compacted-watch detection: the client wants history from a
+    // revision that has been compacted. As etcd: acknowledge the create,
+    // then cancel it with `compact_revision` set and no reason, which
+    // clientv3 delivers as `ErrCompacted`. One response that is both
+    // created and canceled with a reason is a *failed create* to clientv3,
+    // which then re-creates the same watch for ever (#222). The watcher
+    // is not registered.
     if create.start_revision > 0 && create.start_revision < compact_rev {
         drop(ss);
         let header = response_header(state, current_rev).await;
-        let resp = pb::WatchResponse {
+        tx.send(Ok(pb::WatchResponse {
             header: Some(header),
             watch_id,
             created: true,
-            canceled: true,
-            compact_revision: compact_rev,
-            cancel_reason: format!(
-                "watch revision {} has been compacted (compact_rev = {})",
-                create.start_revision, compact_rev
-            ),
+            canceled: false,
+            compact_revision: 0,
+            cancel_reason: String::new(),
             fragment: false,
             events: Vec::new(),
-        };
-        return tx.send(Ok(resp)).await.map_err(|_| ());
+        }))
+        .await
+        .map_err(|_| ())?;
+        tracing::debug!(
+            target: "fastetcd::watch",
+            watch_id,
+            "watch revision {} has been compacted (compact_rev = {})",
+            create.start_revision,
+            compact_rev
+        );
+        return send_compacted(state, tx, watch_id, compact_rev).await;
     }
 
     // The cursor: history (if any) covers everything up to
@@ -531,17 +541,14 @@ async fn handle_create(
         Replay::Done => {}
         Replay::Compacted { compact_rev } => {
             drop(ss);
-            return send_cancel(
-                state,
-                tx,
+            tracing::debug!(
+                target: "fastetcd::watch",
                 watch_id,
-                compact_rev,
-                format!(
-                    "watch revision {} has been compacted (compact_rev = {})",
-                    create.start_revision, compact_rev
-                ),
-            )
-            .await;
+                "watch revision {} has been compacted (compact_rev = {})",
+                create.start_revision,
+                compact_rev
+            );
+            return send_compacted(state, tx, watch_id, compact_rev).await;
         }
         Replay::Failed(e) => {
             drop(ss);
@@ -621,6 +628,19 @@ async fn send_denied(
     }))
     .await
     .map_err(|_| ())
+}
+
+/// Cancel a watch whose history is compacted, as etcd's `sendLoop` does:
+/// `canceled` with `compact_revision` and no `cancel_reason`, so clientv3
+/// reports `ErrCompacted` and closes the watch (#222). The reason is
+/// logged by the caller instead.
+async fn send_compacted(
+    state: &Arc<ServerState>,
+    tx: &mpsc::Sender<Result<pb::WatchResponse, Status>>,
+    watch_id: i64,
+    compact_revision: i64,
+) -> Result<(), ()> {
+    send_cancel(state, tx, watch_id, compact_revision, String::new()).await
 }
 
 async fn send_cancel(
@@ -858,7 +878,12 @@ async fn resync(
         ss.watchers.remove(&watch_id);
         WATCH_LAG_CANCELS.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(target: "fastetcd::watch", watch_id, "cancelling watch: {reason}");
-        send_cancel(state, tx, watch_id, compact_rev, reason).await?;
+        if compact_rev > 0 {
+            // No reason on the wire, as etcd (#222).
+            send_compacted(state, tx, watch_id, compact_rev).await?;
+        } else {
+            send_cancel(state, tx, watch_id, compact_rev, reason).await?;
+        }
     }
     Ok(upto)
 }
