@@ -2091,3 +2091,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       with compact revision 3, the channel closed after it, the watch from
       the compact revision got 2 events from 3. Release 1.44.1 (f2b5014):
       builds `--locked`, `fastetcd --version` 1.44.1.
+
+118. **`move_leader_hands_leadership_to_the_target` fails about 1 run in 5
+    (#237, P1).** MoveLeader 1 -> 2 times out ("leader transfer took too
+    long", 8 s) where it normally takes 0.1–0.4 s; same rate before and
+    after #215 (4/20 on 52fab2c, 5/20 on e02c3f1). Test timing or a real
+    stall in the transfer: to find out first.
+    - [x] Debug logs for each transfer step with its elapsed time, the
+      leader's state in the timeout's reason; the test takes `RUST_LOG`
+      (d41e6f3).
+    - [ ] Diagnose: 20 runs alone with `fastetcd_raft=debug`, the failing
+      runs' logs kept.
+    - [ ] Fix, regression check (the same 20 runs pass), CHANGELOG/docs.
