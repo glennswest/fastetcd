@@ -2116,4 +2116,10 @@ Tracked live in the Claude task system. Snapshot of the order:
       transfer re-reads the leader's last log id after the quorum accepted
       and, if it moved (an entry proposed outside the proposer: lease
       expiry, compaction), waits for the target again before asking it.
-    - [ ] Regression check: the same loaded 40 runs pass; full workspace.
+    - [x] Regression check: the same loaded 40 runs on 92dea95 (the fix):
+      40 pass, 0 fail (before, 43dae49: 30 pass, 10 fail), slowest
+      transfer 2.3 s; the log re-check never fired in this test (no lease
+      or compaction), so the proposer change is what fixed it. sc-build of
+      25472cd: clippy `--workspace --all-targets -D warnings` clean,
+      workspace `--no-fail-fast` 559 pass, 0 fail. Release 1.44.2
+      (a140de1): builds `--locked`, `fastetcd --version` 1.44.2.
