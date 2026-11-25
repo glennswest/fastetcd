@@ -1029,9 +1029,12 @@ a member it cannot reach (its connection refused or lost, or no dial)
 again after 100, 200 and 400 ms, then every 500 ms for as long as it
 stays away, logging one `error replication to target=…` WARN per
 attempt; the first success starts the steps again, so a member back from
-a restart is caught up within about half a second. Before 1.44.6 the
-leader retried it about every millisecond, two log lines each time, for
-as long as it was down (`tests/replication_backoff.sh`).
+a restart is caught up within about half a second. Before 1.44.6 a
+member the leader could not dial at all (added but never started, or
+moved) was retried at once, over and over: 88,515 errors in 5 s in
+`tests/replication_backoff.sh`, against 10 now. A member stopped behind
+a connection already made was paced by the connection's own reconnects
+before too (13 in 5 s).
 
 **On spinning disks** (the X9 blades: follower fsyncs of 0.3–0.8 s, a
 longest of 85 s, `docs/benchmarks/blade-server3.md`), set on every

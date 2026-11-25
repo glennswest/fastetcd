@@ -2255,5 +2255,14 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `tests/replication_backoff.sh` (real binaries, etcdctl): stop a
       follower, at most 25 replication errors in 5 s; restarted, it serves
       a new write within 3 s.
-    - [ ] sc-build: the script on this tree and on 1.44.5 (control);
-      clippy; workspace; docs; CHANGELOG; release 1.44.6.
+    - First run of the script: the control (1.44.5) passed too, 14 errors
+      in 5 s for a stopped follower: a member behind a connection already
+      made was paced by tonic's reconnects. The issue's case (#208) is a
+      member never dialed: the script now adds a learner at a URL nothing
+      listens on.
+    - [x] sc-build of d4be575: the script 0 failed (the learner 10 errors in
+      5 s, a stopped follower 10, restarted it serves a write in 158 ms);
+      control on 1.44.5: the learner 88,515 errors in 5 s (failed), the
+      stopped follower 13. sc-build of 865cdac: clippy `--workspace
+      --all-targets -D warnings` clean, workspace `--no-fail-fast` 567
+      pass, 0 fail. 03-deploy, CHANGELOG. Release 1.44.6.
