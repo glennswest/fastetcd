@@ -353,6 +353,51 @@ async fn watch_at_compacted_revision_returns_canceled() {
     assert!(cancel.cancel_reason.is_empty(), "{cancel:?}");
 }
 
+/// #222: a watch from the compact revision itself is served, as etcd
+/// serves it (only `start < compact` is compacted): created, then the
+/// event at the compact revision and the ones after it.
+#[tokio::test]
+async fn watch_from_the_compact_revision_is_served() {
+    let h = start_test_server_full().await;
+    let mut watch_client = WatchClient::connect(h.endpoint.clone()).await.unwrap();
+    let mut kv_client = KvClient::connect(h.endpoint.clone()).await.unwrap();
+    let mut revs = Vec::new();
+    for v in ["v0", "v1", "v2"] {
+        let r = kv_client
+            .put(pb::PutRequest { key: b"k".to_vec(), value: v.into(), ..Default::default() })
+            .await
+            .unwrap()
+            .into_inner();
+        revs.push(r.header.unwrap().revision);
+    }
+    kv_client.compact(pb::CompactionRequest { revision: revs[1], physical: true }).await.unwrap();
+
+    let (tx, rx) = mpsc::channel::<pb::WatchRequest>(8);
+    tx.send(pb::WatchRequest {
+        request_union: Some(pb::watch_request::RequestUnion::CreateRequest(pb::WatchCreateRequest {
+            key: b"k".to_vec(),
+            start_revision: revs[1],
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    let mut stream = watch_client.watch(ReceiverStream::new(rx)).await.unwrap().into_inner();
+    let created = stream.next().await.unwrap().unwrap();
+    assert!(created.created && !created.canceled, "{created:?}");
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        let resp = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("no events from the compact revision")
+            .unwrap()
+            .unwrap();
+        assert!(!resp.canceled, "cancelled: {resp:?}");
+        seen.extend(resp.events.iter().map(|e| e.kv.as_ref().unwrap().mod_revision));
+    }
+    assert_eq!(seen, vec![revs[1], revs[2]]);
+}
+
 /// #58: a watcher created with `fragment` gets a large response as
 /// etcd's `sendFragments` splits it (whole events, each part under the
 /// 1.5 MiB default, all but the last `fragment: true`), live and in

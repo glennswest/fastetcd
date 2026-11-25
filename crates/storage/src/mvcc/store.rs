@@ -1225,7 +1225,9 @@ impl MvccStore {
     /// revision. Returns events in `(revision, key)` order. Used by
     /// the Watch service to backfill from `start_revision`.
     ///
-    /// Errors with [`MvccError::Compacted`] if `start_rev < compact_rev`.
+    /// Errors with [`MvccError::Compacted`] if the first revision wanted,
+    /// `start_rev + 1`, is below the compact revision: the compact
+    /// revision itself is still readable, as in etcd (#222).
     pub async fn range_events(
         &self,
         key: &[u8],
@@ -1256,7 +1258,9 @@ impl MvccStore {
         // so a snapshot missing records has the revision that refuses it.
         let (snap, revs, ()) = self
             .read_view(|_, revs| {
-                if start_rev < revs.compact && revs.compact > 0 {
+                // Events from `start_rev + 1` on; the compact revision
+                // is still there (etcd refuses only `start < compact`).
+                if start_rev.saturating_add(1) < revs.compact && revs.compact > 0 {
                     return Err(MvccError::Compacted {
                         requested: start_rev,
                         compact_rev: revs.compact,
@@ -3788,6 +3792,28 @@ mod tests {
         // the compact revision answers.
         assert!(matches!(s.range_events(b"k", b"", 0).await, Err(MvccError::Compacted { .. })));
         assert!(s.range_events(b"k", b"", top).await.unwrap().is_empty());
+    }
+
+    /// fastetcd#222: a replay from the compact revision itself is served,
+    /// as etcd serves a watch from it; one from below it is refused.
+    #[tokio::test]
+    async fn a_replay_from_the_compact_revision_is_served() {
+        let (_d, s) = open_mvcc().await;
+        for v in [b"1", b"2", b"3"] {
+            s.apply(&[put(b"k", v)]).await.unwrap();
+        }
+        let top = s.current_revision().await;
+        s.compact(top - 1).await.unwrap();
+        // Events after `top - 2`: revisions top - 1 and top.
+        let got = s.range_events(b"k", b"", top - 2).await.unwrap();
+        let revs: Vec<i64> = got.iter().map(|e| e.kv.mod_revision).collect();
+        assert_eq!(revs, vec![top - 1, top]);
+        assert!(got[0].prev_kv.is_none(), "its previous record is compacted");
+        assert_eq!(got[1].prev_kv.as_ref().unwrap().mod_revision, top - 1);
+        assert!(matches!(
+            s.range_events(b"k", b"", top - 3).await,
+            Err(MvccError::Compacted { .. })
+        ));
     }
 
     /// fastetcd#212 (finding 839965788fbf): a LeaseGrant of an id that
