@@ -2100,6 +2100,20 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Debug logs for each transfer step with its elapsed time, the
       leader's state in the timeout's reason; the test takes `RUST_LOG`
       (d41e6f3).
-    - [ ] Diagnose: 20 runs alone with `fastetcd_raft=debug`, the failing
-      runs' logs kept.
-    - [ ] Fix, regression check (the same 20 runs pass), CHANGELOG/docs.
+    - [x] Diagnose. Alone on a quiet build VM: 20/20 pass (60–300 ms).
+      Under load (4 copies at once, 8 busy loops on 8 cores, 10 rounds):
+      10 of 40 fail. In a failing run the transfer read the leader's last
+      log id T1-N1-14, but the leader and member 3 then held T1-N1-15, so
+      both refused the target's votes "by last_log_id"; an ordinary
+      election 1.8 s later went back to member 1 and the transfer timed
+      out. Entry 15 got past the hold: the proposer checked it when it took
+      a proposal from its queue, then waited for its in-flight slot and
+      proposed after the transfer had read the log. A real MoveLeader bug
+      under load, not only test timing.
+    - [x] Fix: the proposer takes the hold (read) right before
+      `client_write` and keeps it until answered, so the transfer's hold
+      waits for every proposal in flight (bounded by its deadline); the
+      transfer re-reads the leader's last log id after the quorum accepted
+      and, if it moved (an entry proposed outside the proposer: lease
+      expiry, compaction), waits for the target again before asking it.
+    - [ ] Regression check: the same loaded 40 runs pass; full workspace.

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-25
+- **fix:** MoveLeader no longer fails under load because a write slipped in after the leader read its last log id (#237). The leader holds new proposals during a transfer, but its proposer checked the hold when it took a proposal off its queue, before waiting for its in-flight slot; a batch already past the check was proposed after the transfer had read the leader's log. The leader and the other member then held an entry the target lacked, refused its votes, and an ordinary election followed (often back to the old leader), so MoveLeader answered `leader transfer took too long` (`move_leader_hands_leadership_to_the_target` failed about 1 run in 5 on busy build hosts, 10 of 40 under load). The proposer now holds the guard from just before `client_write` until it is answered, so the transfer waits for proposals in flight; and the transfer re-checks the leader's last log id before asking the target, waiting for it again if an entry proposed outside the proposer (a lease expiry, a compaction) moved it. Each step of a transfer is logged at debug.
 - **fix:** The multinode test harness serves `ConfirmLeader` as the server does, so version gates (#160's start revision, #220's put versions) pass there; `three_node_cluster_replicates_via_grpc_transport` expects its first write at revision 2, as a real cluster's. Test only (#220).
 
 ### 2026-11-23
