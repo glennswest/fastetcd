@@ -39,6 +39,7 @@ struct Node {
     raft: Raft<TypeConfig>,
     /// The routes its forwarder and Cluster service share (#211).
     peers: fastetcd_raft::PeerEndpoints,
+    state: Arc<ServerState>,
 }
 
 async fn start_node(
@@ -100,6 +101,7 @@ async fn start_node(
     let maintenance = MaintenanceService::new(state.clone());
     let watch = WatchService::new(state.clone());
     let peer_mvcc = state.sm.mvcc().clone();
+    let node_state = state.clone();
     let lease = LeaseService::new(state);
     let peer_service = RaftPeerService::new(raft.clone(), peer_mvcc);
 
@@ -150,6 +152,7 @@ async fn start_node(
         client_endpoint: format!("http://{client_addr}"),
         raft,
         peers,
+        state: node_state,
     }
 }
 
@@ -1199,5 +1202,66 @@ async fn a_refused_request_stops_no_member() {
             .unwrap()
             .into_inner();
         assert_eq!(r.kvs.len(), 1, "the refused txn's delete was applied on {}", n.client_endpoint);
+    }
+}
+
+/// fastetcd#220: once every member runs this version, the leader switches
+/// the cluster to counting puts, and every member stores the version etcd
+/// would for a put after a compaction.
+#[tokio::test]
+async fn put_versions_switch_on_every_member_and_survive_compaction() {
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(
+        start_node(1, &members),
+        start_node(2, &members),
+        start_node(3, &members),
+    );
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+    let nodes = [&n1, &n2, &n3];
+    for n in nodes {
+        // As main does.
+        fastetcd_server::put_versions::follow(n.state.clone());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !nodes.iter().all(|n| n.state.sm.mvcc().has_put_versions()) {
+        assert!(tokio::time::Instant::now() < deadline, "PutVersions never applied on every member");
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // Writes through any member; retried if leadership moves (#44).
+    let mut kv = KvClient::connect(n2.client_endpoint.clone()).await.unwrap();
+    let mut revs = Vec::new();
+    for v in ["1", "2", "3"] {
+        let r = kv
+            .put(pb::PutRequest { key: b"k".to_vec(), value: v.into(), ..Default::default() })
+            .await
+            .unwrap()
+            .into_inner();
+        revs.push(r.header.unwrap().revision);
+    }
+    kv.compact(pb::CompactionRequest { revision: revs[1], physical: true }).await.unwrap();
+    kv.put(pb::PutRequest { key: b"k".to_vec(), value: b"4".to_vec(), ..Default::default() })
+        .await
+        .unwrap();
+    for n in nodes {
+        wait_for_value(n, b"k", b"4", "the put after the compaction").await;
+        let mut c = KvClient::connect(n.client_endpoint.clone()).await.unwrap();
+        let r = c
+            .range(pb::RangeRequest { key: b"k".to_vec(), serializable: true, ..Default::default() })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(r.kvs[0].version, 4, "member at {}: {:?}", n.client_endpoint, r.kvs[0]);
     }
 }

@@ -65,6 +65,8 @@ pub struct ServerState {
     pub nested_txn_gate: Arc<crate::version_gate::MembersAtLeast>,
     /// Every member reads `StartRevision` (`start_revision`, fastetcd#160).
     pub start_revision_gate: Arc<crate::version_gate::MembersAtLeast>,
+    /// Every member reads `PutVersions` (`put_versions`, fastetcd#220).
+    pub put_versions_gate: Arc<crate::version_gate::MembersAtLeast>,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -115,6 +117,9 @@ impl ServerState {
             )),
             start_revision_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
                 crate::start_revision::START_REVISION_SINCE,
+            )),
+            put_versions_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
+                crate::put_versions::PUT_VERSIONS_SINCE,
             )),
             write_behind: None,
             read_index: None,

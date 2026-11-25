@@ -44,6 +44,8 @@ pub struct Used {
     pub cluster_id_replicated: bool,
     /// The log has held a `StartRevision` entry (fastetcd#160).
     pub start_revision: bool,
+    /// The log has held a `PutVersions` entry (fastetcd#220).
+    pub put_versions: bool,
 }
 
 impl Used {
@@ -53,6 +55,7 @@ impl Used {
             batched: mvcc.has_batched(),
             cluster_id_replicated: mvcc.cluster_id().is_some(),
             start_revision: mvcc.has_start_revision(),
+            put_versions: mvcc.has_put_versions(),
         }
     }
 }
@@ -99,6 +102,14 @@ pub fn floors(used: Used) -> Vec<Floor> {
             since: (1, 41, 0),
             why: "this cluster's log has held a StartRevision entry (its store starts at revision \
                   1, as etcd's), which an older member cannot decode (#160)",
+        });
+    }
+    if used.put_versions {
+        out.push(Floor {
+            since: (1, 44, 0),
+            why: "this cluster's log has held a PutVersions entry (a put's version counts puts, as \
+                  etcd's), which an older member cannot decode, and would store other versions \
+                  for the same puts (#220)",
         });
     }
     out
@@ -176,7 +187,8 @@ mod tests {
     use tonic::Code;
 
     /// Every floor below 1.41 (these tests answer as 1.39).
-    const ALL: Used = Used { batched: true, cluster_id_replicated: true, start_revision: false };
+    const ALL: Used =
+        Used { batched: true, cluster_id_replicated: true, start_revision: false, put_versions: false };
 
     #[test]
     fn targets_parse() {
@@ -259,6 +271,19 @@ mod tests {
         assert!(err.message().contains("below 1.41.0"), "{}", err.message());
         assert!(err.message().contains("StartRevision"), "{}", err.message());
         assert!(err.message().contains("may go back to is 1.41.0"), "{}", err.message());
+    }
+
+    /// fastetcd#220: once the log has held a PutVersions entry, 1.44 is
+    /// the floor; before, 1.43 passes.
+    #[test]
+    fn a_put_versions_entry_sets_a_1_44_floor() {
+        assert_eq!(validate("1.44.0", "1.43.5", ALL).unwrap(), "1.44.0");
+        let used = Used { put_versions: true, start_revision: true, ..ALL };
+        let err = validate("1.44.0", "1.43.5", used).unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("below 1.44.0"), "{}", err.message());
+        assert!(err.message().contains("PutVersions"), "{}", err.message());
+        assert!(err.message().contains("may go back to is 1.44.0"), "{}", err.message());
     }
 
     #[test]

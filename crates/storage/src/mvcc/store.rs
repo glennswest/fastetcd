@@ -80,6 +80,12 @@ pub const META_KEY_BATCHED: &[u8] = b"batched";
 /// never cleared (fastetcd#160): a member older than 1.41 cannot read
 /// this log. Carried by snapshots.
 pub const META_KEY_START_REVISION: &[u8] = b"start_revision";
+/// Set (to `[1]`) by the first applied `PutVersions` log entry and never
+/// cleared (fastetcd#220): from that entry on, a put's version is the
+/// key's previous version + 1, as etcd counts it, not the revisions its
+/// generation still holds (which a compaction drops). Carried by
+/// snapshots; a member older than 1.44 cannot read this log.
+pub const META_KEY_PUT_VERSIONS: &[u8] = b"put_versions";
 /// The cluster id, replicated (fastetcd#38): set once by the first
 /// `ClusterId` log entry applied, carried by snapshots with the rest of
 /// `mvcc_meta`. Big-endian u64.
@@ -429,6 +435,9 @@ struct Inner {
     batched: AtomicBool,
     /// [`META_KEY_START_REVISION`], as the engine holds it (fastetcd#160).
     start_revision: AtomicBool,
+    /// [`META_KEY_PUT_VERSIONS`], as the engine holds it (fastetcd#220).
+    /// Read by apply under the write-state lock, set under it.
+    put_versions: AtomicBool,
     /// [`META_KEY_CLUSTER_ID`] as the engine holds it (0: not set yet),
     /// with a watch for the server to follow it (fastetcd#38).
     cluster_id: watch::Sender<u64>,
@@ -558,6 +567,7 @@ impl MvccStore {
         let next_lease = read_i64(&*snap, META_KEY_NEXT_LEASE_ID).await?.unwrap_or(0);
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
         let start_revision = snap.get(TABLE_META, META_KEY_START_REVISION).await?.is_some();
+        let put_versions = snap.get(TABLE_META, META_KEY_PUT_VERSIONS).await?.is_some();
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
 
@@ -590,6 +600,7 @@ impl MvccStore {
                 pending_raft_meta: Mutex::new(Vec::new()),
                 batched: AtomicBool::new(batched),
                 start_revision: AtomicBool::new(start_revision),
+                put_versions: AtomicBool::new(put_versions),
                 cluster_id: watch::channel(cluster_id).0,
                 installs: watch::channel(0).0,
                 auth: AuthMemory::default(),
@@ -742,6 +753,33 @@ impl MvccStore {
     /// (fastetcd#160).
     pub fn has_start_revision(&self) -> bool {
         self.inner.start_revision.load(Ordering::Relaxed)
+    }
+
+    /// Whether a put's version counts puts (fastetcd#220): this store's
+    /// log, or a snapshot it installed, has held a `PutVersions` entry.
+    pub fn has_put_versions(&self) -> bool {
+        self.inner.put_versions.load(Ordering::Relaxed)
+    }
+
+    /// Apply a `PutVersions` log entry (fastetcd#220): from now on a
+    /// put's version is the key's live record's version + 1 (1 for a put
+    /// that creates the key), as etcd's `generation.ver`, whatever a
+    /// compaction has dropped. Keys keep the versions they have. Commits
+    /// the staged raft metadata with the marker. Returns the current
+    /// revision.
+    pub async fn apply_put_versions(&self) -> MvccResult<i64> {
+        let state = self.inner.write_state.lock().await;
+        let mut batch = WriteBatch::new();
+        if !self.inner.put_versions.load(Ordering::Relaxed) {
+            batch.put(TABLE_META, META_KEY_PUT_VERSIONS, &[1]);
+        }
+        self.fold_raft_meta(&mut batch).await;
+        if !batch.is_empty() {
+            self.inner.engine.commit(batch, self.apply_write_options()).await?;
+        }
+        // Only after the commit: a failed one leaves the rule unchanged.
+        self.inner.put_versions.store(true, Ordering::Relaxed);
+        Ok(state.current_rev)
     }
 
     /// Whether this store's log has held a batched entry (fastetcd#77).
@@ -1021,11 +1059,15 @@ impl MvccStore {
         // A snapshot from a batched cluster carries the marker (#77).
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
         let start_revision = snap.get(TABLE_META, META_KEY_START_REVISION).await?.is_some();
+        // The version rule is the tables' own (#220): the member applies
+        // the log after the snapshot as the members that made it did.
+        let put_versions = snap.get(TABLE_META, META_KEY_PUT_VERSIONS).await?.is_some();
         // A snapshot from a cluster that has replicated its id carries it.
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
         self.inner.batched.fetch_or(batched, Ordering::Relaxed);
         self.inner.start_revision.fetch_or(start_revision, Ordering::Relaxed);
+        self.inner.put_versions.store(put_versions, Ordering::Relaxed);
         if cluster_id != 0 {
             self.inner.cluster_id.send_if_modified(|v| std::mem::replace(v, cluster_id) != cluster_id);
         }
@@ -2071,7 +2113,14 @@ impl MvccStore {
                     *lease
                 };
 
-                let (version, created) = idx.record_put(rev);
+                let (counted, created) = idx.record_put(rev);
+                // etcd counts a generation's puts (#220); the revisions
+                // the index still holds are fewer once compacted.
+                let version = if self.inner.put_versions.load(Ordering::Relaxed) {
+                    prev.as_ref().map_or(1, |p| p.version + 1)
+                } else {
+                    counted
+                };
                 let record = KvRecord {
                     key: key.clone(),
                     value: effective_value,
@@ -3207,6 +3256,124 @@ mod tests {
         assert!(old.has_start_revision());
         let (rev, _) = old.apply(&[put(b"b", b"1")]).await.unwrap();
         assert_eq!(rev, 2);
+    }
+
+    async fn version_of(s: &MvccStore, key: &[u8]) -> i64 {
+        s.range(key, b"", 0, 0, false, false).await.unwrap().kvs[0].version
+    }
+
+    /// fastetcd#220: a put after a compaction gets the version etcd gives
+    /// it (puts since the key was created), once `PutVersions` applied.
+    #[tokio::test]
+    async fn put_versions_count_puts_across_a_compaction() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mvcc.redb");
+        {
+            let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+            assert!(!s.has_put_versions());
+            assert_eq!(s.apply_put_versions().await.unwrap(), 0);
+            assert!(s.has_put_versions());
+            for v in 1..=3 {
+                s.apply(&[put(b"k", format!("{v}").as_bytes())]).await.unwrap();
+            }
+            assert_eq!(version_of(&s, b"k").await, 3);
+            // Compact at the second put (revision 2): the index keeps 2, 3.
+            s.compact(2).await.unwrap();
+            s.apply(&[put(b"k", b"4")]).await.unwrap();
+            assert_eq!(version_of(&s, b"k").await, 4);
+            // Compact past every put: one revision left, still counted.
+            s.compact(4).await.unwrap();
+            s.apply(&[put(b"k", b"5"), put(b"j", b"1")]).await.unwrap();
+            assert_eq!(version_of(&s, b"k").await, 5);
+            // A txn compares the stored version.
+            let r = s.txn(&[cmp_version_eq(b"k", 5)], &[txn_put(b"k", b"6")], &[]).await.unwrap();
+            assert!(r.succeeded);
+            assert_eq!(version_of(&s, b"k").await, 6);
+            // A delete ends the count; the next put starts at 1.
+            s.apply(&[del_range(b"k", b"")]).await.unwrap();
+            s.compact(s.current_revision().await).await.unwrap();
+            s.apply(&[put(b"k", b"new")]).await.unwrap();
+            assert_eq!(version_of(&s, b"k").await, 1);
+            s.apply(&[put(b"k", b"new2")]).await.unwrap();
+            assert_eq!(version_of(&s, b"k").await, 2);
+            // Applied again (a replay): unchanged.
+            s.apply_put_versions().await.unwrap();
+        }
+        // Reopened: the marker stayed.
+        let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        assert!(s.has_put_versions());
+        s.compact(s.current_revision().await).await.unwrap();
+        s.apply(&[put(b"k", b"new3")]).await.unwrap();
+        assert_eq!(version_of(&s, b"k").await, 3);
+    }
+
+    /// Without the marker a put keeps the old count, so a member that has
+    /// not applied `PutVersions` agrees with one that cannot decode it,
+    /// and a log replay stores what it stored before (fastetcd#220).
+    #[tokio::test]
+    async fn without_put_versions_a_put_counts_surviving_revisions() {
+        let (_d, s) = open_mvcc().await;
+        for v in 1..=3 {
+            s.apply(&[put(b"k", format!("{v}").as_bytes())]).await.unwrap();
+        }
+        s.compact(2).await.unwrap();
+        s.apply(&[put(b"k", b"4")]).await.unwrap();
+        assert_eq!(version_of(&s, b"k").await, 3);
+        // Switched: the next put continues from the stored version (it
+        // stays one low until the key is deleted, as 03-deploy says).
+        s.apply_put_versions().await.unwrap();
+        s.compact(s.current_revision().await).await.unwrap();
+        s.apply(&[put(b"k", b"5")]).await.unwrap();
+        assert_eq!(version_of(&s, b"k").await, 4);
+    }
+
+    /// A key imported with etcd's version and one revision (as
+    /// `fastetcd-migrate` writes it) continues from that version.
+    #[tokio::test]
+    async fn put_versions_continue_an_imported_version() {
+        let (_d, s) = open_mvcc().await;
+        let rec = KvRecord {
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            create_revision: 2,
+            mod_revision: 9,
+            version: 5,
+            lease: 0,
+            deleted: false,
+        };
+        s.bulk_load_records(vec![BulkKey { key: b"k".to_vec(), records: vec![rec] }], 10)
+            .await
+            .unwrap();
+        s.apply_put_versions().await.unwrap();
+        s.apply(&[put(b"k", b"w")]).await.unwrap();
+        assert_eq!(version_of(&s, b"k").await, 6);
+    }
+
+    /// The rule is the snapshot's: installing tables with the marker sets
+    /// it, and tables without it clear it (fastetcd#220).
+    #[tokio::test]
+    async fn install_tables_takes_the_put_versions_rule_from_the_snapshot() {
+        async fn tables_of(src: &MvccStore) -> WriteBatch {
+            let snap = src.engine().snapshot().await.unwrap();
+            let mut batch = WriteBatch::new();
+            for t in [TABLE_KV, TABLE_IDX, TABLE_META] {
+                batch.clear_table(t);
+                for (k, v) in snap.range(t, Bound::Unbounded, Bound::Unbounded, 0).await.unwrap() {
+                    batch.put(t, &k, &v);
+                }
+            }
+            batch
+        }
+        let (_d, s) = open_mvcc().await;
+        let (_d2, src) = open_mvcc().await;
+        src.apply_put_versions().await.unwrap();
+        src.apply(&[put(b"k", b"1")]).await.unwrap();
+        s.install_tables(tables_of(&src).await).await.unwrap();
+        assert!(s.has_put_versions());
+        let (_d3, old) = open_mvcc().await;
+        old.apply(&[put(b"k", b"1")]).await.unwrap();
+        s.install_tables(tables_of(&old).await).await.unwrap();
+        assert!(!s.has_put_versions());
     }
 
     #[tokio::test]

@@ -1494,6 +1494,7 @@ async fn main() -> anyhow::Result<()> {
     );
     fastetcd_server::cluster_id::follow(server_state.clone(), cluster_id_source);
     fastetcd_server::start_revision::follow(server_state.clone());
+    fastetcd_server::put_versions::follow(server_state.clone());
 
     // Periodic backups to a separate volume (fastetcd#37).
     if let Some(dir) = &args.backup_dir {
