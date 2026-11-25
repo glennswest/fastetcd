@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.1`** — a watch at a compacted revision gets etcd's two responses
+**`1.44.2`** — MoveLeader waits for the proposals in flight and
+re-checks the leader's log before asking the target, so a write cannot
+leave the target behind under load (#237). 1.44.1: a watch at a compacted revision gets etcd's two responses
 (created, then cancelled with `compact_revision` and no reason), so
 clientv3 reports `ErrCompacted`; a watch from the compact revision itself
 is served (#222). 1.44.0: a key's Version counts puts after a compaction,
