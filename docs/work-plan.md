@@ -2279,5 +2279,12 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Tests: storage (the empty batch at 1, then the write's at 2;
       nothing when applied again); server `watch_first_write.rs` (a watch
       on a new store gets the first write at 2, no resync).
-    - [ ] sc-build: the test on the fix and on the old store.rs (control);
-      clippy; workspace; CHANGELOG; release 1.44.7.
+    - [x] Control (old store.rs, `watch_first_write`): the stream resynced
+      once (the gap). Fix: passes. sc-build of afff73a: `watch_first_write`
+      and `put_versions` 5/5 each; clippy `--workspace --all-targets -D
+      warnings` clean; workspace `--no-fail-fast` 0 fail. CHANGELOG.
+      Release 1.44.7.
+    - Found on the way: `put_versions` (#220's test) restarted its member
+      on the same data dir without waiting for the first to exit (drop
+      only starts the kill); once in a full build the restart found the
+      file held and exited. It now kills and waits (afff73a).
