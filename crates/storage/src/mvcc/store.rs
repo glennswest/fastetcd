@@ -860,6 +860,12 @@ impl MvccStore {
             let _index = self.inner.cache.index.write();
             self.inner.view.publish(Revs { current: START_REVISION, ..before });
             state.current_rev = START_REVISION;
+            // Subscribers take a revision that moved with no batch for one
+            // they missed (a watch stream's "revision gap", Lock's re-read).
+            // This move has no events, so it is published as an empty batch
+            // at its revision: the first write's batch, at 2, then follows
+            // it (#223).
+            let _ = self.inner.event_tx.send(EventBatch { revision: START_REVISION, events: Vec::new() });
         }
         Ok(state.current_rev)
     }
@@ -3378,6 +3384,23 @@ mod tests {
         old.apply(&[put(b"k", b"1")]).await.unwrap();
         s.install_tables(tables_of(&old).await).await.unwrap();
         assert!(!s.has_put_versions());
+    }
+
+    /// fastetcd#223: the start revision is published as an empty batch at
+    /// revision 1, so the first write's batch (at 2) follows without a gap.
+    #[tokio::test]
+    async fn the_start_revision_is_an_empty_batch_before_the_first_write() {
+        let (_d, s) = open_mvcc().await;
+        let mut rx = s.subscribe();
+        s.apply_start_revision().await.unwrap();
+        let b = rx.recv().await.unwrap();
+        assert_eq!((b.revision, b.events.len()), (START_REVISION, 0));
+        s.apply(&[put(b"a", b"1")]).await.unwrap();
+        let b = rx.recv().await.unwrap();
+        assert_eq!((b.revision, b.events.len()), (2, 1));
+        // Applied again: the store does not move, and nothing is sent.
+        s.apply_start_revision().await.unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

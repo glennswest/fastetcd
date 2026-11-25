@@ -2266,3 +2266,18 @@ Tracked live in the Claude task system. Snapshot of the order:
       stopped follower 13. sc-build of 865cdac: clippy `--workspace
       --all-targets -D warnings` clean, workspace `--no-fail-fast` 567
       pass, 0 fail. 03-deploy, CHANGELOG. Release 1.44.6.
+
+124. **A spurious watch "revision gap" at every new store's first write
+    (#223, P3).** `StartRevision` (#160) moves a new store from 0 to 1 with
+    no event batch; the watch forwarder (and Lock/Campaign's `next_batch`)
+    rely on revisions advancing only with batches, so a stream subscribed
+    at 0 saw the first write's batch at 2 as a gap: a WARN and a needless
+    resync on every member.
+    - [x] `apply_start_revision` sends an empty batch at revision 1 when the
+      store moves (nothing is sent to watch clients for it; `next_batch`
+      reads it as a batch without the key's delete), so the rule holds.
+    - [x] Tests: storage (the empty batch at 1, then the write's at 2;
+      nothing when applied again); server `watch_first_write.rs` (a watch
+      on a new store gets the first write at 2, no resync).
+    - [ ] sc-build: the test on the fix and on the old store.rs (control);
+      clippy; workspace; CHANGELOG; release 1.44.7.
