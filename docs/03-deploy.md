@@ -711,6 +711,13 @@ With `--initial-cluster-state=new` (the default) each node calls
 `raft.initialize` with the same member set; openraft elects a leader
 among them. After bootstrap, `MemberAdd` adds new nodes (start them
 with `--initial-cluster-state=existing`); `MemberRemove` removes them.
+A node started with `existing` and no `--node-id` runs as the id
+`MemberAdd` gave its advertised peer URL (`--initial-advertise-peer-urls`,
+else `--listen-peer-urls`; the URL given to `member add`, written the
+same way), and on a restart as the id its own raft membership has at
+that URL, so it keeps it across `member update`. Before 1.44.4 it ran as
+the hash of its `--name`, which the membership did not have, unless
+`--node-id` was given (#232; `tests/member_join.sh`).
 On separate hosts, listen on a routable address and set
 `--advertise-client-urls` / `--initial-advertise-peer-urls` to it.
 

@@ -34,6 +34,7 @@ pub mod lease;
 pub mod lease_expiry;
 pub mod maintenance;
 pub mod metrics;
+pub mod node_id;
 pub mod persisted_requests;
 pub mod process_metrics;
 pub mod ram_cache;

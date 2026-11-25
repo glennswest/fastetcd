@@ -53,7 +53,10 @@ struct Args {
     #[arg(long, env = "FASTETCD_NAME", default_value = "default")]
     name: String,
 
-    /// Numeric node ID; auto-derived from `name` if omitted.
+    /// Numeric node ID. When omitted: derived from `--name` with
+    /// `--initial-cluster-state new`; with `existing`, the id `member add`
+    /// gave this member's advertised peer URL (no raft state yet), or the
+    /// id its own raft membership has at that URL (#232).
     #[arg(long, env = "FASTETCD_NODE_ID")]
     node_id: Option<u64>,
 
@@ -796,13 +799,65 @@ fn apply_etcd_env_compat() {
     }
 }
 
-fn derive_node_id(name: &str) -> NodeId {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in name.as_bytes() {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+/// This member's raft id (`fastetcd_server::node_id`, fastetcd#232):
+/// `--node-id`; else, joining an existing cluster, the id `MemberAdd`
+/// gave its advertised peer URL, or on a restart the id its own raft
+/// membership has at that URL; else its `--name`.
+/// This member's first advertised peer URL, as written: the address
+/// `member add` records for it.
+fn advertised_peer_url(args: &Args) -> String {
+    args.initial_advertise_peer_urls
+        .as_deref()
+        .unwrap_or(&args.listen_peer_urls)
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn resolve_node_id(args: &Args) -> anyhow::Result<NodeId> {
+    use fastetcd_server::node_id::{resolve, Source};
+    let existing = !args.initial_cluster_state.eq_ignore_ascii_case("new");
+    let advertised = advertised_peer_url(args);
+    let membership: Option<Vec<(NodeId, String)>> = if args.node_id.is_none() && existing {
+        match fastetcd_raft::wal_log_store::durable_membership(&args.data_dir) {
+            Ok(Some(m)) => Some(m.nodes().map(|(id, n)| (*id, n.addr.clone())).collect()),
+            // Data but no raft membership on disk (a data file from before
+            // the WAL, not yet migrated): not a member joining. By name.
+            Ok(None) if args.data_dir.join("fastetcd.redb").exists() => Some(Vec::new()),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading this member's raft membership to find its id; using --name");
+                Some(Vec::new())
+            }
+        }
+    } else {
+        None
+    };
+    let (id, source) = resolve(args.node_id, &args.name, existing, &advertised, membership.as_deref());
+    match source {
+        Source::Flag | Source::Name | Source::NameInMembership => {}
+        Source::Membership => tracing::info!(
+            node_id = format_args!("{id:x}"),
+            peer_url = %advertised,
+            "this member's id is the one its raft membership has at its peer URL"
+        ),
+        Source::PeerUrl => tracing::info!(
+            node_id = format_args!("{id:x}"),
+            peer_url = %advertised,
+            "joining an existing cluster: this member's id is the one `member add` gave its peer URL \
+             (pass --node-id to choose another)"
+        ),
+        Source::NameNotInMembership => tracing::warn!(
+            node_id = format_args!("{id:x}"),
+            peer_url = %advertised,
+            name = %args.name,
+            "neither this member's peer URL nor its --name is in its raft membership; running as \
+             its --name's id"
+        ),
     }
-    (hash & 0x7FFF_FFFF_FFFF_FFFF).max(1)
+    Ok(id)
 }
 
 /// Backups on the data volume share its fate: a device that loses
@@ -890,8 +945,10 @@ async fn run_subcommand(
             )?;
             let mut all_members: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
             all_members.insert(node_id, openraft::BasicNode::new(own_peer_url));
+            let own_url = advertised_peer_url(args);
             for (name, url) in parse_initial_cluster(&args.initial_cluster)? {
-                all_members.insert(derive_node_id(&name), openraft::BasicNode::new(url));
+                let id = fastetcd_server::node_id::of_listed(&name, &url, node_id, &own_url);
+                all_members.insert(id, openraft::BasicNode::new(url));
             }
             let code = admin::cmd_fsck(&args.data_dir, &all_members, node_id, *repair).await?;
             std::process::exit(code);
@@ -928,7 +985,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .init();
-    let node_id = args.node_id.unwrap_or_else(|| derive_node_id(&args.name));
+    let node_id = resolve_node_id(&args)?;
 
     // Offline data-directory subcommands. These run and exit; the server
     // must be stopped (each opens the redb file exclusively).
@@ -1030,9 +1087,10 @@ async fn main() -> anyhow::Result<()> {
 
     // A corrupt data file is restored from a backup on a lone member
     // rather than crash-looping (fastetcd#37).
+    let own_url = advertised_peer_url(&args);
     let configured_members = initial_cluster
-        .keys()
-        .map(|name| derive_node_id(name))
+        .iter()
+        .map(|(name, url)| fastetcd_server::node_id::of_listed(name, url, node_id, &own_url))
         .chain(std::iter::once(node_id))
         .collect::<std::collections::BTreeSet<_>>()
         .len();
@@ -1256,9 +1314,11 @@ async fn main() -> anyhow::Result<()> {
 
     let mut peers_map: BTreeMap<NodeId, String> = BTreeMap::new();
     let mut all_members: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
-    all_members.insert(node_id, openraft::BasicNode::new(own_peer_url));
+    all_members.insert(node_id, openraft::BasicNode::new(own_peer_url.clone()));
+    // The entry at this member's own URL is this member (#232).
+    let listed_id = |name: &str, url: &str| fastetcd_server::node_id::of_listed(name, url, node_id, &own_peer_url);
     for (name, url) in &initial_cluster {
-        let nid = derive_node_id(name);
+        let nid = listed_id(name, url);
         all_members.insert(nid, openraft::BasicNode::new(url.clone()));
         if nid != node_id {
             peers_map.insert(nid, url.clone());
@@ -1272,7 +1332,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut dir = directory.write().await;
         for (name, url) in &initial_cluster {
-            let nid = derive_node_id(name);
+            let nid = listed_id(name, url);
             dir.insert(
                 nid,
                 fastetcd_server::cluster::MemberInfo {

@@ -2178,3 +2178,24 @@ Tracked live in the Claude task system. Snapshot of the order:
       cluster_maintenance (6), authz_admin (8), multinode_fastpath (16)
       pass. CHANGELOG, 03-deploy § Membership changes go to the leader.
       Release 1.44.3.
+
+121. **A member started after `member add` runs under another raft id
+    (#232, P3).** `MemberAdd` gives the id FNV-1a(first peer URL); a member
+    started with `existing` took FNV-1a(`--name`), so 05's "Add it back"
+    procedure started a member the membership did not have unless
+    `--node-id` was passed. Fix, without asking the peers (equivalent:
+    `MemberAdd` records the hashed URL as the member's address):
+    - [x] `node_id::resolve`: `--node-id`; `new` -> name; `existing` with
+      its own durable raft membership (WAL/snapshot) -> the member at its
+      advertised peer URL, else the name id (in it, or not, warned); with
+      no raft state -> FNV-1a(advertised URL), `MemberAdd`'s id. A data
+      file with no membership, or a WAL that cannot be read: by name.
+    - [x] The `--initial-cluster` entry at the member's own URL is the
+      member (`node_id::of_listed`): routes, directory, recovery's member
+      count, fsck. Unit tests.
+    - [x] `tests/member_join.sh` (etcdctl 3.5.17): add n4, start it without
+      `--node-id`, its id, a write, promote; restart; `member update` to a
+      new URL and restart there.
+    - [x] Docs: 01 (`--node-id`), 03 (Multi-node), 05 (Add it back).
+    - [ ] sc-build: the script on this tree and on 1.44.3 (control);
+      clippy; workspace; release 1.44.4.

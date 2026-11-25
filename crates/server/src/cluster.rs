@@ -83,13 +83,8 @@ impl ClusterService {
     /// Derive a stable NodeId from a member's peer URL (used when the
     /// caller did not supply one). FNV-1a over the URL bytes, masked
     /// to 63 bits to avoid openraft's sentinel values.
-    fn derive_node_id_from_url(url: &str) -> NodeId {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for b in url.as_bytes() {
-            hash ^= *b as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        (hash & 0x7FFF_FFFF_FFFF_FFFF).max(1)
+    pub fn derive_node_id_from_url(url: &str) -> NodeId {
+        crate::node_id::from_peer_url(url)
     }
 }
 
