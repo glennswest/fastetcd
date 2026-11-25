@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-25
-- **fix:** The upgrade safety backup keeps acknowledged writes held only in the raft WAL (#231). It copied the data file before the WAL replays, so after a kill (the data file durable only to its last checkpoint) the last writes were only in the WAL, and `fastetcd restore` of the backup moved the WAL aside: those writes were lost. The backup now copies `wal/` beside it (`<backup>.wal/`), counted in its space check and rolled off with it, and `restore` puts it back, so the next start replays it as a restart after the kill would. Nothing of the new version runs before the backup, as before. A WAL with entries counts as data, so a data file still at revision 0 is backed up too. 05, 04, 01.
 - **fix:** `a_stuck_fsync_or_checkpoint_says_which_it_is` no longer flakes with "the checkpoint never returned" (#236). Its wait for the stuck checkpoint to end shared a 10 s deadline with the wait for it to be stuck, which a loaded build VM could use up, and it waited for no checkpoint at all to be in flight. It now waits, on its own 30 s deadline (a checkpoint is 2.5 s of delay plus a real fsync, slow on a busy host), for the checkpoint count to rise past its value when the stuck one was seen, and checks that any checkpoint still in flight is a newer one. Not reproduced in 120 loaded runs (CPU or disk load, old or new test), so the fix removes the shared deadline and the "none in flight" wait rather than a measured cause. Test only.
 - **fix:** The multinode test harness serves `ConfirmLeader` as the server does, so version gates (#160's start revision, #220's put versions) pass there; `three_node_cluster_replicates_via_grpc_transport` expects its first write at revision 2, as a real cluster's. Test only (#220).
 
@@ -54,6 +53,11 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.44.5] — 2026-11-25
+
+### Fixed
+- **fix:** The upgrade safety backup keeps acknowledged writes held only in the raft WAL (#231). It copied the data file before the WAL replays, so after a kill (the data file durable only to its last checkpoint) the last writes were only in the WAL, and `fastetcd restore` of the backup moved the WAL aside: those writes were lost. The backup now copies `wal/` beside it (`<backup>.wal/`), counted in its space check and rolled off with it, and `restore` puts it back, so the next start replays it as a restart after the kill would. Nothing of the new version runs before the backup, as before. A WAL with entries counts as data, so a data file still at revision 0 is backed up too. 05, 04, 01.
 
 ## [v1.44.4] — 2026-11-25
 

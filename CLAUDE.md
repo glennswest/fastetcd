@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.4`** — a member joining with `existing` and no `--node-id`
+**`1.44.5`** — the upgrade safety backup copies the raft WAL beside the
+data file and `restore` puts it back, so writes a kill left only in the
+WAL are kept (#231). 1.44.4: a member joining with `existing` and no `--node-id`
 runs as the id `member add` gave its peer URL, and records its id in
 `<data-dir>/member_id` (#232). 1.44.3: membership changes go to the leader, which waits for one
 in progress, so a voter `member add` right after start-up no longer
