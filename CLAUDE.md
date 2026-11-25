@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.6`** — replication to a member that cannot be dialed backs off
+**`1.44.7`** — the start revision is published as an empty event batch,
+so a new store's first write is no watch "revision gap" (#223). 1.44.6:
+replication to a member that cannot be dialed backs off
 (Unreachable: 100, 200, 400, then 500 ms) instead of retrying in a tight
 loop (#226). 1.44.5: the upgrade safety backup copies the raft WAL beside the
 data file and `restore` puts it back, so writes a kill left only in the
