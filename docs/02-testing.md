@@ -110,7 +110,9 @@ disk. The other scripts: `tests/clientv3_reauth.sh` (etcd's Go client
 across a member restart, #105), `tests/clientv3_concurrency.sh` (etcd's Go client's Range sort and
 revision filters, and its `concurrency` Mutex and Election, #154),
 `tests/clientv3_fragment.sh` (etcd's Go
-client joins watch fragments, #58), `tests/chart_args.sh`,
+client joins watch fragments, #58), `tests/clientv3_compacted.sh`
+(clientv3 v3.6.11 gets `ErrCompacted` once for a watch at a compacted
+revision and the watch closes, #222), `tests/chart_args.sh`,
 `tests/migrate_e2e.sh`.
 
 `CHURN=1 MEMBERS=3 tests/read_latency.sh` restarts the leader a few
@@ -272,7 +274,7 @@ traffic and injects the faults; no scenario passes yet. What it found:
   `Version` left out, `replay.py` finds no read that disagrees).
 - clientv3 loops forever on a watch at a compacted revision (#222):
   after a member is killed and restarted, the suite's watch on it never
-  finishes (`TestRobustnessRegression/Issue13766`).
+  finishes (`TestRobustnessRegression/Issue13766`). Fixed in 1.44.1.
 - On a healthy 3-member cluster writes take 130–400 ms, past the suite's
   200 ms request timeout, and it reaches under its 100 qps floor (#204).
 - A spurious watch "revision gap" warning on every new store (#223).

@@ -296,7 +296,12 @@ cancelled with `compact_revision` set (etcd's `ErrCompacted`), and the
 client re-lists and re-watches from there. The replay reads history and
 the compact revision from one consistent view, so a compaction that
 lands while it starts cancels it rather than leaving a gap (1.43.1,
-#212). Clients can therefore rely on
+#212). A create below the compact revision is answered as etcd
+answers it: the created acknowledgement, then the cancel with
+`compact_revision` and no `cancel_reason`, which clientv3 reports as
+`ErrCompacted`; one response both created and canceled with a reason is
+a failed create to clientv3, which re-created the watch in a loop (#222).
+Clients can therefore rely on
 "no cancel" meaning "my cache is current", with no periodic re-list.
 
 Resyncs and lag cancellations are logged at `warn` on the
