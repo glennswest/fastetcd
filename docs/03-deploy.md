@@ -747,12 +747,16 @@ each back and applying before the next.
 while auth is on), it hands leadership to another voter, as etcd's
 `MoveLeader` does:
 
-1. the leader holds new proposals and waits until the target's log
-   holds everything it has appended;
+1. the leader holds new proposals, waits for those already in flight to
+   be answered, and waits until the target's log holds everything it has
+   appended;
 2. it asks every other voter, over the `TransferLeader` peer RPC, to
    stop refusing votes by its leader lease (for that leader's vote only,
    for twice the lease), and does the same itself; a quorum with the
-   target must accept, or nothing more happens;
+   target must accept, or nothing more happens. If the leader's log moved
+   meanwhile (a lease expiry or a compaction, which do not go through
+   the held proposals), back to 1: a member holding an entry the target
+   lacks would refuse its votes (1.44.2, #237);
 3. it asks the target, which starts an election at the next term;
 4. it answers once the target leads.
 
