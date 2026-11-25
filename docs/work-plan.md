@@ -2026,19 +2026,27 @@ Tracked live in the Claude task system. Snapshot of the order:
     Also hit migrated keys: `fastetcd-migrate` keeps etcd's version but one
     revision, so the next put was version 2. Plan (the issue's recommended
     option, no index format change):
-    - [ ] storage: with the marker set, a put's version is the key's live
+    - [x] storage: with the marker set, a put's version is the key's live
       record's version + 1 (1 when it opens a generation); without it, the
       old count, so members and log replays agree. Marker
       `mvcc_meta/put_versions`, set by `MvccStore::apply_put_versions`,
       carried by snapshots (taken from the snapshot on install).
-    - [ ] raft: `FastetcdLogEntry::PutVersions` (appended last), applied as
+    - [x] raft: `FastetcdLogEntry::PutVersions` (appended last), applied as
       above, answers as a Noop.
-    - [ ] server: a leader proposes it once every member answers as 1.44 or
+    - [x] server: a leader proposes it once every member answers as 1.44 or
       later (`put_versions::follow`, strict gate); downgrade floor 1.44;
       persisted-requests dump skips it.
-    - [ ] tests: storage (compaction then put, migrated-style key, old rule
+    - [x] tests: storage (compaction then put, migrated-style key, old rule
       without the marker, snapshot carries it), server (cluster proposes
       it; version after compact over gRPC).
-    - [ ] docs (00-design, 03-deploy: keys already stored keep a too-low
-      version until deleted; upgrade/downgrade), CHANGELOG, release 1.44.0.
+    - [x] docs (00-design, 03-deploy: keys already stored keep a too-low
+      version until deleted; upgrade/downgrade), CHANGELOG, release 1.44.0
+      (3eb2654).
+    - Found while testing: the multinode harness's peer service had no log
+      progress, so it answered `ConfirmLeader` as Unimplemented (a member
+      older than 1.10) and no version gate could pass there; it now serves
+      it, as main's does (6da7c17).
+    - [x] Negative control (wip/220-negative-control, apply keeping the old
+      count): the storage tests read 3 for 4 and 2 for an imported 6; the
+      3-member test reads version 3 on a member, the real-binary test 3.
     - [ ] sc-build green; negative control.
