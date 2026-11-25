@@ -359,10 +359,14 @@ impl ServerState {
         node_id: fastetcd_raft::NodeId,
         addr: &str,
     ) -> Result<(), Status> {
-        match self
-            .raft
-            .add_learner(node_id, openraft::BasicNode::new(addr), false)
-            .await
+        let change = MembershipChange::AddLearner { node_id, addr: addr.to_string() };
+        if let Some(sent) = self.membership_to_leader(&change).await {
+            return sent;
+        }
+        match fastetcd_raft::network::change_membership_waiting(&self.raft, || {
+            self.raft.add_learner(node_id, openraft::BasicNode::new(addr), false)
+        })
+        .await
         {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -387,7 +391,15 @@ impl ServerState {
         &self,
         voters: std::collections::BTreeSet<fastetcd_raft::NodeId>,
     ) -> Result<(), Status> {
-        match self.raft.change_membership(voters.clone(), false).await {
+        let change = MembershipChange::SetVoters { voters: voters.iter().copied().collect() };
+        if let Some(sent) = self.membership_to_leader(&change).await {
+            return sent;
+        }
+        match fastetcd_raft::network::change_membership_waiting(&self.raft, || {
+            self.raft.change_membership(voters.clone(), false)
+        })
+        .await
+        {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.forward_membership(
@@ -412,8 +424,16 @@ impl ServerState {
         node_id: fastetcd_raft::NodeId,
         addr: &str,
     ) -> Result<(), Status> {
+        let forwarded = MembershipChange::SetNodeAddr { node_id, addr: addr.to_string() };
+        if let Some(sent) = self.membership_to_leader(&forwarded).await {
+            return sent;
+        }
         let change = fastetcd_raft::network::set_node_addr(node_id, addr);
-        match self.raft.change_membership(change, false).await {
+        match fastetcd_raft::network::change_membership_waiting(&self.raft, || {
+            self.raft.change_membership(change.clone(), false)
+        })
+        .await
+        {
             Ok(_) => Ok(()),
             Err(e) => self
                 .forward_membership(
@@ -423,6 +443,24 @@ impl ServerState {
                 .await
                 .unwrap_or_else(|| Err(Status::unavailable(format!("raft change_membership: {e}")))),
         }
+    }
+
+    /// When another member is the known leader, send `change` to it
+    /// straight away (`None` otherwise: this member leads, or no leader is
+    /// known). openraft checks a membership change against this member's
+    /// own view before it checks leadership, so a follower that has the
+    /// leader's last membership entry but has not yet heard it committed
+    /// refused the change as "already undergoing a configuration change"
+    /// instead of forwarding it (fastetcd#234).
+    async fn membership_to_leader(&self, change: &MembershipChange) -> Option<Result<(), Status>> {
+        let leader = {
+            let m = self.raft.metrics();
+            let m = m.borrow();
+            m.current_leader.filter(|l| *l != m.id)
+        }?;
+        Some(self.forwarder.forward_membership(leader, change).await.map_err(|msg| {
+            Status::unavailable(format!("forwarded membership change to leader {leader}: {msg}"))
+        }))
     }
 
     /// If `err` is a `ForwardToLeader` naming a leader, send `change`

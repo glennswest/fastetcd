@@ -1270,3 +1270,70 @@ async fn put_versions_switch_on_every_member_and_survive_compaction() {
         assert_eq!(r.kvs[0].version, 4, "member at {}: {:?}", n.client_endpoint, r.kvs[0]);
     }
 }
+
+/// fastetcd#234: membership changes in quick succession through
+/// followers, straight after bootstrap. openraft checks a change against
+/// the serving member's own view before it checks leadership, so a
+/// follower that had the last membership entry but had not yet heard it
+/// committed refused the next change ("already undergoing a configuration
+/// change") instead of forwarding it. Each change now goes to the leader.
+#[tokio::test]
+async fn voter_adds_and_removes_through_followers_in_quick_succession() {
+    use fastetcd_proto::etcdserverpb::cluster_client::ClusterClient;
+
+    let p1 = pick_free_port().await;
+    let p2 = pick_free_port().await;
+    let p3 = pick_free_port().await;
+    let mut members: BTreeMap<NodeId, String> = BTreeMap::new();
+    members.insert(1, format!("http://127.0.0.1:{p1}"));
+    members.insert(2, format!("http://127.0.0.1:{p2}"));
+    members.insert(3, format!("http://127.0.0.1:{p3}"));
+    let (n1, n2, n3) = tokio::join!(start_node(1, &members), start_node(2, &members), start_node(3, &members));
+    sleep(Duration::from_millis(150)).await;
+    let mut all: BTreeMap<NodeId, openraft::BasicNode> = BTreeMap::new();
+    for (id, url) in &members {
+        all.insert(*id, openraft::BasicNode::new(url.clone()));
+    }
+    n1.raft.initialize(all).await.unwrap();
+    let leader_id = wait_for_leader(&n1, 0).await;
+    let by_id = |id: NodeId| match id {
+        1 => &n1,
+        2 => &n2,
+        3 => &n3,
+        other => panic!("unexpected node id {other}"),
+    };
+    // As in membership_changes_forward_from_a_follower: the initial
+    // membership must be committed on the leader first (#44).
+    by_id(leader_id)
+        .raft
+        .wait(Some(Duration::from_secs(10)))
+        .applied_index_at_least(Some(1), "initial membership committed")
+        .await
+        .unwrap();
+    let followers: Vec<NodeId> = (1..=3u64).filter(|id| *id != leader_id).collect();
+    let mut clients = Vec::new();
+    for f in &followers {
+        clients.push(ClusterClient::connect(by_id(*f).client_endpoint.clone()).await.unwrap());
+    }
+
+    for round in 0..4usize {
+        let (a, b) = (round % 2, (round + 1) % 2);
+        let url = format!("http://127.0.0.1:{}", 59000 + round);
+        let added = clients[a]
+            .member_add(pb::MemberAddRequest { peer_ur_ls: vec![url.clone()], is_learner: false })
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: voter MemberAdd through member {}: {e}", followers[a]))
+            .into_inner();
+        let id = added.member.unwrap().id;
+        let voters: Vec<NodeId> =
+            by_id(leader_id).raft.metrics().borrow().membership_config.voter_ids().collect();
+        assert!(voters.contains(&id), "round {round}: {id} is not a voter on the leader: {voters:?}");
+        clients[b]
+            .member_remove(pb::MemberRemoveRequest { id })
+            .await
+            .unwrap_or_else(|e| panic!("round {round}: MemberRemove through member {}: {e}", followers[b]));
+    }
+    let voters: std::collections::BTreeSet<NodeId> =
+        by_id(leader_id).raft.metrics().borrow().membership_config.voter_ids().collect();
+    assert_eq!(voters, (1..=3u64).collect(), "the original voters, and only them");
+}

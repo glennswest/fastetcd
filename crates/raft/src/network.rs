@@ -183,6 +183,58 @@ pub fn set_node_addr(node_id: NodeId, addr: &str) -> openraft::ChangeMembers<Nod
     openraft::ChangeMembers::SetNodes([(node_id, openraft::BasicNode::new(addr))].into_iter().collect())
 }
 
+/// How long a membership change on the leader waits for one already in
+/// progress (fastetcd#234).
+pub const MEMBERSHIP_IN_PROGRESS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The result of a membership change, as openraft returns it.
+pub type MembershipResult = Result<
+    openraft::raft::ClientWriteResponse<TypeConfig>,
+    RaftError<NodeId, openraft::error::ClientWriteError<NodeId, openraft::BasicNode>>,
+>;
+
+/// Whether openraft refused a membership change because another is not
+/// committed yet.
+pub fn is_membership_in_progress(
+    e: &RaftError<NodeId, openraft::error::ClientWriteError<NodeId, openraft::BasicNode>>,
+) -> bool {
+    matches!(
+        e,
+        RaftError::APIError(openraft::error::ClientWriteError::ChangeMembershipError(
+            openraft::error::ChangeMembershipError::InProgress(_)
+        ))
+    )
+}
+
+/// Make a membership change (`add_learner`, `change_membership`) and, while
+/// this member leads, try again for up to [`MEMBERSHIP_IN_PROGRESS_WAIT`]
+/// when openraft refuses it because a change before it is not committed
+/// yet: another MemberAdd's, or the initial membership of a new leader.
+/// etcd applies configuration changes one after another; it does not
+/// refuse the second (fastetcd#234). Any other answer, and a refusal on a
+/// member that does not lead (openraft checks its own, possibly older,
+/// view of the membership before it checks leadership), is returned as is.
+pub async fn change_membership_waiting<F, Fut>(raft: &Raft<TypeConfig>, mut change: F) -> MembershipResult
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = MembershipResult>,
+{
+    let deadline = tokio::time::Instant::now() + MEMBERSHIP_IN_PROGRESS_WAIT;
+    loop {
+        match change().await {
+            Err(e)
+                if is_membership_in_progress(&e)
+                    && crate::precheck::is_leader(raft)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tracing::debug!(error = %e, "membership change waits for the one in progress");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// The URL raft dials `target` at: its replicated `addr`, or the peers
 /// map's entry when the membership holds no address (fastetcd#211).
 pub async fn route(addr: &str, target: NodeId, peers: &PeerEndpoints) -> Option<String> {
@@ -877,28 +929,32 @@ impl pb::raft_peer_server::RaftPeer for RaftPeerService {
         // leadership changed again, so stringify rather than propagate
         // ForwardToLeader and let the caller retry.
         let result: Result<(), String> = match change {
-            crate::types::MembershipChange::AddLearner { node_id, addr } => self
-                .raft
-                .add_learner(node_id, openraft::BasicNode::new(&addr), false)
+            crate::types::MembershipChange::AddLearner { node_id, addr } => {
+                change_membership_waiting(&self.raft, || {
+                    self.raft.add_learner(node_id, openraft::BasicNode::new(&addr), false)
+                })
                 .await
                 .map(|_| ())
-                .map_err(|e| e.to_string()),
-            crate::types::MembershipChange::SetVoters { voters } => self
-                .raft
-                .change_membership(voters.into_iter().collect::<std::collections::BTreeSet<_>>(), false)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| e.to_string())
+            }
+            crate::types::MembershipChange::SetVoters { voters } => {
+                let voters: std::collections::BTreeSet<NodeId> = voters.into_iter().collect();
+                change_membership_waiting(&self.raft, || self.raft.change_membership(voters.clone(), false))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
             crate::types::MembershipChange::SetNodeAddr { node_id, addr } => {
                 // SetNodes adds a node it does not find, as a learner:
                 // only a member is moved.
                 let known = self.raft.metrics().borrow().membership_config.membership().get_node(&node_id).is_some();
                 if known {
-                    self.raft
-                        .change_membership(set_node_addr(node_id, &addr), false)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
+                    change_membership_waiting(&self.raft, || {
+                        self.raft.change_membership(set_node_addr(node_id, &addr), false)
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
                 } else {
                     Err(format!("member {node_id:x} not found"))
                 }

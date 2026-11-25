@@ -168,7 +168,16 @@ impl Cluster for ClusterService {
         self.state.propose_add_learner(new_id, &first_url).await?;
 
         if !req.is_learner {
-            // Promote to voter via change_membership.
+            // Promote to voter via change_membership. The voter set is read
+            // from this member's view of the membership: on a follower, wait
+            // until that view holds the learner just added, so it holds
+            // every membership entry before it too (#234).
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.state.raft.metrics().borrow().membership_config.membership().get_node(&new_id).is_none()
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             let current_voters = current_voter_set(&self.state.raft).await;
             let mut new_voters: BTreeSet<NodeId> = current_voters;
             new_voters.insert(new_id);
