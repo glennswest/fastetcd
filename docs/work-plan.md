@@ -2056,3 +2056,23 @@ Tracked live in the Claude task system. Snapshot of the order:
       warnings` clean; workspace `--no-fail-fast` 557 pass, 0 fail, incl.
       the 4 storage tests, `put_versions` (real binary: compaction, Compare,
       restart), the 3-member test, the 1.44 floor.
+
+117. **clientv3 loops on a watch at a compacted revision (#222, found by
+    etcd's robustness suite).** A create below the compact revision was
+    answered by one response, `created` + `canceled` + `compact_revision`
+    + a `cancel_reason`; clientv3 (`addSubstream`) takes a created-and-
+    canceled response with a reason as a failed create, reconnects and
+    asks again, for ever. etcd sends the created acknowledgement, then a
+    cancel with `compact_revision` and no reason (`sendLoop`), which
+    clientv3 delivers as `ErrCompacted`.
+    - [ ] watch.rs: a compacted create is acknowledged (`created`, not
+      canceled), then cancelled with `compact_revision` and an empty
+      reason; the replay and resync cancels for compaction leave the
+      reason empty too (logged instead). Cancels for unreadable history
+      keep theirs (no compact revision).
+    - [ ] tests: watch_grpc (two responses, the shape), watch_lag (empty
+      reason); `tests/clientv3_compacted.sh` with clientv3 v3.6.11: a watch
+      at a compacted revision gets `ErrCompacted` once and its channel
+      closes, the client does not re-create it.
+    - [ ] docs (00-design, 02-testing), CHANGELOG, release 1.44.1.
+    - [ ] sc-build green; negative control (the old single response).
