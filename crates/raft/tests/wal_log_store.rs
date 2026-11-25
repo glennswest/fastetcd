@@ -846,9 +846,26 @@ async fn a_stuck_fsync_or_checkpoint_says_which_it_is() {
     }
     let s = stats.stalls(Duration::from_secs(1));
     assert!(s.iter().any(|l| l.contains("checkpoint of the data file")), "{s:?}");
-    while stats.checkpoint_inflight().is_some() {
-        assert!(tokio::time::Instant::now() < deadline, "the checkpoint never returned");
+    // Wait for *that* checkpoint to return, on a deadline of its own
+    // (#236): the checkpointer clears the in-flight mark before it counts
+    // a checkpoint, so the count rising past its value now means this one
+    // ended. Waiting for "none in flight" on the deadline above could miss
+    // it: the first wait may have used most of that deadline on a loaded
+    // build VM, and a newer checkpoint may already be in flight.
+    let seen = tokio::time::Instant::now();
+    let done = stats.checkpoints.load(std::sync::atomic::Ordering::Relaxed);
+    let deadline = seen + Duration::from_secs(10);
+    while stats.checkpoints.load(std::sync::atomic::Ordering::Relaxed) <= done {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the checkpoint never returned (in flight {:?})",
+            stats.checkpoint_inflight()
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    // Its in-flight mark is gone: anything in flight now started after it
+    // ended, so after `seen`.
+    let now = stats.checkpoint_inflight();
+    assert!(now.is_none_or(|d| d < seen.elapsed()), "the returned checkpoint is still shown in flight: {now:?}");
     raft.shutdown().await.unwrap();
 }
