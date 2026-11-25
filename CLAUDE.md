@@ -10,7 +10,9 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.7`** — the start revision is published as an empty event batch,
+**`1.45.0`** — `Downgrade` ENABLE/CANCEL: a replicated downgrade target
+(1.45 or later) that holds the version gates; `Status.downgrade_info`
+(#202). 1.44.7: the start revision is published as an empty event batch,
 so a new store's first write is no watch "revision gap" (#223). 1.44.6:
 replication to a member that cannot be dialed backs off
 (Unreachable: 100, 200, 400, then 500 ms) instead of retrying in a tight
