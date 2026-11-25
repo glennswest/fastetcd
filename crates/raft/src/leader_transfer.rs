@@ -104,6 +104,7 @@ pub async fn move_leader(
     }
 
     tracing::info!(to = format_args!("{target:x}"), "leader transfer starting");
+    let started = Instant::now();
     let _hold = match proposer {
         Some(p) => Some(p.hold().await),
         None => None,
@@ -133,6 +134,12 @@ pub async fn move_leader(
         }
     };
 
+    tracing::debug!(
+        to = format_args!("{target:x}"),
+        ?last,
+        elapsed = ?started.elapsed(),
+        "leader transfer: the target holds the leader's log"
+    );
     let req = TransferLeaderRequest { leader_vote: vote, to: target, last_log_id: last };
 
     // Every voter but the target first, so their leases are waived before
@@ -172,6 +179,12 @@ pub async fn move_leader(
         )));
     }
 
+    tracing::debug!(
+        to = format_args!("{target:x}"),
+        accepted = ?accepted,
+        elapsed = ?started.elapsed(),
+        "leader transfer: a quorum waived the lease; asking the target"
+    );
     let remaining = deadline.saturating_duration_since(Instant::now());
     match forwarder.transfer_leader(target, &req, ASK.min(remaining)).await {
         Ok(true) => {}
@@ -185,6 +198,11 @@ pub async fn move_leader(
             return Err(TransferError::TimedOut(format!("member {target:x} did not answer: {e}")))
         }
     }
+    tracing::debug!(
+        to = format_args!("{target:x}"),
+        elapsed = ?started.elapsed(),
+        "leader transfer: the target accepted; waiting for it to lead"
+    );
 
     loop {
         let m = raft.metrics().borrow().clone();
@@ -198,8 +216,8 @@ pub async fn move_leader(
         }
         if Instant::now() >= deadline {
             return Err(TransferError::TimedOut(format!(
-                "member {target:x} did not become leader in time (leader now {:?})",
-                m.current_leader
+                "member {target:x} did not become leader in time (leader now {:?}, term {}, state {:?})",
+                m.current_leader, m.current_term, m.state
             )));
         }
         tokio::time::sleep(Duration::from_millis(5)).await;

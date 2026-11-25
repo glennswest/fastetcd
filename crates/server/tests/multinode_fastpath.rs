@@ -1023,6 +1023,11 @@ fn spawn_tolerant_writers(
 /// follower, a non-member and the leader itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn move_leader_hands_leadership_to_the_target() {
+    // RUST_LOG=fastetcd_raft=debug shows each step of a transfer (#237).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let nodes = cluster(0).await;
     let first = leader_of(&nodes).id;
     let target = a_follower_of(&nodes).id;
