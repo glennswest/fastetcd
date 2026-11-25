@@ -2206,5 +2206,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] The id is recorded in `<data-dir>/member_id` (hex, written
       atomically) and used first on later starts (`--node-id` still wins);
       not recorded for a `--name` id the membership lacks.
-    - [ ] sc-build: the script on this tree and on 1.44.3 (control);
-      clippy; workspace; release 1.44.4.
+    - [x] sc-build of f8d75b5: `tests/member_join.sh` 7/7 (n4 runs as the
+      id `member add` printed, serves, is promoted; keeps it after a
+      restart and at a new URL after `member update` while down); control
+      on 1.44.3 (0f75b98): 3 failed, n4 ran as its name hash. clippy
+      `--workspace --all-targets -D warnings` clean; workspace
+      `--no-fail-fast` 564 pass, 0 fail. Release 1.44.4.
