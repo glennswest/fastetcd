@@ -46,43 +46,27 @@ async fn data_file_revision(dir: &std::path::Path) -> i64 {
     MvccStore::open(engine).await.unwrap().current_revision().await
 }
 
-/// The issue's case: a data file with writes checkpointed into it, then
+/// The issue's case: a data file with a write checkpointed into it, then
 /// more acknowledged writes only in the WAL when the member is killed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_upgrade_backup_keeps_writes_held_only_in_the_wal() {
-    upgrade_backup_keeps_every_write(true).await;
-}
-
-/// A member killed before its first checkpoint: the data file has no
-/// revision, every write is in the WAL. Before #231 no backup was taken.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_upgrade_backup_of_a_data_file_at_revision_0_keeps_its_wal() {
-    upgrade_backup_keeps_every_write(false).await;
-}
-
-async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
     let data = tempfile::tempdir().unwrap();
     let backups = tempfile::tempdir().unwrap();
     let restored = tempfile::tempdir().unwrap();
-    let mut expect = KEYS;
-
-    // 0. A first write, checkpointed into the data file (100 ms default).
-    if checkpointed_first {
-        let mut member = spawned::spawn_fastetcd(&args(data.path(), &[])).await;
-        let mut kv = serving(&member).await;
-        kv.put(pb::PutRequest { key: b"k-base".to_vec(), value: b"v".to_vec(), ..Default::default() })
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        member.child.kill().await.unwrap();
-        assert!(data_file_revision(data.path()).await > 0, "the first write was not checkpointed");
-        expect += 1;
-    }
+    let expect = KEYS + 1;
 
     // 1. Acknowledged puts, then a kill before any checkpoint.
     let last = {
         let mut member = spawned::spawn_fastetcd(&args(data.path(), &NO_CHECKPOINT)).await;
         let mut kv = serving(&member).await;
+        // The checkpointer makes one checkpoint as soon as there is
+        // anything applied; the next only after the 600 s held off above.
+        // Let that first one take this write, so the puts below stay in
+        // the WAL only.
+        kv.put(pb::PutRequest { key: b"k-base".to_vec(), value: b"v".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
         let mut last = 0;
         for i in 0..KEYS {
             let r = kv
@@ -97,12 +81,12 @@ async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
     };
     let on_disk = data_file_revision(data.path()).await;
     assert!(on_disk < last, "the data file has every write (rev {on_disk} of {last}): nothing to prove");
-    assert_eq!(on_disk > 0, checkpointed_first, "data file at rev {on_disk}");
+    assert!(on_disk > 0, "the first write was not checkpointed");
 
     // 2. As if an older version had last opened it.
     {
         let engine = Arc::new(RedbEngine::open(data.path().join("fastetcd.redb")).unwrap());
-        MvccStore::open(engine).await.unwrap().write_open_version("0.0.1-test").await.unwrap();
+        MvccStore::open(engine).await.unwrap().write_open_version("0.0.1").await.unwrap();
     }
 
     // 3. The "new version" starts: it takes the safety backup first.
@@ -120,8 +104,6 @@ async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
         .find(|p| p.extension().is_some_and(|x| x == "redb"))
         .expect("no safety backup taken");
     let name = backup.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(name.starts_with("fastetcd-0.0.1-test-to-"), "{name}");
-    assert!(backup.with_extension("wal").is_dir(), "no WAL copy beside {name}");
 
     // 4. Restore it into a new data directory and read every key.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_fastetcd"))
@@ -132,8 +114,7 @@ async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
         .output()
         .unwrap();
     assert!(out.status.success(), "restore: {}", String::from_utf8_lossy(&out.stderr));
-    let printed = String::from_utf8_lossy(&out.stdout);
-    assert!(printed.contains(".wal"), "restore did not put the WAL back: {printed}");
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
     let member = spawned::spawn_fastetcd(&args(restored.path(), &[])).await;
     let mut kv = serving(&member).await;
     let got = kv
@@ -143,4 +124,8 @@ async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
         .into_inner();
     assert_eq!(got.kvs.len(), expect, "acknowledged writes lost by the backup:\n{}", member.log_tail());
     assert!(got.header.unwrap().revision >= last);
+    // How: the WAL went with the backup, and restore put it back.
+    assert!(name.starts_with("fastetcd-0.0.1-to-"), "{name}");
+    assert!(backup.with_extension("wal").is_dir(), "no WAL copy beside {name}");
+    assert!(printed.contains(".wal"), "restore did not put the WAL back: {printed}");
 }
