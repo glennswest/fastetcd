@@ -2228,5 +2228,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `tests/upgrade_backup_wal.rs` (real binary): puts with
       checkpoints held off, SIGKILL, an older version stamp, a start with
       `--upgrade-backup`, restore into a new dir, every key there.
-    - [ ] sc-build: the test on the fix and on the old admin.rs (control);
-      clippy; workspace; docs (05, 03); CHANGELOG; release 1.44.5.
+    - Test fixes on the way: the backup name sanitises `-` (the fake stamp
+      is `0.0.1`); with checkpoints held off the checkpointer makes none at
+      all, so the case with a checkpointed write gets it from a first run
+      stopped cleanly (SIGTERM checkpoints on the way out). Two cases:
+      writes checkpointed then WAL-only puts; WAL-only puts on a data file
+      at revision 0.
+    - [x] Control (old admin.rs, the same test, 3 runs): after restoring the
+      safety backup 1 of 21 keys is there (the 20 WAL-only writes lost);
+      at revision 0 no backup is taken. Fix (f70bda1): both cases pass 5/5
+      (and 4/5 on c0edb9b, the miss being the first-run checkpoint the
+      SIGTERM now makes sure of); clippy `--workspace --all-targets -D
+      warnings` clean; workspace `--no-fail-fast` 0 fail. Docs 05, 04, 01;
+      CHANGELOG. Release 1.44.5.
