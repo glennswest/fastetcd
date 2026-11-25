@@ -6,13 +6,17 @@
 #
 # With etcd's own etcdctl (v3.5.17, sha256 checked) it:
 #   1. starts three members n1..n3 and writes once;
-#   2. stops a follower, and counts the replication errors the others log
-#      about it over 5 s: at most 25 (about 2 a second, the backoff's
-#      500 ms, plus its first steps);
-#   3. starts it again, writes through the leader, and checks the member
+#   2. adds a learner at a peer URL nothing listens on, never started (the
+#      case #226 was found in, #208), and counts the replication errors
+#      the leader logs about it over 5 s: at most 25 (about 2 a second,
+#      the backoff's 500 ms, plus its first steps);
+#   3. stops a follower and counts the same way about it;
+#   4. starts it again, writes through the leader, and checks the member
 #      serves that write within 3 s.
-# Before #226 the leader retried a member it could not reach about every
-# millisecond, logging thousands of errors in 5 s.
+# Before #226 the leader retried a member it could not dial about every
+# millisecond, logging thousands of errors in 5 s. (A member stopped
+# behind a connection already made was retried about 3 times a second
+# before too: tonic's own reconnects pace it.)
 # Exit status: the number of failed checks.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -114,29 +118,44 @@ for i in 1 2 3; do start "$i" --initial-cluster "$CLUSTER"; done
 for i in 1 2 3; do wait_healthy "$i"; done
 on 1 put /k v0 >/dev/null
 
-# ---- 2. stop a follower, count the errors about it ------------------------------
-LEADER=$(leader_of 1)
+# ---- 2. a learner nothing listens for -------------------------------------------
 DOWN=""
-for i in 1 2 3; do [ "$(id_of "$i")" != "$LEADER" ] && { DOWN=$i; break; }; done
-echo "== leader $LEADER; stopping n$DOWN"
-errors() { # replication errors logged by the members still up
+errors() { # errors() [target]: replication errors logged by the members up
     local n=0 i
     for i in 1 2 3; do
         [ "$i" = "$DOWN" ] && continue
-        n=$((n + $(grep -c "error replication to target" "$WORK/log$i" || true)))
+        n=$((n + $(grep -c "error replication to target=${1:-}" "$WORK/log$i" || true)))
     done
     echo "$n"
 }
+added=$(on 1 member add ghost --learner --peer-urls="http://127.0.0.1:$(port)")
+GHOST=$(echo "$added" | awk '/^Member/ {print $2; exit}')
+GHOST_DEC=$(printf '%d' "0x$GHOST")
+echo "== learner $GHOST ($GHOST_DEC) added, never started"
+sleep 1
+before=$(errors "$GHOST_DEC")
+sleep 5
+after=$(errors "$GHOST_DEC")
+n=$((after - before))
+echo "== $n replication errors about it in 5 s"
+check "replication to a member nothing listens for backs off ($n errors in 5 s, at most 25)" "$([ "$n" -le 25 ] && echo 1 || echo 0)"
+on 1 member remove "$GHOST" >/dev/null || true
+
+# ---- 3. stop a follower, count the errors about it ------------------------------
+LEADER=$(leader_of 1)
+for i in 1 2 3; do [ "$(id_of "$i")" != "$LEADER" ] && { DOWN=$i; break; }; done
+DOWN_DEC=$(printf '%d' "0x$(id_of "$DOWN")")
+echo "== leader $LEADER; stopping n$DOWN"
 stop "$DOWN"
 sleep 1
-before=$(errors)
+before=$(errors "$DOWN_DEC")
 sleep 5
-after=$(errors)
+after=$(errors "$DOWN_DEC")
 n=$((after - before))
-echo "== $n replication errors in 5 s"
+echo "== $n replication errors about it in 5 s"
 check "replication to a stopped member backs off ($n errors in 5 s, at most 25)" "$([ "$n" -le 25 ] && echo 1 || echo 0)"
 
-# ---- 3. start it again: it catches up promptly -----------------------------------
+# ---- 4. start it again: it catches up promptly -----------------------------------
 start "$DOWN" --initial-cluster "$CLUSTER"
 for _ in $(seq 100); do on "$DOWN" endpoint status >/dev/null 2>&1 && break; sleep 0.1; done
 up=$(date +%s%N)
