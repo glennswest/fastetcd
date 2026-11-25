@@ -2212,3 +2212,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       on 1.44.3 (0f75b98): 3 failed, n4 ran as its name hash. clippy
       `--workspace --all-targets -D warnings` clean; workspace
       `--no-fail-fast` 564 pass, 0 fail. Release 1.44.4.
+
+122. **Upgrade safety backup omits acknowledged writes held only in the
+    WAL (#231, P3).** `backup_before_version` copied `fastetcd.redb` before
+    the WAL replays; after a kill the data file is durable only to its last
+    checkpoint, and `restore` moved the WAL aside. The issue's recommended
+    option, which keeps "nothing of the new version writes before the
+    backup":
+    - [x] Copy `wal/` beside the backup (`<backup>.wal/`, into a `.tmp`
+      dir then renamed), counted in the space check and rolled off with
+      it; a non-empty WAL counts as data (a data file at revision 0 can
+      have writes in its WAL).
+    - [x] `fastetcd restore` of a raw data-file backup puts its `.wal/`
+      back as `wal/`, so the next start replays it as a restart would.
+    - [x] `tests/upgrade_backup_wal.rs` (real binary): puts with
+      checkpoints held off, SIGKILL, an older version stamp, a start with
+      `--upgrade-backup`, restore into a new dir, every key there.
+    - [ ] sc-build: the test on the fix and on the old admin.rs (control);
+      clippy; workspace; docs (05, 03); CHANGELOG; release 1.44.5.

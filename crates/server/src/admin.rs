@@ -177,7 +177,12 @@ pub async fn backup_before_version(
     high_water_percent: u8,
 ) -> anyhow::Result<Option<PathBuf>> {
     let stored = mvcc.read_open_version().await?;
-    let has_data = mvcc.current_revision().await > 0;
+    // The raft WAL beside the data file (#231): acknowledged writes a kill
+    // left only there, not yet checkpointed into the data file. It counts
+    // as data even when the data file has no revision yet.
+    let wal = wal_dir(data_dir);
+    let wal_bytes = dir_bytes(&wal);
+    let has_data = mvcc.current_revision().await > 0 || wal_bytes > 0;
     if !has_data || stored.as_deref() == Some(current) {
         return Ok(None);
     }
@@ -189,7 +194,7 @@ pub async fn backup_before_version(
     // holds more than `retain` of them even momentarily (fastetcd#14).
     let keep = retain.saturating_sub(1);
     let src = data_file(data_dir);
-    let size = std::fs::metadata(&src)?.len();
+    let size = std::fs::metadata(&src)?.len().saturating_add(wal_bytes);
     if let Some(space) = fastetcd_storage::fs_space::probe(backup_dir) {
         let freed: u64 = prune_plan(backup_dir, keep).iter().map(|(_, bytes)| bytes).sum();
         if !backup_fits(space, freed, size, high_water_percent) {
@@ -226,10 +231,25 @@ pub async fn backup_before_version(
             return Err(e.into());
         }
     };
+    // The WAL as it is (nothing has opened it yet): a restore puts it back
+    // with the data file, so the writes it holds are replayed as a restart
+    // would. Not replayed here: nothing of the new version writes before
+    // the backup (#231).
+    let wal_copy = if wal_bytes > 0 {
+        let to = backup_wal(&dst);
+        if let Err(e) = copy_dir(&wal, &to) {
+            let _ = std::fs::remove_file(&dst);
+            return Err(anyhow::anyhow!("copying {} to {}: {e}", wal.display(), to.display()));
+        }
+        Some(to)
+    } else {
+        None
+    };
     tracing::warn!(
         from_version = from,
         to_version = current,
         backup = %dst.display(),
+        wal = %wal_copy.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into()),
         bytes,
         "took a safety backup of the data directory before starting a new fastetcd \
          version. Restore with `fastetcd restore <path>` if the upgrade misbehaves."
@@ -247,8 +267,52 @@ pub fn backup_fits(space: FsSpace, freed_bytes: u64, file_bytes: u64, high_water
     file_bytes <= available && used_after <= limit
 }
 
+/// The copy of the raft WAL that goes with upgrade safety backup
+/// `backup` (`<backup name>.wal/`, fastetcd#231).
+pub fn backup_wal(backup: &Path) -> PathBuf {
+    backup.with_extension("wal")
+}
+
+/// Bytes of the files directly in `dir` (0 if it does not exist).
+fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries.flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()
+}
+
+/// Copy the files directly in `from` to a new directory `to`: into
+/// `<to>.tmp`, synced, then renamed, so `to` is whole or absent.
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    let tmp = to.with_extension("wal.tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let result = (|| {
+        std::fs::create_dir_all(&tmp)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            if e.file_type()?.is_file() {
+                let dst = tmp.join(e.file_name());
+                std::fs::copy(e.path(), &dst)?;
+                std::fs::File::open(&dst)?.sync_all()?;
+            }
+        }
+        let _ = std::fs::remove_dir_all(to);
+        std::fs::rename(&tmp, to)?;
+        if let Some(parent) = to.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result
+}
+
 /// The upgrade safety backups [`prune_backups`] would delete to keep
-/// `keep`, oldest first, with their sizes.
+/// `keep`, oldest first, with their sizes (their WAL copies included).
 pub fn prune_plan(backup_dir: &Path, keep: usize) -> Vec<(PathBuf, u64)> {
     let mut backups = list_backups(backup_dir);
     let drop_count = backups.len().saturating_sub(keep);
@@ -272,7 +336,8 @@ fn list_backups(backup_dir: &Path) -> Vec<(std::time::SystemTime, PathBuf, u64)>
                 return None;
             }
             let meta = e.metadata().ok()?;
-            Some((meta.modified().ok()?, path, meta.len()))
+            let bytes = meta.len().saturating_add(dir_bytes(&backup_wal(&path)));
+            Some((meta.modified().ok()?, path, bytes))
         })
         .collect();
     backups.sort_by_key(|(mtime, _, _)| *mtime);
@@ -283,6 +348,7 @@ fn list_backups(backup_dir: &Path) -> Vec<(std::time::SystemTime, PathBuf, u64)>
 /// first.
 pub fn prune_backups(backup_dir: &Path, keep: usize) {
     for (path, bytes) in prune_plan(backup_dir, keep) {
+        let _ = std::fs::remove_dir_all(backup_wal(&path));
         match std::fs::remove_file(&path) {
             Ok(()) => tracing::info!(
                 backup = %path.display(),
@@ -473,6 +539,13 @@ pub async fn cmd_restore(data_dir: &Path, backup: &Path, force: bool) -> anyhow:
         dst.display(),
         bytes
     );
+    // An upgrade safety backup's WAL (#231): put back with it, so the
+    // next start replays the writes it held beyond the data file.
+    let wal = backup_wal(backup);
+    if wal.is_dir() {
+        copy_dir(&wal, &wal_dir(data_dir))?;
+        println!("restore: {} -> {}", wal.display(), wal_dir(data_dir).display());
+    }
     Ok(())
 }
 
