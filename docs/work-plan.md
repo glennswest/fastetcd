@@ -2085,4 +2085,9 @@ Tracked live in the Claude task system. Snapshot of the order:
       error, not `ErrCompacted` (`CompactRevision` 0), so the caller sees
       no compaction and retries the same revision; the script fails.
     - [x] docs (00-design, 02-testing), CHANGELOG.
-    - [ ] release 1.44.1; sc-build green (workspace, clientv3 script).
+    - [x] sc-build of db5a63e: clippy `--workspace --all-targets -D
+      warnings` clean, workspace `--no-fail-fast` 559 pass, 0 fail;
+      `tests/clientv3_compacted.sh` (clientv3 v3.6.11): `ErrCompacted`
+      with compact revision 3, the channel closed after it, the watch from
+      the compact revision got 2 events from 3. Release 1.44.1 (f2b5014):
+      builds `--locked`, `fastetcd --version` 1.44.1.
