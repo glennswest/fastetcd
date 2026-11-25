@@ -244,7 +244,9 @@ async fn three_node_cluster_replicates_via_grpc_transport() {
         .unwrap()
         .into_inner();
     let put_rev = put.header.unwrap().revision;
-    assert_eq!(put_rev, 1);
+    // The store starts at revision 1, as etcd's (#160): every member
+    // answers ConfirmLeader as this version, so StartRevision goes first.
+    assert_eq!(put_rev, 2);
 
     // Range on every node — they should all have the value applied.
     // Followers apply on a later heartbeat; poll rather than sleep a
