@@ -4,6 +4,7 @@
 
 ### 2026-11-25
 - **fix:** etcd's Go client no longer loops on a watch at a compacted revision (#222, found by etcd's robustness suite). A watch create below the compact revision was answered by one response both `created` and `canceled`, with `compact_revision` and a `cancel_reason`; clientv3 takes that for a failed create and re-creates the same watch at once, for ever (a tight loop against the member; the user never saw `ErrCompacted`, so an apiserver reflector never re-listed). It is now answered as etcd does: the created acknowledgement, then a cancel with `compact_revision` and no reason, which clientv3 delivers as `ErrCompacted` and closes the watch. Watches cancelled later because their history was compacted (replay, lag) also carry no reason on the wire; the reason is logged. `tests/clientv3_compacted.sh`.
+- **fix:** A watch from the compact revision itself is served, as etcd's (#222, found by its clientv3 test). The replay asked storage for events after `start - 1`, and storage refused any bound below the compact revision, so a watch at exactly the compact revision got `ErrCompacted` although that revision is still readable; etcd refuses only `start < compact`. The event at the compact revision has no `prev_kv` (compacted), as in etcd.
 - **fix:** The multinode test harness serves `ConfirmLeader` as the server does, so version gates (#160's start revision, #220's put versions) pass there; `three_node_cluster_replicates_via_grpc_transport` expects its first write at revision 2, as a real cluster's. Test only (#220).
 
 ### 2026-11-23

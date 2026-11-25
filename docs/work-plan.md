@@ -2074,5 +2074,15 @@ Tracked live in the Claude task system. Snapshot of the order:
       reason); `tests/clientv3_compacted.sh` with clientv3 v3.6.11: a watch
       at a compacted revision gets `ErrCompacted` once and its channel
       closes, the client does not re-create it.
-    - [ ] docs (00-design, 02-testing), CHANGELOG, release 1.44.1.
-    - [ ] sc-build green; negative control (the old single response).
+    - [x] watch.rs and tests above (7130b54).
+    - Found by the clientv3 test's control: a watch *from* the compact
+      revision was refused too. The replay asks storage for events after
+      `start - 1`, and `range_events_until` refused any bound below the
+      compact revision; it now refuses only when `start_rev + 1` is below
+      it (d4129de; storage and watch_grpc tests).
+    - Negative control (wip/222-negative-control, the old watch.rs):
+      clientv3 v3.6.11 closed the watch with the reason string as its
+      error, not `ErrCompacted` (`CompactRevision` 0), so the caller sees
+      no compaction and retries the same revision; the script fails.
+    - [x] docs (00-design, 02-testing), CHANGELOG.
+    - [ ] release 1.44.1; sc-build green (workspace, clientv3 script).
