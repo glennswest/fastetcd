@@ -817,8 +817,12 @@ impl MvccStore {
         let state = self.inner.write_state.lock().await;
         let mut batch = WriteBatch::new();
         match target {
-            Some(t) => batch.put(TABLE_META, META_KEY_DOWNGRADE_TARGET, t.as_bytes()),
-            None => batch.delete(TABLE_META, META_KEY_DOWNGRADE_TARGET),
+            Some(t) => {
+                batch.put(TABLE_META, META_KEY_DOWNGRADE_TARGET, t.as_bytes());
+            }
+            None => {
+                batch.delete(TABLE_META, META_KEY_DOWNGRADE_TARGET);
+            }
         }
         if !self.inner.downgrade_used.load(Ordering::Relaxed) {
             batch.put(TABLE_META, META_KEY_DOWNGRADE_USED, &[1]);
