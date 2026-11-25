@@ -2123,3 +2123,16 @@ Tracked live in the Claude task system. Snapshot of the order:
       25472cd: clippy `--workspace --all-targets -D warnings` clean,
       workspace `--no-fail-fast` 559 pass, 0 fail. Release 1.44.2
       (a140de1): builds `--locked`, `fastetcd --version` 1.44.2.
+
+119. **Flaky `a_stuck_fsync_or_checkpoint_says_which_it_is` ("the
+    checkpoint never returned", #236, P3).** Its last two loops share one
+    10 s deadline (wait for a checkpoint in flight 1 s, then for none in
+    flight); on a loaded VM the first can use most of it, and "none in
+    flight" may also be missed if another checkpoint has started. Test
+    only.
+    - [ ] Measure under load first (the #237 rig: 4 copies at once, 8 busy
+      loops), on the current test.
+    - [ ] The second wait gets its own deadline and waits for the
+      checkpoint seen in flight to end (`checkpoints` rises past its value
+      then); any checkpoint in flight after that must be a newer one.
+    - [ ] The same loaded runs pass; CHANGELOG.
