@@ -30,7 +30,10 @@ on the apply path, without requiring any client to change.
    their start point and current head (modulo compaction). A new store
    starts at revision 1, as etcd's (first write 2), through a replicated
    `StartRevision` log entry; a store with revisions from before 1.41
-   keeps its 0-based numbering (#160).
+   keeps its 0-based numbering (#160). A key's `version` counts its
+   puts since it was created, as etcd's `generation.ver`, whatever a
+   compaction has dropped (from a replicated `PutVersions` log entry,
+   1.44, #220).
 4. **Linearizable reads by default** via read-index; serializable reads
    opt-in per request (`Range.serializable = true`).
 5. **All mutations go through Raft.** Lease grants, lease revocations on

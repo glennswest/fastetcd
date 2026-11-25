@@ -180,6 +180,10 @@ Differences from etcd:
   keeps its numbering, one lower than etcd's for the same history (its
   first write was revision 1), and so does a cluster that wrote while a
   member older than 1.41 answered (#160; 03-deploy § Revisions).
+- Before 1.44 a put after a compaction stored a key `version` too low;
+  from 1.44 (once every member runs it) puts are counted as etcd's, and
+  a key already stored too low continues from its version until it is
+  deleted (#220; 03-deploy § Key versions).
 - `--auto-compaction-retention` counts revisions; etcd's default mode
   counts hours (#21).
 - The v3 JSON gateway serves no WebSocket upgrades (#66, deferred): its

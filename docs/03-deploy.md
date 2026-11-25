@@ -797,6 +797,7 @@ on; gateway `/v3/maintenance/downgrade`):
   | 1.23 | always | keep-alives renewed in the leader's RAM (#92) |
   | 1.33 | once the cluster id is replicated (`fastetcd_cluster_id_replicated` = 1) | the cluster-id log entry (#38): its purge on every member is not tracked, so this floor stays |
   | 1.41 | once the log has held a `StartRevision` entry (any cluster whose members all ran 1.41 while it had no revision yet, or wrote) | the start-revision log entry (#160) |
+  | 1.44 | once the log has held a `PutVersions` entry (any cluster whose members have all run 1.44) | the put-versions log entry (#220): an older member could not decode it, and would store other versions for the same puts |
 
   So a cluster that has run 1.33 or later validates 1.33 and up, and
   refuses anything older; one whose log holds a `StartRevision` entry
@@ -836,6 +837,31 @@ every replay of the log, moves at the same point:
 - `fastetcd-migrate` without `--preserve-revisions` starts the import
   the same way: the imported keys are revision 2, as a fresh etcd's
   first write. `--preserve-revisions` keeps etcd's own revisions.
+
+**Key versions: a put counts puts, as etcd's (1.44, #220).** A key's
+`version` is the number of puts since it was created (or last deleted
+and put again). Before 1.44 fastetcd counted the revisions its index
+still held for the key, and a compaction drops those below the compact
+revision, so every put after a compaction stored a version too low
+(put a key 3 times, compact at the second put, put again: 3, not etcd's
+4). Range, txn ranges, watch events and `Compare(Version)` all saw it.
+From 1.44 a put's version is the key's previous version + 1. The rule
+changes at a replicated `PutVersions` log entry, so every member, and
+every replay of the log, stores the same version for the same put:
+
+- The leader proposes it within seconds once every member, learners
+  included, answers as 1.44 or later; a member that does not answer, or
+  answers older, keeps it waiting, and puts keep the old count meanwhile.
+  It is logged once, on the leader: `a put's version counts puts, as
+  etcd's (fastetcd#220)`. A raft snapshot carries the rule.
+- **Keys keep the versions they have.** A key whose stored version is
+  already too low continues from it (its next put is that version + 1)
+  until it is deleted; its next generation counts from 1, as etcd's.
+  Versions are never rewritten. A key imported by `fastetcd-migrate`
+  continues from etcd's version (before 1.44 its next put was version 2).
+- Once the log holds the entry, do not add a member older than 1.44
+  (`MemberAdd` does not check it, #134), and do not downgrade below 1.44
+  (the floor above).
 
 **Upgrading to 1.10, and versions after it.** From 1.10 a leader batches
 concurrent writes into one log entry (`FastetcdLogEntry::Batch`), which

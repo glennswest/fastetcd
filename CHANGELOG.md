@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-24
+- **fix:** A key's `version` is etcd's after a compaction (#220, found by etcd's robustness suite). A put's version was the number of revisions the key's index still held, and compaction drops those below the compact revision, so every later put stored a version too low (put 3 times, compact at the second, put: 3, not 4), seen by Range, txn ranges, watch events and `Compare(Version)`; a key imported by `fastetcd-migrate` went back to version 2 on its next put. A put's version is now the key's previous version + 1 (1 when it creates the key). The rule changes at a replicated `PutVersions` log entry, which the leader proposes once every member answers as 1.44 or later, so members and log replays agree; snapshots carry it (`mvcc_meta/put_versions`). Keys already stored too low continue from their version until deleted. New downgrade floor 1.44 once the log holds the entry. 03-deploy § Key versions.
+
 ### 2026-11-23
 - **fix:** The secret scan's two findings at 885c4c2 were false positives in tests, and they no longer come up (#246, stormcentral#1679). `tests/rolling_upgrade.sh` makes root's and alice's passwords for each run instead of committing `rootpw`, which gitleaks' `curl-auth-user` matched together with a `curl` four lines up. `tests/test_container.sh` base64-encodes its `/storm-test/` range at run time, which `generic-api-key` had read as a key. `gitleaks dir .` (8.30.1) finds nothing. Test only.
 
