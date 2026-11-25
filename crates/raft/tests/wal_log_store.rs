@@ -849,12 +849,13 @@ async fn a_stuck_fsync_or_checkpoint_says_which_it_is() {
     // Wait for *that* checkpoint to return, on a deadline of its own
     // (#236): the checkpointer clears the in-flight mark before it counts
     // a checkpoint, so the count rising past its value now means this one
-    // ended. Waiting for "none in flight" on the deadline above could miss
-    // it: the first wait may have used most of that deadline on a loaded
-    // build VM, and a newer checkpoint may already be in flight.
+    // ended. The deadline above covered both waits, and a checkpoint is
+    // 2.5 s of delay plus a real fsync of the data file, which on a build
+    // host busy with other jobs' disk I/O can take seconds more. This
+    // test is about the mark, not the speed: a generous deadline.
     let seen = tokio::time::Instant::now();
     let done = stats.checkpoints.load(std::sync::atomic::Ordering::Relaxed);
-    let deadline = seen + Duration::from_secs(10);
+    let deadline = seen + Duration::from_secs(30);
     while stats.checkpoints.load(std::sync::atomic::Ordering::Relaxed) <= done {
         assert!(
             tokio::time::Instant::now() < deadline,
