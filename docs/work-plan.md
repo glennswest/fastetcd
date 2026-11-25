@@ -2017,3 +2017,28 @@ Tracked live in the Claude task system. Snapshot of the order:
       `tests/rolling_upgrade.sh v1.43.4 tree` (job 4dcee7e7b8) every
       check ok: root logs in, alice reads /app/x and is denied /secret/s
       with the generated passwords, 323 writes acknowledged, 0 missing.
+
+116. **A key's Version after a compaction (#220, found by etcd's
+    robustness suite).** A put's version was the open generation's
+    surviving revision count (`KeyIndex::record_put`), and compaction
+    drops revisions below the compact revision, so every put after a
+    compaction stored a version too low (etcd counts puts per generation).
+    Also hit migrated keys: `fastetcd-migrate` keeps etcd's version but one
+    revision, so the next put was version 2. Plan (the issue's recommended
+    option, no index format change):
+    - [ ] storage: with the marker set, a put's version is the key's live
+      record's version + 1 (1 when it opens a generation); without it, the
+      old count, so members and log replays agree. Marker
+      `mvcc_meta/put_versions`, set by `MvccStore::apply_put_versions`,
+      carried by snapshots (taken from the snapshot on install).
+    - [ ] raft: `FastetcdLogEntry::PutVersions` (appended last), applied as
+      above, answers as a Noop.
+    - [ ] server: a leader proposes it once every member answers as 1.44 or
+      later (`put_versions::follow`, strict gate); downgrade floor 1.44;
+      persisted-requests dump skips it.
+    - [ ] tests: storage (compaction then put, migrated-style key, old rule
+      without the marker, snapshot carries it), server (cluster proposes
+      it; version after compact over gRPC).
+    - [ ] docs (00-design, 03-deploy: keys already stored keep a too-low
+      version until deleted; upgrade/downgrade), CHANGELOG, release 1.44.0.
+    - [ ] sc-build green; negative control.
