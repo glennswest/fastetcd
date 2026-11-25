@@ -198,6 +198,14 @@ pub enum FastetcdLogEntry {
     /// answers as 1.44 or later (an older one cannot decode it, and would
     /// store other versions). Appended last.
     PutVersions,
+
+    /// The cluster's downgrade target (fastetcd#202): `Some(version)` is
+    /// `Downgrade ENABLE`, `None` is CANCEL, or a downgrade that finished
+    /// (every member runs the target). While a target is set, no version
+    /// gate opens a feature the target cannot read. Proposed only once
+    /// every member decodes it (1.45 or later), so a target older than
+    /// 1.45 is refused. Appended last.
+    DowngradeTarget(Option<String>),
 }
 
 /// Response shape from a state machine `apply()` call. Wire RPC

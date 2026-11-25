@@ -86,6 +86,13 @@ pub const META_KEY_START_REVISION: &[u8] = b"start_revision";
 /// generation still holds (which a compaction drops). Carried by
 /// snapshots; a member older than 1.44 cannot read this log.
 pub const META_KEY_PUT_VERSIONS: &[u8] = b"put_versions";
+/// The cluster's downgrade target (fastetcd#202): the fastetcd version
+/// `Downgrade ENABLE` set, as text; absent when none is set. Carried by
+/// snapshots, so every member and every replay agrees on it.
+pub const META_KEY_DOWNGRADE_TARGET: &[u8] = b"downgrade_target";
+/// Set (to `[1]`) by the first applied `DowngradeTarget` log entry and
+/// never cleared: a member older than the entry cannot read this log.
+pub const META_KEY_DOWNGRADE_USED: &[u8] = b"downgrade_used";
 /// The cluster id, replicated (fastetcd#38): set once by the first
 /// `ClusterId` log entry applied, carried by snapshots with the rest of
 /// `mvcc_meta`. Big-endian u64.
@@ -438,6 +445,10 @@ struct Inner {
     /// [`META_KEY_PUT_VERSIONS`], as the engine holds it (fastetcd#220).
     /// Read by apply under the write-state lock, set under it.
     put_versions: AtomicBool,
+    /// [`META_KEY_DOWNGRADE_TARGET`] and [`META_KEY_DOWNGRADE_USED`], as
+    /// the engine holds them (fastetcd#202).
+    downgrade_target: std::sync::RwLock<Option<String>>,
+    downgrade_used: AtomicBool,
     /// [`META_KEY_CLUSTER_ID`] as the engine holds it (0: not set yet),
     /// with a watch for the server to follow it (fastetcd#38).
     cluster_id: watch::Sender<u64>,
@@ -568,6 +579,8 @@ impl MvccStore {
         let batched = snap.get(TABLE_META, META_KEY_BATCHED).await?.is_some();
         let start_revision = snap.get(TABLE_META, META_KEY_START_REVISION).await?.is_some();
         let put_versions = snap.get(TABLE_META, META_KEY_PUT_VERSIONS).await?.is_some();
+        let downgrade_target = read_string(&*snap, META_KEY_DOWNGRADE_TARGET).await?;
+        let downgrade_used = snap.get(TABLE_META, META_KEY_DOWNGRADE_USED).await?.is_some();
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
 
@@ -601,6 +614,8 @@ impl MvccStore {
                 batched: AtomicBool::new(batched),
                 start_revision: AtomicBool::new(start_revision),
                 put_versions: AtomicBool::new(put_versions),
+                downgrade_target: std::sync::RwLock::new(downgrade_target),
+                downgrade_used: AtomicBool::new(downgrade_used),
                 cluster_id: watch::channel(cluster_id).0,
                 installs: watch::channel(0).0,
                 auth: AuthMemory::default(),
@@ -779,6 +794,40 @@ impl MvccStore {
         }
         // Only after the commit: a failed one leaves the rule unchanged.
         self.inner.put_versions.store(true, Ordering::Relaxed);
+        Ok(state.current_rev)
+    }
+
+    /// The cluster's downgrade target, if `Downgrade ENABLE` set one and
+    /// nothing cleared it (fastetcd#202).
+    pub fn downgrade_target(&self) -> Option<String> {
+        self.inner.downgrade_target.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether this store's log has held a `DowngradeTarget` entry
+    /// (a downgrade floor, fastetcd#202).
+    pub fn has_downgrade_target_entry(&self) -> bool {
+        self.inner.downgrade_used.load(Ordering::Relaxed)
+    }
+
+    /// Apply a `DowngradeTarget` log entry (fastetcd#202): `Some` sets the
+    /// cluster's downgrade target (ENABLE), `None` clears it (CANCEL, or a
+    /// downgrade that finished). Commits the staged raft metadata with it.
+    /// Returns the current revision.
+    pub async fn apply_downgrade_target(&self, target: Option<&str>) -> MvccResult<i64> {
+        let state = self.inner.write_state.lock().await;
+        let mut batch = WriteBatch::new();
+        match target {
+            Some(t) => batch.put(TABLE_META, META_KEY_DOWNGRADE_TARGET, t.as_bytes()),
+            None => batch.delete(TABLE_META, META_KEY_DOWNGRADE_TARGET),
+        }
+        if !self.inner.downgrade_used.load(Ordering::Relaxed) {
+            batch.put(TABLE_META, META_KEY_DOWNGRADE_USED, &[1]);
+        }
+        self.fold_raft_meta(&mut batch).await;
+        self.inner.engine.commit(batch, self.apply_write_options()).await?;
+        // Only after the commit: a failed one changes nothing.
+        *self.inner.downgrade_target.write().unwrap_or_else(|e| e.into_inner()) = target.map(str::to_string);
+        self.inner.downgrade_used.store(true, Ordering::Relaxed);
         Ok(state.current_rev)
     }
 
@@ -1068,12 +1117,17 @@ impl MvccStore {
         // The version rule is the tables' own (#220): the member applies
         // the log after the snapshot as the members that made it did.
         let put_versions = snap.get(TABLE_META, META_KEY_PUT_VERSIONS).await?.is_some();
+        // The downgrade target is the tables' own, like the version rule.
+        let downgrade_target = read_string(&*snap, META_KEY_DOWNGRADE_TARGET).await?;
+        let downgrade_used = snap.get(TABLE_META, META_KEY_DOWNGRADE_USED).await?.is_some();
         // A snapshot from a cluster that has replicated its id carries it.
         let cluster_id = read_u64(&*snap, META_KEY_CLUSTER_ID).await?.unwrap_or(0);
         drop(snap);
         self.inner.batched.fetch_or(batched, Ordering::Relaxed);
         self.inner.start_revision.fetch_or(start_revision, Ordering::Relaxed);
         self.inner.put_versions.store(put_versions, Ordering::Relaxed);
+        *self.inner.downgrade_target.write().unwrap_or_else(|e| e.into_inner()) = downgrade_target;
+        self.inner.downgrade_used.fetch_or(downgrade_used, Ordering::Relaxed);
         if cluster_id != 0 {
             self.inner.cluster_id.send_if_modified(|v| std::mem::replace(v, cluster_id) != cluster_id);
         }
@@ -2742,6 +2796,15 @@ async fn read_u64(snap: &dyn Snapshot, key: &[u8]) -> MvccResult<Option<u64>> {
     }
 }
 
+async fn read_string(snap: &dyn Snapshot, key: &[u8]) -> MvccResult<Option<String>> {
+    match snap.get(TABLE_META, key).await? {
+        Some(b) => String::from_utf8(b)
+            .map(Some)
+            .map_err(|_| MvccError::Internal(format!("meta key {key:?} is not text"))),
+        None => Ok(None),
+    }
+}
+
 async fn read_i64(snap: &dyn Snapshot, key: &[u8]) -> Result<Option<i64>, StorageError> {
     let bytes = snap.get(TABLE_META, key).await?;
     Ok(bytes.and_then(|b| {
@@ -3401,6 +3464,43 @@ mod tests {
         // Applied again: the store does not move, and nothing is sent.
         s.apply_start_revision().await.unwrap();
         assert!(rx.try_recv().is_err());
+    }
+
+    /// fastetcd#202: the downgrade target is set and cleared by its
+    /// entry, kept across a reopen, and taken from installed tables.
+    #[tokio::test]
+    async fn the_downgrade_target_is_set_cleared_and_kept() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mvcc.redb");
+        {
+            let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+            assert_eq!((s.downgrade_target(), s.has_downgrade_target_entry()), (None, false));
+            s.apply_downgrade_target(Some("1.45.0")).await.unwrap();
+            assert_eq!(s.downgrade_target().as_deref(), Some("1.45.0"));
+        }
+        let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        assert_eq!(s.downgrade_target().as_deref(), Some("1.45.0"));
+        s.apply_downgrade_target(None).await.unwrap();
+        assert_eq!(s.downgrade_target(), None);
+        // The log has held the entry: a floor, after it is cleared too.
+        assert!(s.has_downgrade_target_entry());
+        drop(s);
+        let s = MvccStore::open(Arc::new(RedbEngine::open(&path).unwrap())).await.unwrap();
+        assert_eq!((s.downgrade_target(), s.has_downgrade_target_entry()), (None, true));
+
+        // Installed tables bring their target, or the lack of one.
+        let (_d2, src) = open_mvcc().await;
+        src.apply_downgrade_target(Some("1.46.2")).await.unwrap();
+        let snap = src.engine().snapshot().await.unwrap();
+        let mut batch = WriteBatch::new();
+        for t in [TABLE_KV, TABLE_IDX, TABLE_META] {
+            batch.clear_table(t);
+            for (k, v) in snap.range(t, Bound::Unbounded, Bound::Unbounded, 0).await.unwrap() {
+                batch.put(t, &k, &v);
+            }
+        }
+        s.install_tables(batch).await.unwrap();
+        assert_eq!(s.downgrade_target().as_deref(), Some("1.46.2"));
     }
 
     #[tokio::test]

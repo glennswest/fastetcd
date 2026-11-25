@@ -147,13 +147,15 @@ impl Lessor {
         forwarder: WriteForwarder,
         read_index: Option<LocalReadIndex>,
     ) -> Self {
+        // Held while a downgrade target older than 1.23 is set (#202).
+        let gate = MembersAtLeast::new(RAM_RENEW_SINCE).held_by(mvcc.clone());
         Self {
             inner: Arc::new(Shared {
                 raft,
                 mvcc,
                 forwarder,
                 read_index,
-                gate: MembersAtLeast::new(RAM_RENEW_SINCE),
+                gate,
                 probing: AtomicBool::new(false),
                 last_probe: Mutex::new(None),
                 ram: Mutex::new(Ram::default()),

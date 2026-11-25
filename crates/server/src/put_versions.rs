@@ -58,6 +58,10 @@ pub fn follow(state: Arc<ServerState>) {
                     tracing::debug!(member = format!("{member:x}"), error, "a member did not answer its version");
                     continue;
                 }
+                Err(GateError::Held { target }) => {
+                    tracing::debug!(target_version = %target, "puts keep the old version count: a downgrade is in progress (fastetcd#202)");
+                    continue;
+                }
             }
             match state.propose(FastetcdLogEntry::PutVersions).await {
                 Ok(_) => tracing::info!("a put's version counts puts, as etcd's (fastetcd#220)"),

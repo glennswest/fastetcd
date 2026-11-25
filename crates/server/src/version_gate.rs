@@ -42,5 +42,9 @@ pub async fn require_nested_txn(state: &ServerState) -> Result<(), Status> {
         Err(GateError::Unreachable { member, error }) => Err(Status::unavailable(format!(
             "{need}, and member {member:x} cannot be asked its version ({error}) (fastetcd#56)"
         ))),
+        Err(GateError::Held { target }) => Err(Status::failed_precondition(format!(
+            "{need}, and a downgrade to fastetcd {target} is in progress, which could not read it \
+             (fastetcd#202). Cancel the downgrade first."
+        ))),
     }
 }

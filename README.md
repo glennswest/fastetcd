@@ -31,9 +31,8 @@ single- and multi-member, with linearizable reads by default:
   member is still starting (#176), Lock and Election services (#64).
 - Import of an etcd BoltDB snapshot (`fastetcd-migrate`).
 
-Not served: Downgrade ENABLE/CANCEL (an unknown action; VALIDATE is
-served, #192; the gap is #202), raising an alarm by hand (deliberate),
-the etcd v2 API (out of scope). Differences from
+Not served: raising an alarm by hand (deliberate), the etcd v2 API (out
+of scope). Differences from
 etcd are listed under [Compatibility boundary](#compatibility-boundary).
 
 ## Quick start
@@ -191,8 +190,9 @@ Differences from etcd:
 - `MoveLeader` works since 1.36 (#57; 03-deploy § Multi-node).
   `Downgrade` VALIDATE takes a fastetcd version (`etcdctl downgrade
   validate 1.33`) and says whether the cluster may go back to it, naming
-  each version floor that refuses it (#192); ENABLE and CANCEL are not
-  served (`InvalidArgument`, an unknown action, #202): a downgrade is a
+  each version floor that refuses it (#192); ENABLE sets a replicated
+  downgrade target that holds the version gates until CANCEL or every
+  member runs it, for targets 1.45 or later (#202): a downgrade is then a
   member at a time within 03-deploy's per-version rules. Raising an
   alarm by hand is refused.
 - A txn inside a txn is refused until every member runs 1.22 or later

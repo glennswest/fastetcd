@@ -190,7 +190,7 @@ pub fn follow(state: Arc<crate::state::ServerState>, source: Source) {
     let proposer = {
         let state = state.clone();
         async move {
-            let gate = crate::version_gate::MembersAtLeast::new(REPLICATED_SINCE);
+            let gate = crate::version_gate::MembersAtLeast::new(REPLICATED_SINCE).held_by(state.sm.mvcc().clone());
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
                 tick.tick().await;

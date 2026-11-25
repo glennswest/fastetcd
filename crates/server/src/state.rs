@@ -67,6 +67,12 @@ pub struct ServerState {
     pub start_revision_gate: Arc<crate::version_gate::MembersAtLeast>,
     /// Every member reads `PutVersions` (`put_versions`, fastetcd#220).
     pub put_versions_gate: Arc<crate::version_gate::MembersAtLeast>,
+    /// Every member reads `DowngradeTarget` (`downgrade`, fastetcd#202).
+    /// Not held by a downgrade target: it is the gate that sets one.
+    pub downgrade_gate: Arc<crate::version_gate::MembersAtLeast>,
+    /// The fastetcd version this member answers `Downgrade` as: this
+    /// binary's, or a newer one a test runs it as (fastetcd#202).
+    pub this_version: String,
     /// The write-behind layer's counters (fastetcd#85).
     pub write_behind: Option<Arc<fastetcd_storage::write_behind::WriteBehindStats>>,
     /// Serves a sole-voter leader's read index without RaftCore
@@ -92,6 +98,7 @@ impl ServerState {
         forwarder: WriteForwarder,
     ) -> Self {
         let auth = sm.mvcc().auth_memory().clone();
+        let mvcc = sm.mvcc().clone();
         let lessor =
             fastetcd_raft::lessor::Lessor::new(raft.clone(), sm.mvcc().clone(), forwarder.clone(), None);
         Self {
@@ -112,19 +119,36 @@ impl ServerState {
             wal: None,
             older_members: Arc::default(),
             max_request_bytes: None,
-            nested_txn_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
-                crate::version_gate::NESTED_TXN_SINCE,
-            )),
-            start_revision_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
-                crate::start_revision::START_REVISION_SINCE,
-            )),
-            put_versions_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
-                crate::put_versions::PUT_VERSIONS_SINCE,
+            // Every gate is held while a downgrade target older than it is
+            // set (fastetcd#202).
+            nested_txn_gate: Arc::new(
+                crate::version_gate::MembersAtLeast::new(crate::version_gate::NESTED_TXN_SINCE)
+                    .held_by(mvcc.clone()),
+            ),
+            start_revision_gate: Arc::new(
+                crate::version_gate::MembersAtLeast::new(crate::start_revision::START_REVISION_SINCE)
+                    .held_by(mvcc.clone()),
+            ),
+            put_versions_gate: Arc::new(
+                crate::version_gate::MembersAtLeast::new(crate::put_versions::PUT_VERSIONS_SINCE)
+                    .held_by(mvcc.clone()),
+            ),
+            downgrade_gate: Arc::new(crate::version_gate::MembersAtLeast::new(
+                crate::downgrade::DOWNGRADE_TARGET_SINCE,
             )),
             write_behind: None,
             read_index: None,
             proposer: None,
+            this_version: crate::downgrade::THIS_VERSION.to_string(),
         }
+    }
+
+    /// Answer `Downgrade` as fastetcd `version` (tests, fastetcd#202: a
+    /// target must be older than the member and no older than the
+    /// version that added the target's log entry).
+    pub fn with_this_version(mut self, version: &str) -> Self {
+        self.this_version = version.to_string();
+        self
     }
 
     /// Refuse proposals larger than `max` (etcd's `--max-request-bytes`,

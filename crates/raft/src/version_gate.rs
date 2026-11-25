@@ -132,6 +132,9 @@ pub enum GateError {
     Older { member: NodeId, version: Option<String> },
     /// The member did not answer.
     Unreachable { member: NodeId, error: String },
+    /// A downgrade to `target`, older than the gate's version, is in
+    /// progress (fastetcd#202).
+    Held { target: String },
 }
 
 /// The current membership's key: its log index + 1 (0: none yet).
@@ -140,35 +143,74 @@ pub fn membership_key(raft: &Raft<TypeConfig>) -> u64 {
     m.membership_config.log_id().map(|l| l.index + 1).unwrap_or(0)
 }
 
+/// Whether a downgrade to `target` holds a gate opening at `min`: the
+/// target is a version older than `min`, which could not read what the
+/// gate turns on (fastetcd#202). A target that does not parse holds every
+/// gate.
+pub fn holds(target: &str, min: (u64, u64, u64)) -> bool {
+    parse_version(target).is_none_or(|t| t < Version::release(min))
+}
+
 /// Passes once every other member (voters and learners) answers with
-/// `min` or later.
-#[derive(Debug, Default)]
+/// `min` or later, and no downgrade target older than `min` is set
+/// ([`held_by`](Self::held_by), fastetcd#202).
+#[derive(Default)]
 pub struct MembersAtLeast {
     min: (u64, u64, u64),
     /// Membership key + 1 the gate last passed for; 0 = never.
     passed: AtomicU64,
+    /// The store whose downgrade target holds this gate.
+    hold: std::sync::OnceLock<fastetcd_storage::mvcc::MvccStore>,
+}
+
+impl std::fmt::Debug for MembersAtLeast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MembersAtLeast")
+            .field("min", &self.min)
+            .field("passed", &self.passed)
+            .field("held_by_a_store", &self.hold.get().is_some())
+            .finish()
+    }
 }
 
 impl MembersAtLeast {
     pub const fn new(min: (u64, u64, u64)) -> Self {
-        Self { min, passed: AtomicU64::new(0) }
+        Self { min, passed: AtomicU64::new(0), hold: std::sync::OnceLock::new() }
+    }
+
+    /// Closed while `mvcc`'s downgrade target is older than `min`
+    /// (fastetcd#202): a feature a member at the target could not read
+    /// does not turn on between `Downgrade ENABLE` and the downgrade.
+    pub fn held_by(self, mvcc: fastetcd_storage::mvcc::MvccStore) -> Self {
+        let _ = self.hold.set(mvcc);
+        self
     }
 
     pub fn min(&self) -> (u64, u64, u64) {
         self.min
     }
 
-    /// Passed for the current membership already: no RPC.
-    pub fn passed(&self, raft: &Raft<TypeConfig>) -> bool {
-        self.passed.load(Ordering::Acquire) == membership_key(raft) + 1
+    /// The downgrade target holding this gate, if one is.
+    pub fn held(&self) -> Option<String> {
+        let target = self.hold.get()?.downgrade_target()?;
+        holds(&target, self.min).then_some(target)
     }
 
-    /// Ask every other member, unless passed for this membership.
+    /// Passed for the current membership already, and not held: no RPC.
+    pub fn passed(&self, raft: &Raft<TypeConfig>) -> bool {
+        self.held().is_none() && self.passed.load(Ordering::Acquire) == membership_key(raft) + 1
+    }
+
+    /// Ask every other member, unless passed for this membership. Closed
+    /// while a downgrade target older than `min` is set.
     pub async fn check(
         &self,
         raft: &Raft<TypeConfig>,
         forwarder: &WriteForwarder,
     ) -> Result<(), GateError> {
+        if let Some(target) = self.held() {
+            return Err(GateError::Held { target });
+        }
         let key = membership_key(raft) + 1;
         if self.passed.load(Ordering::Acquire) == key {
             return Ok(());
@@ -197,6 +239,20 @@ impl MembersAtLeast {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fastetcd#202: a downgrade target holds the gates whose version it
+    /// predates, and only those.
+    #[test]
+    fn a_downgrade_target_holds_the_gates_it_predates() {
+        assert!(holds("1.45.0", (1, 46, 0)));
+        assert!(holds("1.45.9", (1, 46, 0)));
+        assert!(holds("1.46.0-rc1", (1, 46, 0)));
+        assert!(!holds("1.46.0", (1, 46, 0)));
+        assert!(!holds("1.45.0", (1, 44, 0)));
+        assert!(holds("junk", (1, 0, 0)), "a target that does not parse holds every gate");
+        let gate = MembersAtLeast::new((1, 46, 0));
+        assert_eq!(gate.held(), None, "no store: nothing holds it");
+    }
 
     #[test]
     fn versions_parse_and_order() {

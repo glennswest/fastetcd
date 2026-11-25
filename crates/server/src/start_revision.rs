@@ -83,6 +83,10 @@ async fn may_propose(state: &ServerState, strict: bool) -> bool {
             tracing::debug!(member = format!("{member:x}"), error, "a member did not answer its version");
             !strict
         }
+        Err(GateError::Held { target }) => {
+            tracing::debug!(target_version = %target, "store keeps 0-based revisions: a downgrade is in progress (fastetcd#202)");
+            false
+        }
     }
 }
 

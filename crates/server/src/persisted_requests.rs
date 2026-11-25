@@ -112,7 +112,8 @@ fn push(entry: &FastetcdLogEntry, leases: &mut LeaseIds, out: &mut Vec<Value>) {
         | FastetcdLogEntry::Auth(_)
         | FastetcdLogEntry::ClusterId(_)
         | FastetcdLogEntry::StartRevision
-        | FastetcdLogEntry::PutVersions => {}
+        | FastetcdLogEntry::PutVersions
+        | FastetcdLogEntry::DowngradeTarget(_) => {}
     }
 }
 

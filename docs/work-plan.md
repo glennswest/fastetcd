@@ -2288,3 +2288,28 @@ Tracked live in the Claude task system. Snapshot of the order:
       on the same data dir without waiting for the first to exit (drop
       only starts the kill); once in a full build the restart found the
       file held and exited. It now kills and waits (afff73a).
+
+125. **Downgrade ENABLE/CANCEL (#202).** The decision asked on the issue
+    (2026-11-21, close as not planned recommended) was never answered;
+    asked again 2026-11-25, `stormcentral wait-owner` refused it: a `gap`
+    is session work (#1680). Built as option 1:
+    - [x] storage: `mvcc_meta/downgrade_target` (text) and
+      `downgrade_used`, RAM copies, from installed tables;
+      `apply_downgrade_target(Option)`.
+    - [x] raft: `FastetcdLogEntry::DowngradeTarget(Option<String>)`
+      (appended last). `MembersAtLeast::held_by(mvcc)`: closed
+      (`GateError::Held`, and `passed()` false) while a target older than
+      its version is set; every gate (nested txn, start revision, put
+      versions, cluster id, lessor RAM renewals) is held by its store.
+    - [x] server: ENABLE (VALIDATE passes, target >= 1.45.0, none set,
+      every member >= 1.45 via `downgrade_gate`), CANCEL (etcd's no
+      inflight job), `Status.downgrade_info`, a 1.45 floor once used, the
+      leader clears a target every member runs (`downgrade::follow`).
+      `ServerState::this_version` so tests run as a newer version: on
+      1.45.0 itself no target is valid.
+    - [x] tests: storage (set/clear/reopen/install), raft (`holds`),
+      downgrade unit (`check_enable`, `finished`, floor), integration
+      `downgrade_target.rs` (refusals, ENABLE, info, a held and an open
+      gate, the floor, CANCEL, the leader's clear).
+    - [x] docs: 03-deploy Downgrades, 00-design, README.
+    - [ ] sc-build: clippy, workspace; release 1.45.0.

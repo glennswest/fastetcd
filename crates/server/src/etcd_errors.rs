@@ -34,6 +34,10 @@ pub const MEMBER_NOT_FOUND: &str = "etcdserver: member not found";
 pub const NOT_LEADER: &str = "etcdserver: not leader";
 pub const BAD_LEADER_TRANSFEREE: &str = "etcdserver: bad leader transferee";
 pub const TIMEOUT_LEADER_TRANSFER: &str = "etcdserver: request timed out, leader transfer took too long";
+/// `ErrGRPCDowngradeInProcess` (fastetcd#202).
+pub const DOWNGRADE_IN_PROCESS: &str = "etcdserver: cluster has a downgrade job in progress";
+/// `ErrGRPCNoInflightDowngrade` (fastetcd#202).
+pub const NO_INFLIGHT_DOWNGRADE: &str = "etcdserver: no inflight downgrade job";
 
 /// A token was sent and names no user here.
 pub fn invalid_auth_token() -> Status {

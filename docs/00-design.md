@@ -181,7 +181,7 @@ crates/
 | Watch         | Watch (bidi): ranges, prev_kv, filters, start_revision history, progress notify, compaction cancel, fragmented responses for a create with `fragment` (#58) | |
 | Lease         | LeaseGrant, LeaseRevoke, LeaseKeepAlive, LeaseTimeToLive, LeaseLeases (authorized over the lease's keys, #47) | |
 | Cluster       | MemberAdd, MemberRemove, MemberUpdate, MemberList, MemberPromote | |
-| Maintenance   | Alarm (GET, DEACTIVATE), Status, Defragment, Hash, HashKV, Snapshot, MoveLeader (#57), Downgrade VALIDATE of a fastetcd version (#192) | Downgrade ENABLE/CANCEL: not served, an unknown action (#202); Alarm ACTIVATE: refused on purpose |
+| Maintenance   | Alarm (GET, DEACTIVATE), Status (with `downgrade_info`), Defragment, Hash, HashKV, Snapshot, MoveLeader (#57), Downgrade VALIDATE of a fastetcd version (#192), ENABLE/CANCEL of a replicated downgrade target that holds the version gates (#202, targets 1.45 or later) | Alarm ACTIVATE: refused on purpose |
 | Auth          | all RPCs; replicated through Raft; token or client-cert CN; token expiry (`--auth-token-ttl`, #46) | |
 
 The same methods are served as etcd's v3 JSON gateway (`POST /v3/...`).

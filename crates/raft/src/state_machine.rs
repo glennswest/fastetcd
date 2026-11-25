@@ -1195,6 +1195,10 @@ async fn apply_request(
             let revision = mvcc.apply_put_versions().await?;
             Ok(FastetcdLogResponse::Noop { revision })
         }
+        FastetcdLogEntry::DowngradeTarget(target) => {
+            let revision = mvcc.apply_downgrade_target(target.as_deref()).await?;
+            Ok(FastetcdLogResponse::Noop { revision })
+        }
         FastetcdLogEntry::Auth(op) => {
             let (revision, result) = mvcc.apply_auth(op).await?;
             Ok(FastetcdLogResponse::Auth { revision, log_index, result })

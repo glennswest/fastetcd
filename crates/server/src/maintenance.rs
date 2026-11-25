@@ -191,7 +191,7 @@ impl Maintenance for MaintenanceService {
             is_learner: false,
             storage_version: ETCD_COMPAT_VERSION.to_string(),
             db_size_quota: stats.capacity_bytes as i64,
-            downgrade_info: None,
+            downgrade_info: Some(crate::downgrade::info(&self.state)),
         }))
     }
 
@@ -348,7 +348,7 @@ impl Maintenance for MaintenanceService {
     ) -> Result<Response<pb::DowngradeResponse>, Status> {
         // Root only while auth is on, as in etcd (authMaintenanceServer, #31).
         crate::authz::require_admin(&self.state, &request).await?;
-        let version = crate::downgrade::serve(&self.state, request.get_ref())?;
+        let version = crate::downgrade::serve(&self.state, request.get_ref()).await?;
         let revision = self.state.sm.mvcc().current_revision().await;
         let header = response_header(&self.state, revision).await;
         Ok(Response::new(pb::DowngradeResponse { header: Some(header), version }))

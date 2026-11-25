@@ -828,15 +828,34 @@ on; gateway `/v3/maintenance/downgrade`):
   | 1.33 | once the cluster id is replicated (`fastetcd_cluster_id_replicated` = 1) | the cluster-id log entry (#38): its purge on every member is not tracked, so this floor stays |
   | 1.41 | once the log has held a `StartRevision` entry (any cluster whose members all ran 1.41 while it had no revision yet, or wrote) | the start-revision log entry (#160) |
   | 1.44 | once the log has held a `PutVersions` entry (any cluster whose members have all run 1.44) | the put-versions log entry (#220): an older member could not decode it, and would store other versions for the same puts |
+  | 1.45 | once the log has held a `DowngradeTarget` entry (a `downgrade enable` or `cancel` was made) | the downgrade-target log entry (#202) |
 
   So a cluster that has run 1.33 or later validates 1.33 and up, and
   refuses anything older; one whose log holds a `StartRevision` entry
   validates nothing below 1.41. It checks the data only: it does not ask the
   members their versions, and changes nothing.
-- **`enable` and `cancel`** are not served: they answer as an unknown
-  action does (`InvalidArgument` `unknown downgrade action N`; the gap
-  is #202). Validate, then restart one member at a time onto the older
-  binary.
+- **`etcdctl downgrade enable <version>`** (since 1.45, #202) sets that
+  version as the cluster's downgrade target, after `validate` passes for
+  it: a replicated log entry, kept with the data and in snapshots, so
+  every member, every restart and every new member sees the same target.
+  While it is set, no version gate turns on a feature the target could
+  not read (the floors above only ever grow by such features), so
+  nothing new lands between `enable` and the members' restarts onto the
+  older binary. `etcdctl endpoint status` shows it (`Status`'s
+  `downgrade_info`: enabled, target version) on every member. One target
+  at a time: a second `enable` is etcd's `cluster has a downgrade job in
+  progress`. The target is itself a log entry that only 1.45 or later
+  reads, so it cannot be older than 1.45 (`FailedPrecondition` naming
+  1.45.0; on 1.45.0 itself every target is refused, as none is both older
+  than the member and 1.45 or later), and it is set only once every
+  member runs 1.45 or later. It answers with the member's version.
+- **`etcdctl downgrade cancel`** clears the target (etcd's `no inflight
+  downgrade job` when none is set). The leader also clears it by itself
+  once every member runs the target's release (a patch of it counts),
+  within about 5 s, as etcd ends a finished downgrade.
+
+Then restart one member at a time onto the older binary. To go back
+below 1.45, `validate` and restart without `enable`.
 
 **Revisions: a new store starts at 1, as etcd's (1.41, #160).** An
 empty etcd store is at revision 1, so its first write is revision 2.
