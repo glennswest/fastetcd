@@ -39,7 +39,7 @@ async fn put_versions_a_put_after_a_compaction_gets_etcds_version() {
     let dir = tempfile::tempdir().unwrap();
     let args = [OsStr::new("--data-dir"), dir.path().as_os_str()];
     {
-        let member = spawned::spawn_fastetcd(&args).await;
+        let mut member = spawned::spawn_fastetcd(&args).await;
         wait_for_line(&member, SWITCHED).await;
         let mut kv = KvClient::connect(member.client_url()).await.unwrap();
         let mut revs = Vec::new();
@@ -67,6 +67,9 @@ async fn put_versions_a_put_after_a_compaction_gets_etcds_version() {
             .into_inner();
         assert!(txn.succeeded, "Compare(Version == 4) failed");
         kv.compact(pb::CompactionRequest { revision: rev, physical: true }).await.unwrap();
+        // Gone before the restart: dropping it only starts the kill, and a
+        // restart that found the data file still held exited at once.
+        member.child.kill().await.unwrap();
     }
     // Restarted: the WAL replays the same versions and the rule holds.
     let member = spawned::spawn_fastetcd(&args).await;
