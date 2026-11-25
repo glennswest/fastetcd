@@ -35,7 +35,7 @@ async fn version(kv: &mut KvClient<tonic::transport::Channel>) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_put_after_a_compaction_gets_etcds_version() {
+async fn put_versions_a_put_after_a_compaction_gets_etcds_version() {
     let dir = tempfile::tempdir().unwrap();
     let args = [OsStr::new("--data-dir"), dir.path().as_os_str()];
     {

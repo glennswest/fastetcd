@@ -57,6 +57,9 @@ async fn start_node(
         .unwrap();
     // As main does (#97).
     sm.follow_log_durability(log.progress());
+    // ConfirmLeader answers this version, as main's peer service does, so
+    // a version gate passes (#220).
+    let progress = log.progress();
 
     let config = Arc::new(
         Config {
@@ -103,7 +106,7 @@ async fn start_node(
     let peer_mvcc = state.sm.mvcc().clone();
     let node_state = state.clone();
     let lease = LeaseService::new(state);
-    let peer_service = RaftPeerService::new(raft.clone(), peer_mvcc);
+    let peer_service = RaftPeerService::new(raft.clone(), peer_mvcc).with_log_progress(progress);
 
     // Listen on the URL the peers were told about.
     let peer_url = &members[&id];
