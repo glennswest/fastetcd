@@ -191,7 +191,7 @@ pub enum FastetcdLogEntry {
     StartRevision,
 
     /// From this entry on, a put's version is the key's previous version
-    /// + 1, as etcd counts puts per generation, not the revisions the
+    /// plus 1, as etcd counts puts per generation, not the revisions the
     /// key's index still holds, which a compaction drops (fastetcd#220).
     /// Applied once, alike on every member and every replay; applying it
     /// again changes nothing. The leader proposes it once every member
