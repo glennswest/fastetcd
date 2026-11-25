@@ -2143,3 +2143,17 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] The new test under both loads: 40/40 each; sc-build of 3a45d7a:
       clippy `--workspace --all-targets -D warnings` clean, `fastetcd-raft`
       98 pass, 0 fail. CHANGELOG. No release (test only).
+
+120. **MemberAdd of a voter fails "already undergoing a configuration
+    change" (#234, P3).** Seen once in `member_routes.sh` (#211): a voter
+    `member add` about a second after a 3-member cluster was healthy
+    failed `Unavailable` from the leader's own `change_membership` (no
+    forwarding prefix), committed membership at index 0, the effective one
+    at index 4. The issue's reading (promoted before the learner's entry
+    committed) does not fit openraft 0.9: `add_learner` answers after its
+    entry is applied, and the committed membership moves on commit. So
+    reproduce before fixing.
+    - [ ] `tests/member_add_voter.sh`: fresh 3-member clusters, a voter
+      added through n1 and through n2 as soon as all are healthy; logs of a
+      failing round.
+    - [ ] Fix from what it shows; the script passes; CHANGELOG, docs.
