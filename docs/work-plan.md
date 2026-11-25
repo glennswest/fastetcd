@@ -2130,9 +2130,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     flight); on a loaded VM the first can use most of it, and "none in
     flight" may also be missed if another checkpoint has started. Test
     only.
-    - [ ] Measure under load first (the #237 rig: 4 copies at once, 8 busy
-      loops), on the current test.
-    - [ ] The second wait gets its own deadline and waits for the
+    - [x] Measured under load: the old test passed 40/40 with 8 busy loops
+      (3129495) and 40/40 with 4 busy loops + 3 `dd conv=fsync` writers.
+      Not reproduced. The issue's "next checkpoint starts at once" does not
+      hold either: after a 2.5 s checkpoint the next waits 4x that
+      (`CHECKPOINT_PACE`). So the likely cause is one checkpoint (2.5 s
+      delay + a real fsync) outlasting the shared 10 s on a busy host.
+    - [x] The second wait has its own 30 s deadline and waits for the
       checkpoint seen in flight to end (`checkpoints` rises past its value
-      then); any checkpoint in flight after that must be a newer one.
-    - [ ] The same loaded runs pass; CHANGELOG.
+      then); any checkpoint in flight after it must be newer (296156d,
+      3a45d7a).
+    - [x] The new test under both loads: 40/40 each; sc-build of 3a45d7a:
+      clippy `--workspace --all-targets -D warnings` clean, `fastetcd-raft`
+      98 pass, 0 fail. CHANGELOG. No release (test only).
