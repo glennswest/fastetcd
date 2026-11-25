@@ -734,6 +734,22 @@ itself, so after a `member add` another leader could not replicate to
 the new member, and `member update` moved only the serving member's
 route.
 
+**Membership changes go to the leader (1.44.3, #234).** `member add`,
+`remove`, `promote` and `update` sent to a follower are forwarded to
+the leader at once; the leader makes them one after another, waiting up
+to 5 s for a change still in progress (another `member add`, or a new
+leader's initial membership), as etcd applies configuration changes in
+order. Before, a follower first tried the change itself, and one that
+had the leader's last membership entry but had not yet heard it was
+committed refused it as `the cluster is already undergoing a
+configuration change` (`Unavailable`): a voter `member add` right
+after a cluster came up failed this way about one time in five, and the
+learner it had added stayed (`tests/member_add_voter.sh`). A voter
+`member add`, `member remove` and `member promote` still compute the
+new voter set on the member that serves them, so two changes through
+different members at the same moment can undo one another: make them
+one at a time (#252).
+
 **Tested rolling upgrades** (`tests/rolling_upgrade.sh`, #65, at 1.25.1):
 v1.9.0 → 1.25.1 and v1.24.1 → 1.25.1 one member process at a time, and
 1.25.1 → v1.24.1 back, under writes, with auth and a lease: nothing

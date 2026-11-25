@@ -2153,7 +2153,23 @@ Tracked live in the Claude task system. Snapshot of the order:
     committed) does not fit openraft 0.9: `add_learner` answers after its
     entry is applied, and the committed membership moves on commit. So
     reproduce before fixing.
-    - [ ] `tests/member_add_voter.sh`: fresh 3-member clusters, a voter
-      added through n1 and through n2 as soon as all are healthy; logs of a
-      failing round.
-    - [ ] Fix from what it shows; the script passes; CHANGELOG, docs.
+    - [x] `tests/member_add_voter.sh`: fresh 3-member clusters, a voter
+      added through n1 and through n2 as soon as all are healthy. On
+      5672516: 3 of 16 adds failed, each with the effective membership one
+      entry past the committed one (index 2 vs 0, 5 vs 4).
+    - Cause: openraft's `RaftCore::change_membership` checks "in progress"
+      against the serving member's own membership state before it checks
+      leadership (`write_entry`). A follower that had the learner's entry
+      but not yet its commit refused the promotion with `InProgress`,
+      which is not `ForwardToLeader`, so it was never forwarded.
+    - [x] Fix (0b8d802): `ServerState::propose_*` forward to the known
+      leader at once; `network::change_membership_waiting` retries
+      `InProgress` on the leader for up to 5 s (the leader's handler of
+      forwarded changes uses it too); a voter MemberAdd on a follower waits
+      until its membership view holds the new learner before computing the
+      voter set. The stale-view voter set in general is #252.
+    - [x] `voter_adds_and_removes_through_followers_in_quick_succession`
+      (multinode_grpc): coverage only, it also passed 5/5 on the old code
+      (the in-process harness did not open the window).
+    - [ ] Verify: the script on the fix and on 5672516, 20 rounds each;
+      clippy; membership tests; CHANGELOG, 03-deploy; release 1.44.3.
