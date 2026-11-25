@@ -1024,6 +1024,15 @@ TimeToLive, a membership change) within that time, and the next call
 dials again; before, they waited for the operating system's TCP timeout
 (minutes).
 
+**A member that is down** (since 1.44.6, #226). The leader replicates to
+a member it cannot reach (its connection refused or lost, or no dial)
+again after 100, 200 and 400 ms, then every 500 ms for as long as it
+stays away, logging one `error replication to target=…` WARN per
+attempt; the first success starts the steps again, so a member back from
+a restart is caught up within about half a second. Before 1.44.6 the
+leader retried it about every millisecond, two log lines each time, for
+as long as it was down (`tests/replication_backoff.sh`).
+
 **On spinning disks** (the X9 blades: follower fsyncs of 0.3–0.8 s, a
 longest of 85 s, `docs/benchmarks/blade-server3.md`), set on every
 member:
