@@ -10,8 +10,11 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.0`** — a key's Version counts puts after a compaction, as
-etcd's, from a replicated `PutVersions` entry; downgrade floor 1.44
+**`1.44.1`** — a watch at a compacted revision gets etcd's two responses
+(created, then cancelled with `compact_revision` and no reason), so
+clientv3 reports `ErrCompacted`; a watch from the compact revision itself
+is served (#222). 1.44.0: a key's Version counts puts after a compaction,
+as etcd's, from a replicated `PutVersions` entry; downgrade floor 1.44
 (#220). 1.43.5: Lock, Campaign, Observe and Watch follow raft snapshot
 installs (#216). 1.43.4: a lease's key range holds its own keys for every id
 (#215). 1.43.3: a permission grant on the same key/range replaces its
