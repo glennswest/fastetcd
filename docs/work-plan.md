@@ -2049,4 +2049,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Negative control (wip/220-negative-control, apply keeping the old
       count): the storage tests read 3 for 4 and 2 for an imported 6; the
       3-member test reads version 3 on a member, the real-binary test 3.
-    - [ ] sc-build green; negative control.
+    - Also from the harness fix: with the start-revision gate passing there
+      too, `three_node_cluster_replicates_via_grpc_transport` sees its first
+      write at revision 2, as production (#160); its assert updated (10a1596).
+    - [x] sc-build of 10a1596: clippy `--workspace --all-targets -D
+      warnings` clean; workspace `--no-fail-fast` 557 pass, 0 fail, incl.
+      the 4 storage tests, `put_versions` (real binary: compaction, Compare,
+      restart), the 3-member test, the 1.44 floor.

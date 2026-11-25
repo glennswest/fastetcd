@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-25
+- **fix:** The multinode test harness serves `ConfirmLeader` as the server does, so version gates (#160's start revision, #220's put versions) pass there; `three_node_cluster_replicates_via_grpc_transport` expects its first write at revision 2, as a real cluster's. Test only (#220).
+
 ### 2026-11-23
 - **fix:** The secret scan's two findings at 885c4c2 were false positives in tests, and they no longer come up (#246, stormcentral#1679). `tests/rolling_upgrade.sh` makes root's and alice's passwords for each run instead of committing `rootpw`, which gitleaks' `curl-auth-user` matched together with a `curl` four lines up. `tests/test_container.sh` base64-encodes its `/storm-test/` range at run time, which `generic-api-key` had read as a key. `gitleaks dir .` (8.30.1) finds nothing. Test only.
 
