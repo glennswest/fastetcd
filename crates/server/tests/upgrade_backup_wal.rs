@@ -74,8 +74,13 @@ async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
         kv.put(pb::PutRequest { key: b"k-base".to_vec(), value: b"v".to_vec(), ..Default::default() })
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        member.child.kill().await.unwrap();
+        // A clean stop (SIGTERM) checkpoints on the way out.
+        let pid = member.child.id().unwrap().to_string();
+        assert!(std::process::Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+        tokio::time::timeout(Duration::from_secs(20), member.child.wait())
+            .await
+            .unwrap_or_else(|_| panic!("no clean stop within 20 s:\n{}", member.log_tail()))
+            .unwrap();
         assert!(data_file_revision(data.path()).await > 0, "the first write was not checkpointed");
         expect += 1;
     }
