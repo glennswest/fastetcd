@@ -10,7 +10,10 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.44.2`** — MoveLeader waits for the proposals in flight and
+**`1.44.3`** — membership changes go to the leader, which waits for one
+in progress, so a voter `member add` right after start-up no longer
+fails "already undergoing a configuration change" (#234). 1.44.2:
+MoveLeader waits for the proposals in flight and
 re-checks the leader's log before asking the target, so a write cannot
 leave the target behind under load (#237). 1.44.1: a watch at a compacted revision gets etcd's two responses
 (created, then cancelled with `compact_revision` and no reason), so

@@ -2171,5 +2171,10 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] `voter_adds_and_removes_through_followers_in_quick_succession`
       (multinode_grpc): coverage only, it also passed 5/5 on the old code
       (the in-process harness did not open the window).
-    - [ ] Verify: the script on the fix and on 5672516, 20 rounds each;
-      clippy; membership tests; CHANGELOG, 03-deploy; release 1.44.3.
+    - [x] Verify: `tests/member_add_voter.sh`, 20 rounds: the fix
+      (0b8d802) 0 of 40 adds failed (8 rounds before: 0 of 16); 5672516
+      2 of 40 (8 rounds before: 3 of 16). sc-build of 0b8d802: clippy
+      `--workspace --all-targets -D warnings` clean; multinode_grpc (10),
+      cluster_maintenance (6), authz_admin (8), multinode_fastpath (16)
+      pass. CHANGELOG, 03-deploy § Membership changes go to the leader.
+      Release 1.44.3.
