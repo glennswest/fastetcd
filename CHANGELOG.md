@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### 2026-11-25
-- **fix:** A member added with `member add` and started with `--initial-cluster-state existing`, without `--node-id`, runs as the id `member add` gave it (#232). `MemberAdd` derives a new member's id from its first peer URL, but the member derived its own from its `--name`, so the documented procedure (05 "Add it back") started a member under an id the membership did not have, which caught up from no one. With `existing` and no `--node-id`, a member with no raft state now takes the id of its advertised peer URL, as `member add` does (etcd finds a joining member by its peer URL too). A member records its id in `<data-dir>/member_id` and keeps it on later starts (as etcd keeps its id with its data), so it keeps it across `member update` even when its address changed while it was down; a data directory from before this finds its id in its own raft membership by its URL. The `--initial-cluster` entry at its own URL is taken as itself. Members started with `new`, `--node-id`, or whose membership has neither their URL nor their name are unchanged. `tests/member_join.sh`.
 - **fix:** `a_stuck_fsync_or_checkpoint_says_which_it_is` no longer flakes with "the checkpoint never returned" (#236). Its wait for the stuck checkpoint to end shared a 10 s deadline with the wait for it to be stuck, which a loaded build VM could use up, and it waited for no checkpoint at all to be in flight. It now waits, on its own 30 s deadline (a checkpoint is 2.5 s of delay plus a real fsync, slow on a busy host), for the checkpoint count to rise past its value when the stuck one was seen, and checks that any checkpoint still in flight is a newer one. Not reproduced in 120 loaded runs (CPU or disk load, old or new test), so the fix removes the shared deadline and the "none in flight" wait rather than a measured cause. Test only.
 - **fix:** The multinode test harness serves `ConfirmLeader` as the server does, so version gates (#160's start revision, #220's put versions) pass there; `three_node_cluster_replicates_via_grpc_transport` expects its first write at revision 2, as a real cluster's. Test only (#220).
 
@@ -54,6 +53,11 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.44.4] — 2026-11-25
+
+### Fixed
+- **fix:** A member added with `member add` and started with `--initial-cluster-state existing`, without `--node-id`, runs as the id `member add` gave it (#232). `MemberAdd` derives a new member's id from its first peer URL, but the member derived its own from its `--name`, so the documented procedure (05 "Add it back") started a member under an id the membership did not have, which caught up from no one. With `existing` and no `--node-id`, a member with no raft state now takes the id of its advertised peer URL, as `member add` does (etcd finds a joining member by its peer URL too). A member records its id in `<data-dir>/member_id` and keeps it on later starts (as etcd keeps its id with its data), so it keeps it across `member update` even when its address changed while it was down; a data directory from before this finds its id in its own raft membership by its URL. The `--initial-cluster` entry at its own URL is taken as itself. Members started with `new`, `--node-id`, or whose membership has neither their URL nor their name are unchanged. `tests/member_join.sh`.
 
 ## [v1.44.3] — 2026-11-25
 
