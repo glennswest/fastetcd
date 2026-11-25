@@ -714,8 +714,11 @@ with `--initial-cluster-state=existing`); `MemberRemove` removes them.
 A node started with `existing` and no `--node-id` runs as the id
 `MemberAdd` gave its advertised peer URL (`--initial-advertise-peer-urls`,
 else `--listen-peer-urls`; the URL given to `member add`, written the
-same way), and on a restart as the id its own raft membership has at
-that URL, so it keeps it across `member update`. Before 1.44.4 it ran as
+same way). A member records its id in `<data-dir>/member_id` and keeps
+it on every later start, so it keeps it across `member update` even when
+its address changed while it was down; a data directory from before
+1.44.4 finds it in its own raft membership by its URL, then records it.
+`--node-id` still wins. Before 1.44.4 it ran as
 the hash of its `--name`, which the membership did not have, unless
 `--node-id` was given (#232; `tests/member_join.sh`).
 On separate hosts, listen on a routable address and set

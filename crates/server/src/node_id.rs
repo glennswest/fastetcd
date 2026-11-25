@@ -10,9 +10,11 @@
 //! the membership did not have, unless `--node-id` was given.
 //!
 //! etcd finds a joining member's id in the member list by its own peer
-//! URL. fastetcd does the same without asking the peers:
+//! URL, and keeps it with its data. fastetcd does the same, without
+//! asking the peers:
 //!
 //! - `--node-id` given: that id;
+//! - the id this data directory recorded ([`FILE`]) on an earlier start;
 //! - `new`: [`from_name`], as before;
 //! - `existing`, with a membership in this member's own raft state (a
 //!   restart): the member whose address is this member's advertised peer
@@ -22,8 +24,49 @@
 //! - `existing`, no raft state yet (it is joining): [`from_peer_url`] of
 //!   its advertised peer URL, the id `MemberAdd` gave the member it
 //!   added at that URL.
+//!
+//! The id chosen is recorded in [`FILE`], except a `--name` id that the
+//! member's own membership does not have: a member whose address moved
+//! (`member update`) while it was down, before it received the change,
+//! then keeps its id at the new URL.
+
+use std::path::Path;
 
 use fastetcd_raft::NodeId;
+
+/// The file in the data directory that records this member's id (hex).
+pub const FILE: &str = "member_id";
+
+/// The id `data_dir` recorded, if any. A file that does not parse is an
+/// error: guessing could run the member under another id.
+pub fn read(data_dir: &Path) -> anyhow::Result<Option<NodeId>> {
+    let path = data_dir.join(FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let id = NodeId::from_str_radix(text.trim(), 16)
+                .map_err(|e| anyhow::anyhow!("{}: not a member id ({e}): {text:?}", path.display()))?;
+            Ok(Some(id))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+    }
+}
+
+/// Record `id` in `data_dir` (written to a temporary file, synced, then
+/// renamed over [`FILE`]).
+pub fn write(data_dir: &Path, id: NodeId) -> anyhow::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(data_dir)?;
+    let tmp = data_dir.join(format!("{FILE}.tmp"));
+    let mut f = std::fs::File::create(&tmp)?;
+    writeln!(f, "{id:x}")?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, data_dir.join(FILE))?;
+    if let Ok(dir) = std::fs::File::open(data_dir) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
 
 /// FNV-1a of `s`, as a non-zero 63-bit id.
 fn fnv1a(s: &str) -> NodeId {
@@ -67,6 +110,8 @@ fn same_url(a: &str, b: &str) -> bool {
 pub enum Source {
     /// `--node-id`.
     Flag,
+    /// Recorded in the data directory by an earlier start ([`FILE`]).
+    Recorded,
     /// `--name`, for a member that bootstraps (`new`).
     Name,
     /// The member whose address is the advertised peer URL, in this
@@ -80,12 +125,20 @@ pub enum Source {
     PeerUrl,
 }
 
-/// This member's raft id. `advertised` is its first advertised peer URL
+/// Whether an id chosen this way is recorded for later starts: not a
+/// `--name` id the member's own membership lacks.
+pub fn should_record(source: Source) -> bool {
+    !matches!(source, Source::NameNotInMembership)
+}
+
+/// This member's raft id. `recorded` is the id its data directory
+/// recorded ([`read`]). `advertised` is its first advertised peer URL
 /// (`--initial-advertise-peer-urls`, else `--listen-peer-urls`), and
 /// `membership` its own durable raft membership, if it has one: each
 /// member's id and address.
 pub fn resolve(
     flag: Option<NodeId>,
+    recorded: Option<NodeId>,
     name: &str,
     existing: bool,
     advertised: &str,
@@ -93,6 +146,9 @@ pub fn resolve(
 ) -> (NodeId, Source) {
     if let Some(id) = flag {
         return (id, Source::Flag);
+    }
+    if let Some(id) = recorded {
+        return (id, Source::Recorded);
     }
     if !existing {
         return (from_name(name), Source::Name);
@@ -119,24 +175,45 @@ mod tests {
 
     const URL: &str = "http://10.0.0.4:2380";
 
+    /// An id recorded by an earlier start wins over everything but the
+    /// flag: the member's address may have moved while it was down, before
+    /// its own membership had the change (#232).
+    #[test]
+    fn a_recorded_id_is_kept() {
+        let members = [(from_name("n1"), "http://10.0.0.1:2380".to_string())];
+        let new_url = "http://10.0.0.99:2380";
+        assert_eq!(resolve(None, Some(42), "n4", true, new_url, Some(&members)), (42, Source::Recorded));
+        assert_eq!(resolve(None, Some(42), "n4", false, new_url, None), (42, Source::Recorded));
+        assert_eq!(resolve(Some(7), Some(42), "n4", true, new_url, None), (7, Source::Flag));
+        assert!(!should_record(Source::NameNotInMembership));
+        assert!(should_record(Source::PeerUrl) && should_record(Source::Membership));
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read(dir.path()).unwrap(), None);
+        write(dir.path(), 0x6e0444432cea802).unwrap();
+        assert_eq!(read(dir.path()).unwrap(), Some(0x6e0444432cea802));
+        std::fs::write(dir.path().join(FILE), "zz\n").unwrap();
+        assert!(read(dir.path()).is_err());
+    }
+
     #[test]
     fn the_flag_wins_and_new_members_use_their_name() {
-        assert_eq!(resolve(Some(7), "n4", true, URL, None), (7, Source::Flag));
-        assert_eq!(resolve(None, "n1", false, URL, None), (from_name("n1"), Source::Name));
+        assert_eq!(resolve(Some(7), None, "n4", true, URL, None), (7, Source::Flag));
+        assert_eq!(resolve(None, None, "n1", false, URL, None), (from_name("n1"), Source::Name));
         // A bootstrap member's own data does not change it.
         let members = [(99, URL.to_string())];
-        assert_eq!(resolve(None, "n1", false, URL, Some(&members)), (from_name("n1"), Source::Name));
+        assert_eq!(resolve(None, None, "n1", false, URL, Some(&members)), (from_name("n1"), Source::Name));
     }
 
     /// fastetcd#232: a member joining after `member add` runs as the id
     /// MemberAdd gave the URL.
     #[test]
     fn a_joining_member_takes_the_id_member_add_gave_its_url() {
-        let (id, source) = resolve(None, "n4", true, URL, None);
+        let (id, source) = resolve(None, None, "n4", true, URL, None);
         assert_eq!(source, Source::PeerUrl);
         assert_eq!(id, crate::cluster::ClusterService::derive_node_id_from_url(URL));
         assert_ne!(id, from_name("n4"));
-        assert_eq!(resolve(None, "n4", true, &format!(" {URL} "), None).0, id);
+        assert_eq!(resolve(None, None, "n4", true, &format!(" {URL} "), None).0, id);
     }
 
     /// A restart reads the id from its own membership, by address: the
@@ -147,11 +224,11 @@ mod tests {
             (from_name("n1"), "http://10.0.0.1:2380".to_string()),
             (from_peer_url("http://10.0.0.9:2380"), URL.to_string()),
         ];
-        let (id, source) = resolve(None, "n4", true, &format!("{URL}/"), Some(&members));
+        let (id, source) = resolve(None, None, "n4", true, &format!("{URL}/"), Some(&members));
         assert_eq!((id, source), (from_peer_url("http://10.0.0.9:2380"), Source::Membership));
         // A bootstrap member restarted with `existing` and another URL.
         assert_eq!(
-            resolve(None, "n1", true, "http://n1.local:2380", Some(&members)),
+            resolve(None, None, "n1", true, "http://n1.local:2380", Some(&members)),
             (from_name("n1"), Source::NameInMembership)
         );
         // `--initial-cluster` lists the joining member under its name, at
@@ -160,7 +237,7 @@ mod tests {
         assert_eq!(of_listed("n1", "http://10.0.0.1:2380", 42, URL), from_name("n1"));
         // Neither: as before, by name.
         assert_eq!(
-            resolve(None, "n7", true, "http://10.0.0.7:2380", Some(&members)),
+            resolve(None, None, "n7", true, "http://10.0.0.7:2380", Some(&members)),
             (from_name("n7"), Source::NameNotInMembership)
         );
     }

@@ -816,11 +816,21 @@ fn advertised_peer_url(args: &Args) -> String {
         .to_string()
 }
 
-fn resolve_node_id(args: &Args) -> anyhow::Result<NodeId> {
+fn resolve_node_id(args: &Args) -> anyhow::Result<(NodeId, fastetcd_server::node_id::Source)> {
     use fastetcd_server::node_id::{resolve, Source};
     let existing = !args.initial_cluster_state.eq_ignore_ascii_case("new");
     let advertised = advertised_peer_url(args);
-    let membership: Option<Vec<(NodeId, String)>> = if args.node_id.is_none() && existing {
+    let recorded = fastetcd_server::node_id::read(&args.data_dir)?;
+    if let (Some(flag), Some(rec)) = (args.node_id, recorded) {
+        if flag != rec {
+            tracing::warn!(
+                node_id = format_args!("{flag:x}"),
+                recorded = format_args!("{rec:x}"),
+                "--node-id differs from the id this data directory recorded; running as --node-id"
+            );
+        }
+    }
+    let membership: Option<Vec<(NodeId, String)>> = if args.node_id.is_none() && recorded.is_none() && existing {
         match fastetcd_raft::wal_log_store::durable_membership(&args.data_dir) {
             Ok(Some(m)) => Some(m.nodes().map(|(id, n)| (*id, n.addr.clone())).collect()),
             // Data but no raft membership on disk (a data file from before
@@ -835,9 +845,9 @@ fn resolve_node_id(args: &Args) -> anyhow::Result<NodeId> {
     } else {
         None
     };
-    let (id, source) = resolve(args.node_id, &args.name, existing, &advertised, membership.as_deref());
+    let (id, source) = resolve(args.node_id, recorded, &args.name, existing, &advertised, membership.as_deref());
     match source {
-        Source::Flag | Source::Name | Source::NameInMembership => {}
+        Source::Flag | Source::Recorded | Source::Name | Source::NameInMembership => {}
         Source::Membership => tracing::info!(
             node_id = format_args!("{id:x}"),
             peer_url = %advertised,
@@ -857,7 +867,7 @@ fn resolve_node_id(args: &Args) -> anyhow::Result<NodeId> {
              its --name's id"
         ),
     }
-    Ok(id)
+    Ok((id, source))
 }
 
 /// Backups on the data volume share its fate: a device that loses
@@ -985,12 +995,20 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .init();
-    let node_id = resolve_node_id(&args)?;
+    let (node_id, node_id_source) = resolve_node_id(&args)?;
 
     // Offline data-directory subcommands. These run and exit; the server
     // must be stopped (each opens the redb file exclusively).
     if let Some(command) = &args.command {
         return run_subcommand(&args, node_id, command).await;
+    }
+
+    // Record the id with the data, as etcd does, so a later start keeps it
+    // even if this member's address changes while it is down (#232).
+    if fastetcd_server::node_id::should_record(node_id_source)
+        && fastetcd_server::node_id::read(&args.data_dir)? != Some(node_id)
+    {
+        fastetcd_server::node_id::write(&args.data_dir, node_id)?;
     }
 
     let initial_cluster = parse_initial_cluster(&args.initial_cluster)?;

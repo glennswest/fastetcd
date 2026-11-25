@@ -2197,5 +2197,14 @@ Tracked live in the Claude task system. Snapshot of the order:
       `--node-id`, its id, a write, promote; restart; `member update` to a
       new URL and restart there.
     - [x] Docs: 01 (`--node-id`), 03 (Multi-node), 05 (Add it back).
+    - First run of the script (9f35e09): steps 1-3 passed; step 4 failed.
+      n4 was stopped right after `member update`, before it had the
+      change, so its own membership still had the old URL and it fell back
+      to its name. Matching by URL is not enough for restarts. Control on
+      1.44.3: n4 ran as its name hash (3 id checks failed); it still served
+      and was promoted, since nothing checks the id replication reaches.
+    - [x] The id is recorded in `<data-dir>/member_id` (hex, written
+      atomically) and used first on later starts (`--node-id` still wins);
+      not recorded for a `--name` id the membership lacks.
     - [ ] sc-build: the script on this tree and on 1.44.3 (control);
       clippy; workspace; release 1.44.4.

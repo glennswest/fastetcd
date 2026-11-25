@@ -35,7 +35,7 @@ list is bound; the rest are accepted for compatibility.
 | Flag | Default | Env | etcd env | Meaning |
 |---|---|---|---|---|
 | `--name` | `default` | `FASTETCD_NAME` | `ETCD_NAME` | Member name; the key in `--initial-cluster`. |
-| `--node-id` | see note | `FASTETCD_NODE_ID` | | Numeric raft id. When omitted: with `--initial-cluster-state new`, derived from `--name`; with `existing`, the id `member add` gave this member's advertised peer URL (no raft state yet), or the id this member's own raft membership has at that URL (a restart; else from `--name`) (#232). |
+| `--node-id` | see note | `FASTETCD_NODE_ID` | | Numeric raft id. When omitted: the id recorded in `<data-dir>/member_id` by an earlier start; else, with `--initial-cluster-state new`, derived from `--name`; with `existing`, the id `member add` gave this member's advertised peer URL (no raft state yet), or the id this member's own raft membership has at that URL (else from `--name`). The id chosen is recorded in `member_id` (#232). |
 | `--data-dir` | `default.fastetcd` | `FASTETCD_DATA_DIR` | `ETCD_DATA_DIR` | The store: `fastetcd.redb`, `snapshots/`, `backups/`. |
 | `--listen-client-urls` | `http://127.0.0.1:2379` | `FASTETCD_LISTEN_CLIENT_URLS` | `ETCD_LISTEN_CLIENT_URLS` | Client port. |
 | `--listen-peer-urls` | `http://127.0.0.1:2380` | `FASTETCD_LISTEN_PEER_URLS` | `ETCD_LISTEN_PEER_URLS` | Peer port. |

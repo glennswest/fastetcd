@@ -159,8 +159,7 @@ fastetcd ... --initial-cluster-state=existing \
 The member runs as the id `member add` printed: with
 `--initial-cluster-state=existing` and no `--node-id`, a member with no
 raft state takes the id `member add` gave its advertised peer URL, and
-on a restart the id its own raft membership has at that URL (1.44.4,
-#232). Before 1.44.4 it took the hash of its `--name` instead, a
+records it in `<data-dir>/member_id` for later starts (1.44.4, #232). Before 1.44.4 it took the hash of its `--name` instead, a
 different id, and caught up from no one unless started with
 `--node-id $((16#<hex id>))`.
 
