@@ -46,11 +46,38 @@ async fn data_file_revision(dir: &std::path::Path) -> i64 {
     MvccStore::open(engine).await.unwrap().current_revision().await
 }
 
+/// The issue's case: a data file with writes checkpointed into it, then
+/// more acknowledged writes only in the WAL when the member is killed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_upgrade_backup_keeps_writes_held_only_in_the_wal() {
+    upgrade_backup_keeps_every_write(true).await;
+}
+
+/// A member killed before its first checkpoint: the data file has no
+/// revision, every write is in the WAL. Before #231 no backup was taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_upgrade_backup_of_a_data_file_at_revision_0_keeps_its_wal() {
+    upgrade_backup_keeps_every_write(false).await;
+}
+
+async fn upgrade_backup_keeps_every_write(checkpointed_first: bool) {
     let data = tempfile::tempdir().unwrap();
     let backups = tempfile::tempdir().unwrap();
     let restored = tempfile::tempdir().unwrap();
+    let mut expect = KEYS;
+
+    // 0. A first write, checkpointed into the data file (100 ms default).
+    if checkpointed_first {
+        let mut member = spawned::spawn_fastetcd(&args(data.path(), &[])).await;
+        let mut kv = serving(&member).await;
+        kv.put(pb::PutRequest { key: b"k-base".to_vec(), value: b"v".to_vec(), ..Default::default() })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        member.child.kill().await.unwrap();
+        assert!(data_file_revision(data.path()).await > 0, "the first write was not checkpointed");
+        expect += 1;
+    }
 
     // 1. Acknowledged puts, then a kill before any checkpoint.
     let last = {
@@ -70,6 +97,7 @@ async fn the_upgrade_backup_keeps_writes_held_only_in_the_wal() {
     };
     let on_disk = data_file_revision(data.path()).await;
     assert!(on_disk < last, "the data file has every write (rev {on_disk} of {last}): nothing to prove");
+    assert_eq!(on_disk > 0, checkpointed_first, "data file at rev {on_disk}");
 
     // 2. As if an older version had last opened it.
     {
@@ -113,6 +141,6 @@ async fn the_upgrade_backup_keeps_writes_held_only_in_the_wal() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(got.kvs.len(), KEYS, "acknowledged writes lost by the backup:\n{}", member.log_tail());
+    assert_eq!(got.kvs.len(), expect, "acknowledged writes lost by the backup:\n{}", member.log_tail());
     assert!(got.header.unwrap().revision >= last);
 }
