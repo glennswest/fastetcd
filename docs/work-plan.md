@@ -2241,3 +2241,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       SIGTERM now makes sure of); clippy `--workspace --all-targets -D
       warnings` clean; workspace `--no-fail-fast` 0 fail. Docs 05, 04, 01;
       CHANGELOG. Release 1.44.5.
+
+123. **Leader retries replication to a down member about every millisecond
+    (#226, P3).** openraft 0.9 waits between attempts only after
+    `RPCError::Unreachable` (`RaftNetwork::backoff`); `GrpcNetwork` reported
+    every transport failure as `Network`.
+    - [x] `GrpcNetwork`: a dial that fails and a call failing `Unavailable`
+      (refused, lost: it never reached the handler) are `Unreachable`;
+      anything else stays `Network`. `backoff()`: 100, 200, 400, then
+      500 ms (openraft's default), reset by openraft on a success.
+    - [x] `crates/raft/tests/network_unreachable.rs`: a member nothing
+      listens for is `Unreachable`, twice; the backoff's steps.
+    - [x] `tests/replication_backoff.sh` (real binaries, etcdctl): stop a
+      follower, at most 25 replication errors in 5 s; restarted, it serves
+      a new write within 3 s.
+    - [ ] sc-build: the script on this tree and on 1.44.5 (control);
+      clippy; workspace; docs; CHANGELOG; release 1.44.6.

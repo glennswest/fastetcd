@@ -244,6 +244,32 @@ pub async fn route(addr: &str, target: NodeId, peers: &PeerEndpoints) -> Option<
     peers.read().await.get(&target).cloned()
 }
 
+/// The waits between replication attempts to a member that cannot be
+/// reached (fastetcd#226): 100, 200 and 400 ms, then 500 ms (openraft's
+/// own default) for as long as it stays away. openraft waits only after
+/// [`RPCError::Unreachable`] and starts again from the first on a success,
+/// so a member back from a restart is replicated to within 100–500 ms.
+pub fn unreachable_backoff() -> impl Iterator<Item = std::time::Duration> + Send + 'static {
+    [100u64, 200, 400]
+        .into_iter()
+        .chain(std::iter::repeat(500))
+        .map(std::time::Duration::from_millis)
+}
+
+/// An error from a call to a peer, as openraft should see it. A call that
+/// never reached the peer's handler, the connection refused or lost
+/// (tonic's `Unavailable`), is [`RPCError::Unreachable`], after which
+/// openraft waits ([`unreachable_backoff`]) before the next attempt; it
+/// retried such a member at once, about every millisecond, for as long as
+/// it was down (fastetcd#226). Anything else stays [`RPCError::Network`].
+fn call_error<E: std::error::Error>(status: tonic::Status) -> RPCError<NodeId, openraft::BasicNode, E> {
+    if status.code() == tonic::Code::Unavailable {
+        RPCError::Unreachable(openraft::error::Unreachable::new(&status))
+    } else {
+        RPCError::Network(NetworkError::new(&status))
+    }
+}
+
 /// Per-peer network handle. Lazily dials the first time it's used and
 /// caches the tonic `Channel`; reconnect is a fresh dial on the next
 /// call after an error.
@@ -279,9 +305,10 @@ impl GrpcNetwork {
                 format!("no peer URL for node {}", self.target),
             )))
         })?;
+        // A member that cannot be dialed is unreachable (fastetcd#226).
         let chan = dial_peer_with(&url, &self.tls, self.dial)
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+            .map_err(|e| RPCError::Unreachable(openraft::error::Unreachable::new(&e)))?;
         let cli = pb::raft_peer_client::RaftPeerClient::new(chan);
         *guard = Some(cli.clone());
         Ok(cli)
@@ -301,7 +328,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
         let resp = cli
             .append_entries(Request::new(pb::RaftPayload { data }))
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?
+            .map_err(call_error)?
             .into_inner();
         bincode::deserialize(&resp.data)
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))
@@ -334,7 +361,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
         let resp = cli
             .install_snapshot(Request::new(pb::RaftPayload { data }))
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?
+            .map_err(call_error)?
             .into_inner();
         bincode::deserialize(&resp.data)
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))
@@ -352,10 +379,14 @@ impl openraft::network::RaftNetwork<TypeConfig> for GrpcNetwork {
         let resp = cli
             .vote(Request::new(pb::RaftPayload { data }))
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?
+            .map_err(call_error)?
             .into_inner();
         bincode::deserialize(&resp.data)
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+    }
+
+    fn backoff(&self) -> openraft::network::Backoff {
+        openraft::network::Backoff::new(unreachable_backoff())
     }
 }
 
