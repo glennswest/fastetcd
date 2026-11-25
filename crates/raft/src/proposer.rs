@@ -220,8 +220,9 @@ impl Proposer {
         Self { tx, stats, hold }
     }
 
-    /// Propose nothing new until the guard is dropped (#57). Proposals
-    /// already handed to openraft go on; new ones queue.
+    /// Propose nothing new until the guard is dropped (#57). Waits for
+    /// the proposals already handed to openraft to be answered, so none
+    /// is in flight while it is held (#237); new ones queue.
     pub async fn hold(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.hold.clone().write_owned().await
     }
@@ -260,13 +261,19 @@ async fn run(
                 None => return,
             },
         };
-        // A leader transfer holds proposals (#57).
-        drop(hold.read().await);
         if !gate.is_open() {
             // As before batching: every proposal its own client_write.
+            // A leader transfer holds proposals (#57): the guard is taken
+            // right before the proposal goes to openraft and kept until
+            // it is answered, so a transfer that holds the lock has none
+            // in flight and none starts after it (#237).
+            let guard = hold.clone().read_owned().await;
             stats.single.fetch_add(1, Ordering::Relaxed);
             let raft = raft.clone();
-            tokio::spawn(async move { submit(&raft, vec![first]).await });
+            tokio::spawn(async move {
+                submit(&raft, vec![first]).await;
+                drop(guard);
+            });
             continue;
         }
         let Ok(permit) = permits.clone().acquire_owned().await else {
@@ -294,9 +301,16 @@ async fn run(
             stats.batches.fetch_add(1, Ordering::Relaxed);
             stats.batched.fetch_add(batch.len() as u64, Ordering::Relaxed);
         }
+        // Checked here, after waiting for the permit, not when the first
+        // proposal was taken: a batch that passed a check made before the
+        // wait was proposed after a leader transfer had read the leader's
+        // last log id, so the target's log was behind and its election
+        // failed (#237).
+        let guard = hold.clone().read_owned().await;
         let raft = raft.clone();
         tokio::spawn(async move {
             submit(&raft, batch).await;
+            drop(guard);
             drop(permit);
         });
     }

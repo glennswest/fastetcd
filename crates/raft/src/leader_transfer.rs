@@ -9,13 +9,17 @@
 //! etcd's `MoveLeader` and openraft 0.10's `transfer_leader` do it:
 //!
 //! 1. only the leader moves leadership, only to a voter;
-//! 2. hold new proposals and wait until the target's log matches the
-//!    leader's last log id (so the target can win, and nothing the old
-//!    leader acknowledged is missing from the new one's log);
+//! 2. hold new proposals (waiting for those in flight to be answered)
+//!    and wait until the target's log matches the leader's last log id
+//!    (so the target can win, and nothing the old leader acknowledged is
+//!    missing from the new one's log);
 //! 3. `TransferLeader` to every other voter, and accept it locally; a
 //!    quorum (per joint config) with the target must accept, else stop
 //!    before the target is asked (a member older than 1.36 answers
 //!    `Unimplemented` and keeps its lease, so it does not count);
+//!    if the leader's log moved meanwhile (an entry proposed outside the
+//!    proposer), back to 2: members holding an entry the target lacks
+//!    would refuse its votes (#237);
 //! 4. `TransferLeader` to the target, which elects; wait until it leads.
 //!
 //! The election is an ordinary one: it is granted only by members whose
@@ -105,8 +109,16 @@ pub async fn move_leader(
 
     tracing::info!(to = format_args!("{target:x}"), "leader transfer starting");
     let started = Instant::now();
+    // Waits for the proposals in flight to be answered (#237).
     let _hold = match proposer {
-        Some(p) => Some(p.hold().await),
+        Some(p) => match tokio::time::timeout_at(deadline, p.hold()).await {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return Err(TransferError::TimedOut(
+                    "the proposals in flight were not answered in time".to_string(),
+                ))
+            }
+        },
         None => None,
     };
 
@@ -114,70 +126,91 @@ pub async fn move_leader(
     // look again once it does, for what was in flight when proposals
     // were held.
     let _ = raft.trigger().heartbeat().await;
-    let (vote, last) = loop {
-        let (vote, last) = vote_and_last(raft);
-        if !vote.is_committed() || vote.leader_id().voted_for() != Some(me) {
+    // Steps 2 and 3, again if the leader's log moved meanwhile: an entry
+    // proposed outside the proposer (a lease expiry, a compaction) after
+    // the target matched would make every member that has it refuse the
+    // target's votes, and an ordinary election would follow (#237).
+    let (req, accepted) = loop {
+        let (vote, last) = loop {
+            let (vote, last) = vote_and_last(raft);
+            if !vote.is_committed() || vote.leader_id().voted_for() != Some(me) {
+                return Err(TransferError::NotLeader);
+            }
+            while matched(raft, target) < last {
+                if Instant::now() >= deadline {
+                    return Err(TransferError::TimedOut(format!(
+                        "member {target:x} did not catch up with the leader's log ({last:?}) in time"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Let RaftCore publish what was in flight, then look again.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if vote_and_last(raft) == (vote, last) {
+                break (vote, last);
+            }
+        };
+
+        tracing::debug!(
+            to = format_args!("{target:x}"),
+            ?last,
+            elapsed = ?started.elapsed(),
+            "leader transfer: the target holds the leader's log"
+        );
+        let req = TransferLeaderRequest { leader_vote: vote, to: target, last_log_id: last };
+
+        // Every voter but the target first, so their leases are waived before
+        // the target asks for their votes.
+        let mut accepted: BTreeSet<NodeId> = BTreeSet::from([target]);
+        let mut refused: Vec<String> = Vec::new();
+        if accept(raft, req.clone()).await.map_err(fatal)? {
+            accepted.insert(me);
+        } else {
             return Err(TransferError::NotLeader);
         }
-        while matched(raft, target) < last {
-            if Instant::now() >= deadline {
-                return Err(TransferError::TimedOut(format!(
-                    "member {target:x} did not catch up with the leader's log ({last:?}) in time"
-                )));
+        let others: Vec<NodeId> = voters.iter().copied().filter(|v| *v != me && *v != target).collect();
+        let mut asks = tokio::task::JoinSet::new();
+        for v in others {
+            let (forwarder, req) = (forwarder.clone(), req.clone());
+            asks.spawn(async move { (v, forwarder.transfer_leader(v, &req, ASK).await) });
+        }
+        while let Some(joined) = asks.join_next().await {
+            let (v, answer) = joined.map_err(fatal)?;
+            match answer {
+                Ok(true) => {
+                    accepted.insert(v);
+                }
+                Ok(false) => refused.push(format!("{v:x}: its vote is not this leader's")),
+                Err(ConfirmError::Older) => refused.push(format!("{v:x}: older than fastetcd 1.36")),
+                Err(ConfirmError::Unreachable(e)) => refused.push(format!("{v:x}: {e}")),
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        // Let RaftCore publish what was in flight, then look again.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if vote_and_last(raft) == (vote, last) {
-            break (vote, last);
+        let quorum = membership
+            .get_joint_config()
+            .iter()
+            .all(|config| config.iter().filter(|v| accepted.contains(v)).count() * 2 > config.len());
+        if !quorum {
+            return Err(TransferError::NoQuorum(format!(
+                "too few members accepted the leader transfer for {target:x} to be elected: {}",
+                refused.join("; ")
+            )));
         }
+        let now = vote_and_last(raft).1;
+        if now == last {
+            break (req, accepted);
+        }
+        if Instant::now() >= deadline {
+            return Err(TransferError::TimedOut(format!(
+                "the leader's log kept moving ({last:?}, then {now:?}); member {target:x} could not be asked"
+            )));
+        }
+        tracing::debug!(
+            to = format_args!("{target:x}"),
+            was = ?last,
+            ?now,
+            "leader transfer: the leader's log moved; waiting for the target again"
+        );
     };
-
-    tracing::debug!(
-        to = format_args!("{target:x}"),
-        ?last,
-        elapsed = ?started.elapsed(),
-        "leader transfer: the target holds the leader's log"
-    );
-    let req = TransferLeaderRequest { leader_vote: vote, to: target, last_log_id: last };
-
-    // Every voter but the target first, so their leases are waived before
-    // the target asks for their votes.
-    let mut accepted: BTreeSet<NodeId> = BTreeSet::from([target]);
-    let mut refused: Vec<String> = Vec::new();
-    if accept(raft, req.clone()).await.map_err(fatal)? {
-        accepted.insert(me);
-    } else {
-        return Err(TransferError::NotLeader);
-    }
-    let others: Vec<NodeId> = voters.iter().copied().filter(|v| *v != me && *v != target).collect();
-    let mut asks = tokio::task::JoinSet::new();
-    for v in others {
-        let (forwarder, req) = (forwarder.clone(), req.clone());
-        asks.spawn(async move { (v, forwarder.transfer_leader(v, &req, ASK).await) });
-    }
-    while let Some(joined) = asks.join_next().await {
-        let (v, answer) = joined.map_err(fatal)?;
-        match answer {
-            Ok(true) => {
-                accepted.insert(v);
-            }
-            Ok(false) => refused.push(format!("{v:x}: its vote is not this leader's")),
-            Err(ConfirmError::Older) => refused.push(format!("{v:x}: older than fastetcd 1.36")),
-            Err(ConfirmError::Unreachable(e)) => refused.push(format!("{v:x}: {e}")),
-        }
-    }
-    let quorum = membership
-        .get_joint_config()
-        .iter()
-        .all(|config| config.iter().filter(|v| accepted.contains(v)).count() * 2 > config.len());
-    if !quorum {
-        return Err(TransferError::NoQuorum(format!(
-            "too few members accepted the leader transfer for {target:x} to be elected: {}",
-            refused.join("; ")
-        )));
-    }
 
     tracing::debug!(
         to = format_args!("{target:x}"),
