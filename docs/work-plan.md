@@ -2391,6 +2391,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Locally against stormcos f7f7ccb: the stage's config rebuilt
       from its own recipe text equals ours value for value; the static
       pods gen-static-pod.py makes from each are byte-identical.
-    - [ ] sc-build: `deploy/check-image.sh` with a stormcos checkout.
-    - [ ] Hand-off on stormcentral#1836 and the issue; the flip waits on
-      stormcos's content golden carrying etcd.json and stormcentral#1846.
+    - [x] sc-build d9f1e0929b (58e3681, stormcos f7f7ccb): `check-image.sh`
+      passed in 297 s: 4 files, layout, same bytes twice, refusals, config
+      equal to the stage's, etcd.json/etcd.env identical.
+    - [x] Hand-off on stormcentral#1836 and stormcos#1659; #257 closed. The
+      flip waits on stormcos's content golden carrying etcd.json and on
+      stormcentral#1846.
