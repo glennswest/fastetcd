@@ -2354,7 +2354,11 @@ Tracked live in the Claude task system. Snapshot of the order:
       dials, from the replicated membership.
     - [x] test `membership_log.rs` (real binary): the line at start and
       after a restart.
-    - [ ] sc-build; release 1.45.2; ship with proof
+    - [x] sc-build of 1360ef9: clippy clean; workspace 577 pass, 1 fail:
+      the new test, on the log's ANSI styling (fixed, ec93453: clippy and
+      the test pass). Release 1.45.2 (702b031, tag `v1.45.2`): `--locked`
+      build reports `fastetcd 1.45.2`, the test passes.
+    - [x] image requested; shipped with proof
       `api:/api/v1/namespaces/kube-system/pods/etcd-{name}/log?container=fastetcd ~ routes follow the replicated membership \(fastetcd#211\)`
       (the message only: the log is ANSI-coloured, which splits
       `members=`; seen in sc-build of 1360ef9, where the test's first
