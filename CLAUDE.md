@@ -70,7 +70,8 @@ Moved to [docs/work-plan.md](docs/work-plan.md) (CLAUDE.md is loaded into every 
   **Metrics port**: axum, `/metrics` + the health routes (plain HTTP).
 - **Async runtime**: `tokio`.
 - **Logging/tracing**: `tracing` + `tracing-subscriber`, `RUST_LOG`.
-- **Ships as**: a special golden, `stormcentral component stage
+- **Ships as**: (moving to this repo's `deploy/build-image.sh`, #257; see
+  03-deploy) a special golden, `stormcentral component stage
   fastetcd` (stormcos `build-goldens.sh` in stage mode, at main's tip;
   `docs/03-deploy.md`); the registry lists `fastetcd` (kind special), and
   `component build fastetcd` starts the same stage. Runs on the node as

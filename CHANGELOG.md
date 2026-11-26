@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-11-26
+- **build:** The fastetcd golden's recipe is now in this repo (#257, stormcentral#1836). `deploy/build-golden.sh fastetcd OUT` (stormcentral's `tree` contract) execs `deploy/build-image.sh`. That builds the three static musl binaries and lays out the stormdbase tree, with `/stormd` linked to the release's stormd, and writes the stage's stormd config, unchanged in value. The static pod is left out: stormcos's content golden generates it from that config. `deploy/check-image.sh [STORMCOS]` checks the tree and that a second build gives the same bytes. Against a stormcos checkout, it also checks that the config and the generated static pod are the stage's. Nodes change nothing until the master flips the registry row.
+
 ### 2026-11-25
 - **fix:** `put_versions_a_put_after_a_compaction_gets_etcds_version` (#220) waits for the first member to exit before restarting it on the same data directory; it only dropped it, which starts the kill, and a restart that found the data file still held exited before it listened (seen once in a full build). Test only.
 - **fix:** `a_stuck_fsync_or_checkpoint_says_which_it_is` no longer flakes with "the checkpoint never returned" (#236). Its wait for the stuck checkpoint to end shared a 10 s deadline with the wait for it to be stuck, which a loaded build VM could use up, and it waited for no checkpoint at all to be in flight. It now waits, on its own 30 s deadline (a checkpoint is 2.5 s of delay plus a real fsync, slow on a busy host), for the checkpoint count to rise past its value when the stuck one was seen, and checks that any checkpoint still in flight is a newer one. Not reproduced in 120 loaded runs (CPU or disk load, old or new test), so the fix removes the shared deadline and the "none in flight" wait rather than a measured cause. Test only.

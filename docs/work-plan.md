@@ -2381,3 +2381,16 @@ Tracked live in the Claude task system. Snapshot of the order:
     ready), (c) close on the build-VM evidence. Nothing built.
     - [x] Queued `--after stormcentral#1805` on (a), as the master asked;
       an owner's (b) or (c) overrides it.
+
+129. **The golden's recipe moves here (#257, stormcentral#1836; master
+    approved).** Same shape as rustkube#403's option A: the golden carries
+    fastetcd's binaries, the stormd link (phase 3, no stormd input) and
+    fastetcd's own config; the static pod is stormcos's content golden's.
+    - [x] `deploy/build-golden.sh` → `deploy/build-image.sh fastetcd OUT`
+      (x86_64 only, as the stage); `deploy/check-image.sh [STORMCOS]`.
+    - [x] Locally against stormcos f7f7ccb: the stage's config rebuilt
+      from its own recipe text equals ours value for value; the static
+      pods gen-static-pod.py makes from each are byte-identical.
+    - [ ] sc-build: `deploy/check-image.sh` with a stormcos checkout.
+    - [ ] Hand-off on stormcentral#1836 and the issue; the flip waits on
+      stormcos's content golden carrying etcd.json and stormcentral#1846.
