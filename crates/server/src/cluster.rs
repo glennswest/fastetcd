@@ -401,6 +401,18 @@ pub fn follow_membership(
                     reconcile(&mut p, &mut d, &nodes, &voters, &gone, self_id);
                 }
                 if !nodes.is_empty() {
+                    // At start and on every change: what raft dials, from
+                    // the replicated membership (fastetcd#211; its live
+                    // proof reads this line in the pod's log).
+                    let dialed = nodes
+                        .iter()
+                        .map(|(id, n)| {
+                            let role = if voters.contains(id) { "" } else { " learner" };
+                            format!("{id:x}={}{role}", n.addr)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    tracing::info!(members = %dialed, "routes follow the replicated membership (fastetcd#211)");
                     known = members;
                 }
                 seen = Some(m);

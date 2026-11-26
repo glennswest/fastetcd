@@ -2342,3 +2342,17 @@ Tracked live in the Claude task system. Snapshot of the order:
       `api:/api/v1/namespaces/kube-system/pods/etcd-{name}/log?container=fastetcd ~ this store starts at revision 1`
       (static pod `etcd`, container `fastetcd`, stormcos
       deploy/static-pods/etcd.yaml).
+
+127. **#211 reopened: its live proof did not hold (stormcentral#1275).**
+    The fix (1.43.0) stands; its proof `log:startup: listening.*version=…1.43.0`
+    was checked against the *install's* log (a `log:` proof), not
+    fastetcd's, and only named a version, so it could not have shown
+    #211's code running.
+    - [x] `cluster::follow_membership` logs, at start and on every
+      membership change, `routes follow the replicated membership
+      (fastetcd#211)` with `members=<id>=<addr>[ learner] …`: what raft
+      dials, from the replicated membership.
+    - [x] test `membership_log.rs` (real binary): the line at start and
+      after a restart.
+    - [ ] sc-build; release 1.45.2; ship with proof
+      `api:/api/v1/namespaces/kube-system/pods/etcd-{name}/log?container=fastetcd ~ routes follow the replicated membership \(fastetcd#211\) members=`
