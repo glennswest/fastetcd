@@ -2363,3 +2363,19 @@ Tracked live in the Claude task system. Snapshot of the order:
       (the message only: the log is ANSI-coloured, which splits
       `members=`; seen in sc-build of 1360ef9, where the test's first
       version failed on it and nothing else failed, 577 pass).
+
+128. **#195 reopened: its live proof did not hold (stormcentral#1275) —
+    owner's decision first.** The suite and adapter (1.42.0) stand as
+    verified on build VMs; the proof `log:ready to serve client requests`
+    read the install's log, which never carries fastetcd's. No proof form
+    can see fastetcd's own log today: `api:` on the pod log answers `null`
+    (stormcentral#1805: `Api::call` parses every body as JSON; #160's
+    re-ship hit it), the kubelet's `containerLogs` has no JSON mode, and
+    the static pod's output is not in `nodes/{name}/proxy/logs/journal`.
+    A test suite itself is invisible to every proof form
+    (stormcentral#1328). Asked on the issue: (a) wait for
+    stormcentral#1805, then re-ship with the pod-log proof (recommended;
+    #160 and #211 wait on the same fix), (b) re-ship now with
+    `api:/api/v1/namespaces/kube-system/pods/etcd-{name} ~ "ready":true`
+    (holds, but shows only that a release carrying 1.42+ runs fastetcd
+    ready), (c) close on the build-VM evidence. Nothing built.
