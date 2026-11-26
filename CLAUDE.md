@@ -10,7 +10,8 @@ Focused on low resource overhead and predictable latency.
 
 ## Version
 
-**`1.45.1`** — a new store's move to revision 1 is logged where it is
+**`1.45.2`** — each member logs the membership raft dials, at start
+and on every change (#211's live proof). 1.45.1: a new store's move to revision 1 is logged where it is
 applied and on every start, so #160's live proof can read it in the pod's
 log. 1.45.0: `Downgrade` ENABLE/CANCEL: a replicated downgrade target
 (1.45 or later) that holds the version gates; `Status.downgrade_info`

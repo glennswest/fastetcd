@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### 2026-11-26
-- **feat:** Each member logs the addresses raft dials, from the replicated membership, at start and on every membership change: `routes follow the replicated membership (fastetcd#211) members=<id>=<peer url>[ learner] …` (ids in hex). #211's live proof (stormcentral#1275) reads it in the `etcd` pod's log; it also shows an operator what a member routes to after a `member add`, `update` or `remove`.
-
 ### 2026-11-25
 - **fix:** `put_versions_a_put_after_a_compaction_gets_etcds_version` (#220) waits for the first member to exit before restarting it on the same data directory; it only dropped it, which starts the kill, and a restart that found the data file still held exited before it listened (seen once in a full build). Test only.
 - **fix:** `a_stuck_fsync_or_checkpoint_says_which_it_is` no longer flakes with "the checkpoint never returned" (#236). Its wait for the stuck checkpoint to end shared a 10 s deadline with the wait for it to be stuck, which a loaded build VM could use up, and it waited for no checkpoint at all to be in flight. It now waits, on its own 30 s deadline (a checkpoint is 2.5 s of delay plus a real fsync, slow on a busy host), for the checkpoint count to rise past its value when the stuck one was seen, and checks that any checkpoint still in flight is a newer one. Not reproduced in 120 loaded runs (CPU or disk load, old or new test), so the fix removes the shared deadline and the "none in flight" wait rather than a measured cause. Test only.
@@ -57,6 +54,11 @@
 - **docs:** #84 on an X9 blade (server1, fastetcd 1579bfa), six hours: RSS floor levels off at 93–98 MiB (max 230 MiB, budget ~385), apiserver GET p99 14.6–18.5 ms under a write load; kube-system leases renewed late in store-wide write stalls of ~20–60 s (cilium-operator's lock: 84 holder changes), filed as #180. `docs/benchmarks/blade-server3.md`, `docs/benchmarks/data/rss-server1/`.
 
 <!-- New unreleased changes go here -->
+
+## [v1.45.2] — 2026-11-26
+
+### Added
+- **feat:** Each member logs the addresses raft dials, from the replicated membership, at start and on every membership change: `routes follow the replicated membership (fastetcd#211) members=<id>=<peer url>[ learner] …` (ids in hex). #211's live proof (stormcentral#1275) reads it in the `etcd` pod's log; it also shows an operator what a member routes to after a `member add`, `update` or `remove`.
 
 ## [v1.45.1] — 2026-11-26
 
