@@ -2332,7 +2332,13 @@ Tracked live in the Claude task system. Snapshot of the order:
       shows it too; the proposer's own line is now debug.
     - [x] test `start_revision_log.rs` (real binary): first write → 2
       and the line; restart → the line again.
-    - [ ] sc-build; release 1.45.1; ship with proof
+    - [x] sc-build of 4e9a79b: build, clippy `--workspace --all-targets -D
+      warnings`, workspace tests `--no-fail-fast`: 577 pass, 0 fail, 82
+      suites (the new test among them). Release 1.45.1 (1148ba0, tag
+      `v1.45.1`): sc-build `--locked` reports `fastetcd 1.45.1`, the new
+      test passes. (A first check of 1148ba0 exited 127: my command ran
+      `./target/debug/fastetcd`; the VM's target dir is elsewhere.)
+    - [x] image requested; shipped with proof
       `api:/api/v1/namespaces/kube-system/pods/etcd-{name}/log?container=fastetcd ~ this store starts at revision 1`
       (static pod `etcd`, container `fastetcd`, stormcos
       deploy/static-pods/etcd.yaml).
