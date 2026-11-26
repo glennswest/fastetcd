@@ -2379,3 +2379,5 @@ Tracked live in the Claude task system. Snapshot of the order:
     `api:/api/v1/namespaces/kube-system/pods/etcd-{name} ~ "ready":true`
     (holds, but shows only that a release carrying 1.42+ runs fastetcd
     ready), (c) close on the build-VM evidence. Nothing built.
+    - [x] Queued `--after stormcentral#1805` on (a), as the master asked;
+      an owner's (b) or (c) overrides it.
