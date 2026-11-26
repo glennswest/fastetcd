@@ -2397,3 +2397,9 @@ Tracked live in the Claude task system. Snapshot of the order:
     - [x] Hand-off on stormcentral#1836 and stormcos#1659; #257 closed. The
       flip waits on stormcos's content golden carrying etcd.json and on
       stormcentral#1846.
+
+130. **#160 reopened again: `api:` on the pod log answered `null`
+    (stormcentral#1275).** The proof form is right; stormcentral's
+    `Api::call` parses a text body as JSON (stormcentral#1805). Queued
+    `--after stormcentral#1805` to re-ship with the same proof; #195 waits
+    on it too and #211's proof will hit it. Nothing to build.
