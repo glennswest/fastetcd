@@ -15,11 +15,30 @@ async fn wait_for_line(member: &spawned::Spawned) -> String {
     loop {
         let text = std::fs::read_to_string(&member.log).unwrap_or_default();
         if let Some(line) = text.lines().find(|l| l.contains(LINE)) {
-            return line.to_string();
+            return strip_ansi(line);
         }
         assert!(tokio::time::Instant::now() < deadline, "no {LINE:?} line:\n{}", member.log_tail());
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The log is coloured (tracing's ANSI styling splits `members=`).
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ESC [ … final letter
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -29,10 +48,10 @@ async fn a_member_logs_the_membership_it_dials_at_start_and_after_a_restart() {
     {
         let mut member = spawned::spawn_fastetcd(&args).await;
         let line = wait_for_line(&member).await;
-        assert!(line.contains("members="), "no members field: {line}");
+        assert!(line.contains("members=") && line.contains("=http://"), "no members field: {line}");
         member.child.kill().await.unwrap();
     }
     let member = spawned::spawn_fastetcd(&args).await;
     let line = wait_for_line(&member).await;
-    assert!(line.contains("members="), "no members field: {line}");
+    assert!(line.contains("members=") && line.contains("=http://"), "no members field: {line}");
 }
