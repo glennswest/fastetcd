@@ -96,11 +96,18 @@ fn propose(state: &ServerState) -> Pin<Box<dyn Future<Output = Result<FastetcdLo
     Box::pin(state.propose(FastetcdLogEntry::StartRevision))
 }
 
-/// While running: a leader of a store at revision 0 proposes
+/// On start, logs the numbering of a store whose log has held the
+/// entry. While running: a leader of a store at revision 0 proposes
 /// `StartRevision` once every member answers as 1.41 or later, so an
 /// empty cluster reports revision 1. Ends once the store has a
 /// revision.
 pub fn follow(state: Arc<ServerState>) {
+    // Said on every start, so the current container's log shows the
+    // numbering after a restart too (fastetcd#160's live proof); the
+    // move itself is logged where it is applied.
+    if state.sm.mvcc().has_start_revision() {
+        tracing::info!("this store starts at revision 1, as etcd's (fastetcd#160)");
+    }
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
@@ -112,7 +119,7 @@ pub fn follow(state: Arc<ServerState>) {
                 continue;
             }
             match propose(&state).await {
-                Ok(_) => tracing::info!("this store starts at revision 1, as etcd's (fastetcd#160)"),
+                Ok(_) => tracing::debug!("proposed the start revision (fastetcd#160)"),
                 Err(e) => tracing::debug!(error = %e, "proposing the start revision"),
             }
         }

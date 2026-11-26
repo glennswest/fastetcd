@@ -2318,3 +2318,21 @@ Tracked live in the Claude task system. Snapshot of the order:
       Not run: ENABLE across several members (the entry replicates as any
       other; `downgrade_gate` asks every member's version first).
       Release 1.45.0.
+
+126. **#160 reopened: its live proof did not hold (stormcentral#1275).**
+    The proof `log:this store starts at revision 1` was checked against
+    the *install's* log, not fastetcd's, and the line was only logged by
+    the leader's background proposer, which loses to the first write on
+    a real node (kube-apiserver writes at once; that path logged
+    nothing). The numbering itself was verified in 1.41.
+    - [x] storage: `apply_start_revision` logs the line when the store
+      moves, on every member, whichever path proposed it.
+    - [x] server: `start_revision::follow` logs it on every start of a
+      store whose log has held the entry, so a restarted container's log
+      shows it too; the proposer's own line is now debug.
+    - [x] test `start_revision_log.rs` (real binary): first write → 2
+      and the line; restart → the line again.
+    - [ ] sc-build; release 1.45.1; ship with proof
+      `api:/api/v1/namespaces/kube-system/pods/etcd-{name}/log?container=fastetcd ~ this store starts at revision 1`
+      (static pod `etcd`, container `fastetcd`, stormcos
+      deploy/static-pods/etcd.yaml).

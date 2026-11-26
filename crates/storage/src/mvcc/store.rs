@@ -919,6 +919,10 @@ impl MvccStore {
             // at its revision: the first write's batch, at 2, then follows
             // it (#223).
             let _ = self.inner.event_tx.send(EventBatch { revision: START_REVISION, events: Vec::new() });
+            // On every member, whichever path proposed it (a first write
+            // or the leader's background proposer): the live proof of
+            // fastetcd#160 reads this line in the pod's log.
+            tracing::info!("this store starts at revision 1, as etcd's (fastetcd#160): start revision applied");
         }
         Ok(state.current_rev)
     }
